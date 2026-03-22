@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TukuProofEventV1",
+  "type": "object",
+  "required": ["event_id", "task_id", "sequence_no", "timestamp", "type", "actor_type"],
+  "properties": {
+    "event_id": {"type": "string"},
+    "task_id": {"type": "string"},
+    "run_id": {"type": "string"},
+    "checkpoint_id": {"type": "string"},
+    "sequence_no": {"type": "integer"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "type": {"type": "string"},
+    "actor_type": {"type": "string"},
+    "actor_id": {"type": "string"},
+    "payload_json": {"type": "string"}
+  }
+}
