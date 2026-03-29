@@ -108,10 +108,15 @@ func BuildViewModel(snapshot Snapshot, ui UIState, host WorkerHost, width int, h
 			fmt.Sprintf("task %s", displayTaskLabel(snapshot.TaskID)),
 			fmt.Sprintf("new shell session %s", ui.Session.SessionID),
 			fmt.Sprintf("phase %s", nonEmpty(snapshot.Phase, "UNKNOWN")),
+			fmt.Sprintf("intent %s", intentDigestLine(snapshot)),
+			fmt.Sprintf("intent readiness %s", intentReadinessLine(snapshot)),
+			fmt.Sprintf("brief %s", briefDigestLine(snapshot)),
+			fmt.Sprintf("brief readiness %s", briefReadinessLine(snapshot)),
 			fmt.Sprintf("worker %s", effectiveWorkerLabel(snapshot, host)),
 			fmt.Sprintf("host %s", hostStatusLine(snapshot, ui, host)),
 			fmt.Sprintf("repo %s", repoLabel(snapshot.Repo)),
 			fmt.Sprintf("continuity %s", continuityLabel(snapshot)),
+			fmt.Sprintf("transcript review %s", transcriptReviewStatusLine(ui.Session)),
 			fmt.Sprintf("recovery %s", operatorStateLabel(snapshot)),
 			fmt.Sprintf("next %s", operatorActionLabel(snapshot)),
 			fmt.Sprintf("readiness %s", operatorReadinessLine(snapshot)),
@@ -123,6 +128,12 @@ func BuildViewModel(snapshot Snapshot, ui UIState, host WorkerHost, width int, h
 			fmt.Sprintf("decision %s", operatorDecisionHeadline(snapshot)),
 			fmt.Sprintf("plan %s", operatorExecutionPlanLine(snapshot)),
 			fmt.Sprintf("command %s", operatorExecutionCommand(snapshot)),
+			fmt.Sprintf("incident triage %s", latestIncidentTriageLine(snapshot)),
+			fmt.Sprintf("incident follow-up %s", incidentFollowUpLine(snapshot)),
+			fmt.Sprintf("incident closure %s", continuityIncidentClosureLine(snapshot)),
+			fmt.Sprintf("incident task risk %s", continuityIncidentTaskRiskLine(snapshot)),
+			fmt.Sprintf("incident triage history %s", continuityIncidentTriageHistoryRollupLine(snapshot)),
+			fmt.Sprintf("incident follow-up history %s", continuityIncidentFollowUpHistoryRollupLine(snapshot)),
 			fmt.Sprintf("progress %s", primaryActionInFlightLine(ui)),
 			fmt.Sprintf("guidance %s", operatorDecisionGuidance(snapshot)),
 			fmt.Sprintf("caution %s", operatorDecisionIntegrity(snapshot)),
@@ -308,12 +319,30 @@ func inspectorBrief(snapshot Snapshot) []string {
 	lines := []string{
 		truncateWithEllipsis(snapshot.Brief.Objective, 48),
 		fmt.Sprintf("action %s", nonEmpty(snapshot.Brief.NormalizedAction, "n/a")),
+		fmt.Sprintf("posture %s", humanizeConstant(nonEmpty(snapshot.Brief.Posture, "unknown"))),
+	}
+	if snapshot.Brief.RequiresClarification {
+		lines = append(lines, "readiness clarification needed")
+	} else {
+		lines = append(lines, "readiness execution oriented")
+	}
+	if outcome := strings.TrimSpace(snapshot.Brief.RequestedOutcome); outcome != "" {
+		lines = append(lines, truncateWithEllipsis("outcome "+outcome, 64))
+	}
+	if scope := strings.TrimSpace(snapshot.Brief.ScopeSummary); scope != "" {
+		lines = append(lines, truncateWithEllipsis("scope "+scope, 64))
 	}
 	if len(snapshot.Brief.Constraints) > 0 {
 		lines = append(lines, fmt.Sprintf("constraints %s", strings.Join(snapshot.Brief.Constraints, ", ")))
 	}
 	if len(snapshot.Brief.DoneCriteria) > 0 {
 		lines = append(lines, fmt.Sprintf("done %s", strings.Join(snapshot.Brief.DoneCriteria, ", ")))
+	}
+	if len(snapshot.Brief.AmbiguityFlags) > 0 {
+		lines = append(lines, truncateWithEllipsis("ambiguity "+strings.Join(snapshot.Brief.AmbiguityFlags, ", "), 64))
+	}
+	if len(snapshot.Brief.ClarificationQuestions) > 0 {
+		lines = append(lines, truncateWithEllipsis("clarification "+snapshot.Brief.ClarificationQuestions[0], 64))
 	}
 	return lines
 }
@@ -325,10 +354,121 @@ func inspectorIntent(snapshot Snapshot) []string {
 			"Plan the work here before cloning or initializing a repository.",
 		}
 	}
+	if snapshot.CompiledIntent != nil {
+		intentSummary := snapshot.CompiledIntent
+		lines := []string{
+			truncateWithEllipsis(nonEmpty(intentSummary.Digest, "intent advisory unavailable"), 64),
+			fmt.Sprintf("posture %s | readiness %s", humanizeConstant(intentSummary.Posture), humanizeConstant(intentSummary.ExecutionReadiness)),
+		}
+		if objective := strings.TrimSpace(intentSummary.Objective); objective != "" {
+			lines = append(lines, truncateWithEllipsis("objective "+objective, 64))
+		}
+		if scope := strings.TrimSpace(intentSummary.ScopeSummary); scope != "" {
+			lines = append(lines, truncateWithEllipsis(scope, 64))
+		}
+		if len(intentSummary.AmbiguityFlags) > 0 {
+			lines = append(lines, truncateWithEllipsis("ambiguity "+strings.Join(intentSummary.AmbiguityFlags, ", "), 64))
+		}
+		if len(intentSummary.ClarificationQuestions) > 0 {
+			lines = append(lines, truncateWithEllipsis("clarification "+intentSummary.ClarificationQuestions[0], 64))
+		}
+		return lines
+	}
 	if snapshot.IntentSummary == "" {
 		return []string{"No intent summary."}
 	}
 	return []string{snapshot.IntentSummary}
+}
+
+func intentDigestLine(snapshot Snapshot) string {
+	if isScratchIntakeSnapshot(snapshot) {
+		return "local scratch intake"
+	}
+	if snapshot.CompiledIntent != nil {
+		if digest := strings.TrimSpace(snapshot.CompiledIntent.Digest); digest != "" {
+			return digest
+		}
+		if objective := strings.TrimSpace(snapshot.CompiledIntent.Objective); objective != "" {
+			return truncateWithEllipsis(objective, 72)
+		}
+		if readiness := strings.TrimSpace(snapshot.CompiledIntent.ExecutionReadiness); readiness != "" {
+			return humanizeConstant(readiness)
+		}
+	}
+	if summary := strings.TrimSpace(snapshot.IntentSummary); summary != "" {
+		return truncateWithEllipsis(summary, 72)
+	}
+	if class := strings.TrimSpace(snapshot.IntentClass); class != "" {
+		return humanizeConstant(class)
+	}
+	return "n/a"
+}
+
+func intentReadinessLine(snapshot Snapshot) string {
+	if isScratchIntakeSnapshot(snapshot) {
+		return "local-only"
+	}
+	if snapshot.CompiledIntent == nil {
+		return "unknown"
+	}
+	if snapshot.CompiledIntent.RequiresClarification {
+		return "clarification needed"
+	}
+	if readiness := strings.TrimSpace(snapshot.CompiledIntent.ExecutionReadiness); readiness != "" {
+		return humanizeConstant(readiness)
+	}
+	if posture := strings.TrimSpace(snapshot.CompiledIntent.Posture); posture != "" {
+		return humanizeConstant(posture)
+	}
+	return "unknown"
+}
+
+func briefDigestLine(snapshot Snapshot) string {
+	if isScratchIntakeSnapshot(snapshot) {
+		return "local scratch intake"
+	}
+	if snapshot.Brief == nil {
+		return "n/a"
+	}
+	if snapshot.Brief.RequiresClarification {
+		return "clarification-needed brief posture in bounded recent evidence"
+	}
+	switch strings.TrimSpace(snapshot.Brief.Posture) {
+	case "PLANNING_ORIENTED":
+		return "planning-oriented brief posture in bounded recent evidence"
+	case "VALIDATION_ORIENTED":
+		return "validation-oriented brief posture in bounded recent evidence"
+	case "REPAIR_ORIENTED":
+		return "repair-oriented brief posture in bounded recent evidence"
+	case "EXECUTION_READY":
+		return "execution-ready brief posture in bounded recent evidence"
+	default:
+		return "clarification-needed brief posture in bounded recent evidence"
+	}
+}
+
+func briefReadinessLine(snapshot Snapshot) string {
+	if isScratchIntakeSnapshot(snapshot) {
+		return "local-only"
+	}
+	if snapshot.Brief == nil {
+		return "unknown"
+	}
+	if snapshot.Brief.RequiresClarification {
+		return "clarification needed"
+	}
+	switch strings.TrimSpace(snapshot.Brief.Posture) {
+	case "PLANNING_ORIENTED":
+		return "planning oriented"
+	case "VALIDATION_ORIENTED":
+		return "validation oriented"
+	case "REPAIR_ORIENTED":
+		return "repair oriented"
+	case "EXECUTION_READY":
+		return "execution ready"
+	default:
+		return "unknown"
+	}
 }
 
 func inspectorCheckpoint(snapshot Snapshot) []string {
@@ -458,10 +598,60 @@ func inspectorWorkerSession(host WorkerHost, session SessionState) []string {
 		sessionRegistrySummary(session),
 		fmt.Sprintf("preferred %s", nonEmpty(string(session.WorkerPreference), "auto")),
 		fmt.Sprintf("resolved %s", nonEmpty(string(session.ResolvedWorker), "unknown")),
-		fmt.Sprintf("worker session %s", nonEmpty(session.WorkerSessionID, "none")),
+		fmt.Sprintf("worker session %s (%s)", nonEmpty(session.WorkerSessionID, "none"), nonEmpty(string(session.WorkerSessionIDSource), "none")),
 		fmt.Sprintf("attach %s", nonEmpty(string(session.AttachCapability), "none")),
 		fmt.Sprintf("mode %s", nonEmpty(string(status.Mode), "unknown")),
 		fmt.Sprintf("state %s", nonEmpty(string(status.State), "unknown")),
+	}
+	if current, ok := knownShellSessionByID(session, session.SessionID); ok {
+		if state := strings.TrimSpace(current.TranscriptState); state != "" {
+			lines = append(lines, fmt.Sprintf("transcript %s retained=%d dropped=%d limit=%d", state, current.TranscriptRetainedChunks, current.TranscriptDroppedChunks, current.TranscriptRetentionLimit))
+		}
+		if detail := transcriptStateDetailLine(current); detail != "" {
+			lines = append(lines, detail)
+		}
+		if current.TranscriptReviewedUpTo > 0 {
+			scope := "all-sources"
+			if strings.TrimSpace(current.TranscriptReviewSource) != "" {
+				scope = current.TranscriptReviewSource
+			}
+			lines = append(lines, fmt.Sprintf("review up to seq %d (%s)", current.TranscriptReviewedUpTo, scope))
+			if !current.TranscriptReviewAt.IsZero() {
+				lines = append(lines, fmt.Sprintf("reviewed at %s", current.TranscriptReviewAt.Format("15:04:05")))
+			}
+			if current.TranscriptReviewStale {
+				lines = append(lines, fmt.Sprintf("newer retained evidence exists (+%d seq)", max(1, current.TranscriptReviewNewer)))
+				if current.TranscriptReviewOldestUnreviewed > 0 && current.TranscriptNewestSequence >= current.TranscriptReviewOldestUnreviewed {
+					lines = append(lines, fmt.Sprintf("unreviewed retained range %d-%d", current.TranscriptReviewOldestUnreviewed, current.TranscriptNewestSequence))
+				}
+			} else {
+				lines = append(lines, "review reaches latest retained transcript evidence")
+			}
+			if state := strings.TrimSpace(current.TranscriptReviewClosureState); state != "" && state != "none" {
+				lines = append(lines, "review closure "+state)
+			}
+			if note := strings.TrimSpace(current.TranscriptReviewSummary); note != "" {
+				lines = append(lines, truncateWithEllipsis("review note "+note, 64))
+			}
+		}
+		if len(current.TranscriptRecentReviews) > 0 {
+			lines = append(lines, "recent review markers:")
+			limit := min(2, len(current.TranscriptRecentReviews))
+			for i := 0; i < limit; i++ {
+				review := current.TranscriptRecentReviews[i]
+				scope := "all-sources"
+				if strings.TrimSpace(review.SourceFilter) != "" {
+					scope = review.SourceFilter
+				}
+				lines = append(lines, fmt.Sprintf("seq<=%d (%s) stale=%t", review.ReviewedUpToSequence, scope, review.StaleBehindLatest))
+			}
+		}
+	}
+	if target, ok := latestKnownShellSessionByClass(session, KnownShellSessionClassAttachable); ok {
+		lines = append(lines, fmt.Sprintf("reattach target %s (%s)", shortTaskID(target.SessionID), sessionWorkerLabel(target)))
+		if guidance := strings.TrimSpace(target.ReattachGuidance); guidance != "" {
+			lines = append(lines, truncateWithEllipsis(guidance, 64))
+		}
 	}
 	if !session.StartedAt.IsZero() {
 		lines = append(lines, fmt.Sprintf("started %s", session.StartedAt.Format("15:04:05")))
@@ -487,6 +677,16 @@ func inspectorWorkerSession(host WorkerHost, session SessionState) []string {
 		lines = append(lines, fmt.Sprintf("%s %s", evt.CreatedAt.Format("15:04"), truncateWithEllipsis(evt.Summary, 48)))
 	}
 	return lines
+}
+
+func knownShellSessionByID(session SessionState, sessionID string) (KnownShellSession, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	for _, known := range session.KnownSessions {
+		if strings.TrimSpace(known.SessionID) == sessionID {
+			return known, true
+		}
+	}
+	return KnownShellSession{}, false
 }
 
 func inspectorProof(snapshot Snapshot) []string {
@@ -548,6 +748,36 @@ func inspectorOperator(snapshot Snapshot, ui UIState) []string {
 	}
 	if receipt := latestOperatorReceiptLine(snapshot); receipt != "n/a" {
 		lines = append(lines, "receipt "+truncateWithEllipsis(receipt, 64))
+	}
+	if ack := latestReviewGapAcknowledgmentLine(snapshot); ack != "n/a" {
+		lines = append(lines, "review ack "+truncateWithEllipsis(ack, 64))
+	}
+	if transition := latestTransitionReceiptLine(snapshot); transition != "n/a" {
+		lines = append(lines, "transition "+truncateWithEllipsis(transition, 64))
+	}
+	if transitionRisk := transitionRiskSummaryLine(snapshot); transitionRisk != "n/a" {
+		lines = append(lines, "transition risk "+truncateWithEllipsis(transitionRisk, 64))
+	}
+	if incident := continuityIncidentSummaryLine(snapshot); incident != "n/a" {
+		lines = append(lines, "incident "+truncateWithEllipsis(incident, 64))
+	}
+	if triage := latestIncidentTriageLine(snapshot); triage != "n/a" {
+		lines = append(lines, "incident triage "+truncateWithEllipsis(triage, 64))
+	}
+	if followUp := incidentFollowUpLine(snapshot); followUp != "n/a" {
+		lines = append(lines, "incident follow-up "+truncateWithEllipsis(followUp, 64))
+	}
+	if closure := continuityIncidentClosureLine(snapshot); closure != "n/a" {
+		lines = append(lines, "incident closure "+truncateWithEllipsis(closure, 64))
+	}
+	if taskRisk := continuityIncidentTaskRiskLine(snapshot); taskRisk != "n/a" {
+		lines = append(lines, "incident task risk "+truncateWithEllipsis(taskRisk, 64))
+	}
+	if triageHistory := continuityIncidentTriageHistoryRollupLine(snapshot); triageHistory != "n/a" {
+		lines = append(lines, "incident triage history "+truncateWithEllipsis(triageHistory, 64))
+	}
+	if followUpHistory := continuityIncidentFollowUpHistoryRollupLine(snapshot); followUpHistory != "n/a" {
+		lines = append(lines, "incident follow-up history "+truncateWithEllipsis(followUpHistory, 64))
 	}
 	for _, delta := range operatorActionResultDeltas(ui, 3) {
 		lines = append(lines, "delta "+truncateWithEllipsis(delta, 64))
@@ -615,6 +845,39 @@ func buildActivityLines(snapshot Snapshot, host WorkerHost, ui UIState) []string
 	}
 	for _, receipt := range recentOperatorReceiptLines(snapshot, 2) {
 		lines = append(lines, receipt)
+	}
+	for _, transition := range recentTransitionReceiptLines(snapshot, 2) {
+		lines = append(lines, transition)
+	}
+	if transitionRisk := transitionRiskActivityLine(snapshot); transitionRisk != "n/a" {
+		lines = append(lines, transitionRisk)
+	}
+	if incident := continuityIncidentActivityLine(snapshot); incident != "n/a" {
+		lines = append(lines, incident)
+	}
+	if triage := incidentTriageActivityLine(snapshot); triage != "n/a" {
+		lines = append(lines, triage)
+	}
+	if triageHistory := incidentTriageHistoryActivityLine(snapshot); triageHistory != "n/a" {
+		lines = append(lines, triageHistory)
+	}
+	if followUpHistory := incidentFollowUpHistoryActivityLine(snapshot); followUpHistory != "n/a" {
+		lines = append(lines, followUpHistory)
+	}
+	if closure := incidentClosureActivityLine(snapshot); closure != "n/a" {
+		lines = append(lines, closure)
+	}
+	if taskRisk := incidentTaskRiskActivityLine(snapshot); taskRisk != "n/a" {
+		lines = append(lines, taskRisk)
+	}
+	for _, triageEntry := range recentIncidentTriageLines(snapshot, 2) {
+		lines = append(lines, triageEntry)
+	}
+	for _, followUpEntry := range recentIncidentFollowUpLines(snapshot, 2) {
+		lines = append(lines, followUpEntry)
+	}
+	for _, closureEntry := range recentIncidentClosureLines(snapshot, 2) {
+		lines = append(lines, closureEntry)
 	}
 	if host != nil {
 		for _, line := range host.ActivityLines(3) {
@@ -943,6 +1206,45 @@ func latestOperatorReceiptLine(snapshot Snapshot) string {
 	if snapshot.LatestOperatorStepReceipt.ReceiptID != "" {
 		line += " | " + shortTaskID(snapshot.LatestOperatorStepReceipt.ReceiptID)
 	}
+	if snapshot.LatestOperatorStepReceipt.ReviewGapPresent {
+		if snapshot.LatestOperatorStepReceipt.ReviewGapAcknowledged {
+			line += " | review-gap acknowledged"
+		} else {
+			line += " | review-gap unacknowledged"
+		}
+	}
+	if snapshot.LatestOperatorStepReceipt.TransitionReceiptID != "" {
+		kind := strings.TrimSpace(strings.ToLower(strings.ReplaceAll(snapshot.LatestOperatorStepReceipt.TransitionKind, "_", " ")))
+		if kind != "" {
+			line += " | " + kind
+		}
+		line += " | " + shortTaskID(snapshot.LatestOperatorStepReceipt.TransitionReceiptID)
+	}
+	return line
+}
+
+func latestReviewGapAcknowledgmentLine(snapshot Snapshot) string {
+	if snapshot.LatestTranscriptReviewGapAcknowledgment == nil {
+		return "n/a"
+	}
+	ack := snapshot.LatestTranscriptReviewGapAcknowledgment
+	class := strings.TrimSpace(ack.Class)
+	if class == "" {
+		class = "unknown"
+	}
+	line := class
+	if ack.SessionID != "" {
+		line += " | " + shortTaskID(ack.SessionID)
+	}
+	if ack.OldestUnreviewedSequence > 0 && ack.NewestRetainedSequence >= ack.OldestUnreviewedSequence {
+		line += fmt.Sprintf(" | unreviewed %d-%d", ack.OldestUnreviewedSequence, ack.NewestRetainedSequence)
+	}
+	if ack.StaleBehindCurrent {
+		line += fmt.Sprintf(" | newer +%d", max(1, ack.NewerRetainedCount))
+	}
+	if note := strings.TrimSpace(ack.Summary); note != "" {
+		line += " | " + note
+	}
 	return line
 }
 
@@ -957,6 +1259,459 @@ func recentOperatorReceiptLines(snapshot Snapshot, limit int) []string {
 	for _, item := range snapshot.RecentOperatorStepReceipts[:limit] {
 		summary := nonEmpty(strings.TrimSpace(item.Summary), operatorActionDisplayName(item.ActionHandle))
 		out = append(out, fmt.Sprintf("%s  operator %s %s", item.CreatedAt.Format("15:04:05"), strings.ToLower(nonEmpty(item.ResultClass, "recorded")), truncateWithEllipsis(summary, 72)))
+	}
+	return out
+}
+
+func latestTransitionReceiptLine(snapshot Snapshot) string {
+	if snapshot.LatestContinuityTransitionReceipt == nil {
+		return "n/a"
+	}
+	item := snapshot.LatestContinuityTransitionReceipt
+	kind := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(item.TransitionKind), "_", " "))
+	if kind == "" {
+		kind = "transition"
+	}
+	line := kind
+	if strings.TrimSpace(item.HandoffStateBefore) != "" || strings.TrimSpace(item.HandoffStateAfter) != "" {
+		line += fmt.Sprintf(" | %s -> %s", nonEmpty(item.HandoffStateBefore, "n/a"), nonEmpty(item.HandoffStateAfter, "n/a"))
+	}
+	if item.ReviewGapPresent {
+		if item.AcknowledgmentPresent {
+			line += " | review-gap acknowledged"
+		} else {
+			line += " | review-gap unacknowledged"
+		}
+	}
+	if note := strings.TrimSpace(item.Summary); note != "" {
+		line += " | " + note
+	}
+	if item.ReceiptID != "" {
+		line += " | " + shortTaskID(item.ReceiptID)
+	}
+	return line
+}
+
+func recentTransitionReceiptLines(snapshot Snapshot, limit int) []string {
+	if len(snapshot.RecentContinuityTransitionReceipts) == 0 {
+		return nil
+	}
+	if limit <= 0 || limit > len(snapshot.RecentContinuityTransitionReceipts) {
+		limit = len(snapshot.RecentContinuityTransitionReceipts)
+	}
+	out := make([]string, 0, limit)
+	for _, item := range snapshot.RecentContinuityTransitionReceipts[:limit] {
+		kind := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(item.TransitionKind), "_", " "))
+		if kind == "" {
+			kind = "transition"
+		}
+		risk := "review-current"
+		if item.ReviewGapPresent {
+			if item.AcknowledgmentPresent {
+				risk = "review-gap acknowledged"
+			} else {
+				risk = "review-gap unacknowledged"
+			}
+		}
+		delta := fmt.Sprintf("%s -> %s", nonEmpty(item.HandoffStateBefore, "n/a"), nonEmpty(item.HandoffStateAfter, "n/a"))
+		out = append(out, fmt.Sprintf("%s  %s %s (%s)", item.CreatedAt.Format("15:04:05"), kind, delta, risk))
+	}
+	return out
+}
+
+func transitionRiskSummaryLine(snapshot Snapshot) string {
+	risk := snapshot.ContinuityTransitionRiskSummary
+	if risk == nil {
+		return "n/a"
+	}
+	if note := strings.TrimSpace(risk.Summary); note != "" {
+		return note
+	}
+	if risk.WindowSize <= 0 {
+		return "no transition receipts in bounded window"
+	}
+	return fmt.Sprintf(
+		"window=%d review-gap=%d unack=%d stale=%d source-scoped=%d",
+		risk.WindowSize,
+		risk.ReviewGapTransitions,
+		risk.UnacknowledgedReviewGapTransitions,
+		risk.StaleReviewPostureTransitions,
+		risk.SourceScopedReviewPostureTransitions,
+	)
+}
+
+func transitionRiskActivityLine(snapshot Snapshot) string {
+	risk := snapshot.ContinuityTransitionRiskSummary
+	if risk == nil || risk.WindowSize <= 0 {
+		return "n/a"
+	}
+	if risk.OperationallyNotable {
+		return fmt.Sprintf(
+			"risk    transitions window=%d review-gap=%d unack=%d stale=%d",
+			risk.WindowSize,
+			risk.ReviewGapTransitions,
+			risk.UnacknowledgedReviewGapTransitions,
+			risk.StaleReviewPostureTransitions,
+		)
+	}
+	return fmt.Sprintf("risk    transitions window=%d no explicit review-gap risk signals", risk.WindowSize)
+}
+
+func continuityIncidentSummaryLine(snapshot Snapshot) string {
+	incident := snapshot.ContinuityIncidentSummary
+	if incident == nil {
+		return "n/a"
+	}
+	if note := strings.TrimSpace(incident.Summary); note != "" {
+		return note
+	}
+	return fmt.Sprintf(
+		"review-gap=%t stale-or-unreviewed=%t source-scoped=%t unresolved=%t failed=%d recovery=%d",
+		incident.ReviewGapPresent,
+		incident.StaleOrUnreviewedReviewPosture,
+		incident.SourceScopedReviewPosture,
+		incident.UnresolvedContinuityAmbiguity,
+		incident.NearbyFailedOrInterruptedRuns,
+		incident.NearbyRecoveryActions,
+	)
+}
+
+func continuityIncidentActivityLine(snapshot Snapshot) string {
+	incident := snapshot.ContinuityIncidentSummary
+	if incident == nil {
+		return "n/a"
+	}
+	if incident.OperationallyNotable {
+		return fmt.Sprintf(
+			"risk    incident review-gap=%t stale=%t unresolved=%t failed=%d recovery=%d",
+			incident.ReviewGapPresent,
+			incident.StaleOrUnreviewedReviewPosture,
+			incident.UnresolvedContinuityAmbiguity,
+			incident.NearbyFailedOrInterruptedRuns,
+			incident.NearbyRecoveryActions,
+		)
+	}
+	return "risk    incident no explicit continuity incident risk flags"
+}
+
+func latestIncidentTriageLine(snapshot Snapshot) string {
+	if snapshot.LatestContinuityIncidentTriageReceipt == nil {
+		return "n/a"
+	}
+	item := snapshot.LatestContinuityIncidentTriageReceipt
+	posture := strings.TrimSpace(strings.ToLower(strings.ReplaceAll(item.Posture, "_", " ")))
+	if posture == "" {
+		posture = "triaged"
+	}
+	line := posture
+	if item.AnchorTransitionReceiptID != "" {
+		line += " | anchor " + shortTaskID(item.AnchorTransitionReceiptID)
+	}
+	if item.ReviewGapPresent {
+		if item.AcknowledgmentPresent {
+			line += " | review-gap acknowledged"
+		} else {
+			line += " | review-gap unacknowledged"
+		}
+	}
+	if note := strings.TrimSpace(item.Summary); note != "" {
+		line += " | " + note
+	}
+	return line
+}
+
+func incidentFollowUpLine(snapshot Snapshot) string {
+	if snapshot.ContinuityIncidentFollowUp == nil {
+		return "n/a"
+	}
+	item := snapshot.ContinuityIncidentFollowUp
+	line := strings.TrimSpace(item.Digest)
+	if line == "" {
+		state := strings.TrimSpace(strings.ToLower(strings.ReplaceAll(item.State, "_", " ")))
+		if state == "" {
+			state = "none"
+		}
+		line = state
+	}
+	if item.FollowUpAdvised {
+		line += " | advisory open"
+	}
+	if item.TriageBehindLatest {
+		line += " | triage behind latest transition"
+	}
+	if item.TriagedUnderReviewRisk {
+		line += " | triaged under review risk"
+	}
+	if note := strings.TrimSpace(item.WindowAdvisory); note != "" {
+		line += " | " + note
+	}
+	if note := strings.TrimSpace(item.Advisory); note != "" {
+		lowerLine := strings.ToLower(line)
+		lowerNote := strings.ToLower(note)
+		if !strings.Contains(lowerLine, lowerNote) {
+			line += " | " + note
+		}
+	}
+	return line
+}
+
+func continuityIncidentClosureLine(snapshot Snapshot) string {
+	if snapshot.ContinuityIncidentFollowUp == nil || snapshot.ContinuityIncidentFollowUp.ClosureIntelligence == nil {
+		return "n/a"
+	}
+	item := snapshot.ContinuityIncidentFollowUp.ClosureIntelligence
+	line := strings.TrimSpace(item.Digest)
+	if line == "" {
+		class := strings.TrimSpace(strings.ToLower(strings.ReplaceAll(item.Class, "_", " ")))
+		if class == "" {
+			class = "none"
+		}
+		line = class
+	}
+	if window := strings.TrimSpace(item.WindowAdvisory); window != "" {
+		line += " | " + window
+	}
+	if detail := strings.TrimSpace(item.Detail); detail != "" {
+		lowerLine := strings.ToLower(line)
+		lowerDetail := strings.ToLower(detail)
+		if !strings.Contains(lowerLine, lowerDetail) {
+			line += " | " + detail
+		}
+	}
+	return line
+}
+
+func continuityIncidentTaskRiskLine(snapshot Snapshot) string {
+	item := snapshot.ContinuityIncidentTaskRisk
+	if item == nil {
+		return "n/a"
+	}
+	line := strings.TrimSpace(item.Digest)
+	if line == "" {
+		line = strings.TrimSpace(strings.ToLower(strings.ReplaceAll(item.Class, "_", " ")))
+	}
+	if line == "" {
+		line = "none"
+	}
+	if window := strings.TrimSpace(item.WindowAdvisory); window != "" {
+		line += " | " + window
+	}
+	if detail := strings.TrimSpace(item.Detail); detail != "" {
+		lowerLine := strings.ToLower(line)
+		lowerDetail := strings.ToLower(detail)
+		if !strings.Contains(lowerLine, lowerDetail) {
+			line += " | " + detail
+		}
+	}
+	return line
+}
+
+func incidentTriageActivityLine(snapshot Snapshot) string {
+	if snapshot.ContinuityIncidentFollowUp == nil {
+		return "n/a"
+	}
+	item := snapshot.ContinuityIncidentFollowUp
+	digest := strings.TrimSpace(item.Digest)
+	if digest == "" {
+		digest = strings.TrimSpace(strings.ToLower(strings.ReplaceAll(item.State, "_", " ")))
+	}
+	if digest == "" {
+		digest = "none"
+	}
+	if window := strings.TrimSpace(item.WindowAdvisory); window != "" {
+		return fmt.Sprintf("risk    follow-up %s | %s", digest, window)
+	}
+	return fmt.Sprintf("risk    follow-up %s", digest)
+}
+
+func incidentClosureActivityLine(snapshot Snapshot) string {
+	if snapshot.ContinuityIncidentFollowUp == nil || snapshot.ContinuityIncidentFollowUp.ClosureIntelligence == nil {
+		return "n/a"
+	}
+	item := snapshot.ContinuityIncidentFollowUp.ClosureIntelligence
+	digest := strings.TrimSpace(item.Digest)
+	if digest == "" {
+		digest = strings.TrimSpace(strings.ToLower(strings.ReplaceAll(item.Class, "_", " ")))
+	}
+	if digest == "" {
+		digest = "none"
+	}
+	if item.OperationallyUnresolved || item.ClosureAppearsWeak {
+		return fmt.Sprintf(
+			"risk    incident-closure %s | weak=%t reopened=%t loop=%t stagnant=%t triaged-without-follow-up=%t",
+			digest,
+			item.ClosureAppearsWeak,
+			item.ReopenedAfterClosure,
+			item.RepeatedReopenLoop,
+			item.StagnantProgression,
+			item.TriagedWithoutFollowUp,
+		)
+	}
+	return fmt.Sprintf("risk    incident-closure %s | stable bounded posture in recent evidence", digest)
+}
+
+func incidentTaskRiskActivityLine(snapshot Snapshot) string {
+	item := snapshot.ContinuityIncidentTaskRisk
+	if item == nil {
+		return "n/a"
+	}
+	digest := strings.TrimSpace(item.Digest)
+	if digest == "" {
+		digest = strings.TrimSpace(strings.ToLower(strings.ReplaceAll(item.Class, "_", " ")))
+	}
+	if digest == "" {
+		digest = "none"
+	}
+	if item.RecurringWeakClosure || item.RecurringUnresolved || item.RecurringStagnantFollowUp || item.RecurringTriagedWithoutFollowUp {
+		return fmt.Sprintf(
+			"risk    task-incident %s | weak=%t unresolved=%t stagnant=%t triaged-without-follow-up=%t anchors=%d",
+			digest,
+			item.RecurringWeakClosure,
+			item.RecurringUnresolved,
+			item.RecurringStagnantFollowUp,
+			item.RecurringTriagedWithoutFollowUp,
+			item.DistinctAnchors,
+		)
+	}
+	return fmt.Sprintf("risk    task-incident %s | stable bounded recent incident posture", digest)
+}
+
+func continuityIncidentTriageHistoryRollupLine(snapshot Snapshot) string {
+	rollup := snapshot.ContinuityIncidentTriageHistoryRollup
+	if rollup == nil {
+		return "n/a"
+	}
+	if note := strings.TrimSpace(rollup.Summary); note != "" {
+		return note
+	}
+	if rollup.WindowSize <= 0 {
+		return "no triage receipts in bounded window"
+	}
+	return fmt.Sprintf(
+		"window=%d anchors=%d open=%d behind-latest=%d repeated=%d",
+		rollup.WindowSize,
+		rollup.DistinctAnchors,
+		rollup.AnchorsWithOpenFollowUp,
+		rollup.AnchorsBehindLatestTransition,
+		rollup.AnchorsRepeatedWithoutProgression,
+	)
+}
+
+func incidentTriageHistoryActivityLine(snapshot Snapshot) string {
+	rollup := snapshot.ContinuityIncidentTriageHistoryRollup
+	if rollup == nil || rollup.WindowSize <= 0 {
+		return "n/a"
+	}
+	if rollup.OperationallyNotable {
+		return fmt.Sprintf(
+			"risk    triage-history window=%d anchors=%d open=%d behind-latest=%d repeated=%d",
+			rollup.WindowSize,
+			rollup.DistinctAnchors,
+			rollup.AnchorsWithOpenFollowUp,
+			rollup.AnchorsBehindLatestTransition,
+			rollup.AnchorsRepeatedWithoutProgression,
+		)
+	}
+	return fmt.Sprintf("risk    triage-history window=%d no open follow-up posture signals", rollup.WindowSize)
+}
+
+func continuityIncidentFollowUpHistoryRollupLine(snapshot Snapshot) string {
+	rollup := snapshot.ContinuityIncidentFollowUpHistoryRollup
+	if rollup == nil {
+		return "n/a"
+	}
+	if rollup.WindowSize <= 0 {
+		return "bounded window no follow-up receipts"
+	}
+	return fmt.Sprintf(
+		"bounded window anchors=%d open=%d reopened=%d triaged-without-follow-up=%d repeated=%d",
+		rollup.DistinctAnchors,
+		rollup.AnchorsWithOpenFollowUp,
+		rollup.AnchorsReopened,
+		rollup.AnchorsTriagedWithoutFollowUp,
+		rollup.AnchorsRepeatedWithoutProgression,
+	)
+}
+
+func incidentFollowUpHistoryActivityLine(snapshot Snapshot) string {
+	rollup := snapshot.ContinuityIncidentFollowUpHistoryRollup
+	if rollup == nil || rollup.WindowSize <= 0 {
+		return "n/a"
+	}
+	if rollup.OperationallyNotable {
+		return fmt.Sprintf(
+			"risk    followup-history bounded anchors=%d open=%d reopened=%d triaged-without-followup=%d repeated=%d",
+			rollup.DistinctAnchors,
+			rollup.AnchorsWithOpenFollowUp,
+			rollup.AnchorsReopened,
+			rollup.AnchorsRepeatedWithoutProgression,
+			rollup.AnchorsTriagedWithoutFollowUp,
+		)
+	}
+	return "risk    followup-history bounded window has no open or lagging follow-up posture signals"
+}
+
+func recentIncidentTriageLines(snapshot Snapshot, limit int) []string {
+	if len(snapshot.RecentContinuityIncidentTriageReceipts) == 0 {
+		return nil
+	}
+	if limit <= 0 || limit > len(snapshot.RecentContinuityIncidentTriageReceipts) {
+		limit = len(snapshot.RecentContinuityIncidentTriageReceipts)
+	}
+	out := make([]string, 0, limit)
+	for _, item := range snapshot.RecentContinuityIncidentTriageReceipts[:limit] {
+		posture := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(item.Posture), "_", " "))
+		if posture == "" {
+			posture = "triaged"
+		}
+		anchor := nonEmpty(shortTaskID(item.AnchorTransitionReceiptID), "n/a")
+		out = append(out, fmt.Sprintf("%s  triage %s anchor=%s", item.CreatedAt.Format("15:04:05"), posture, anchor))
+	}
+	return out
+}
+
+func recentIncidentFollowUpLines(snapshot Snapshot, limit int) []string {
+	if len(snapshot.RecentContinuityIncidentFollowUpReceipts) == 0 {
+		return nil
+	}
+	if limit <= 0 || limit > len(snapshot.RecentContinuityIncidentFollowUpReceipts) {
+		limit = len(snapshot.RecentContinuityIncidentFollowUpReceipts)
+	}
+	out := make([]string, 0, limit)
+	for _, item := range snapshot.RecentContinuityIncidentFollowUpReceipts[:limit] {
+		action := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(item.ActionKind), "_", " "))
+		if action == "" {
+			action = "recorded pending"
+		}
+		anchor := nonEmpty(shortTaskID(item.AnchorTransitionReceiptID), "n/a")
+		out = append(out, fmt.Sprintf("%s  follow-up %s anchor=%s", item.CreatedAt.Format("15:04:05"), action, anchor))
+	}
+	return out
+}
+
+func recentIncidentClosureLines(snapshot Snapshot, limit int) []string {
+	if snapshot.ContinuityIncidentFollowUp == nil || snapshot.ContinuityIncidentFollowUp.ClosureIntelligence == nil {
+		return nil
+	}
+	items := snapshot.ContinuityIncidentFollowUp.ClosureIntelligence.RecentAnchors
+	if len(items) == 0 {
+		return nil
+	}
+	if limit <= 0 || limit > len(items) {
+		limit = len(items)
+	}
+	out := make([]string, 0, limit)
+	for _, item := range items[:limit] {
+		class := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(item.Class), "_", " "))
+		if class == "" {
+			class = "none"
+		}
+		anchor := nonEmpty(shortTaskID(item.AnchorTransitionReceiptID), "n/a")
+		line := fmt.Sprintf("%s  closure %s anchor=%s", item.LatestFollowUpAt.Format("15:04:05"), class, anchor)
+		if note := strings.TrimSpace(item.Explanation); note != "" {
+			line += " | " + note
+		}
+		out = append(out, line)
 	}
 	return out
 }
@@ -1477,12 +2232,59 @@ func hostTemporalStatus(snapshot Snapshot, ui UIState, status HostStatus) string
 
 func latestTranscriptTimestamp(snapshot Snapshot) time.Time {
 	var latest time.Time
+	for _, item := range snapshot.RecentShellTranscript {
+		if item.CreatedAt.After(latest) {
+			latest = item.CreatedAt
+		}
+	}
 	for _, item := range snapshot.RecentConversation {
 		if item.CreatedAt.After(latest) {
 			latest = item.CreatedAt
 		}
 	}
 	return latest
+}
+
+func transcriptStateDetailLine(session KnownShellSession) string {
+	switch strings.TrimSpace(session.TranscriptState) {
+	case "none", "":
+		return "durable transcript evidence unavailable"
+	case "bounded_available":
+		return fmt.Sprintf("durable transcript retained within bounded window (%d chunks)", session.TranscriptRetainedChunks)
+	case "bounded_partial":
+		return fmt.Sprintf("durable transcript is partial within bounded window (%d retained, %d dropped)", session.TranscriptRetainedChunks, session.TranscriptDroppedChunks)
+	case "transcript_only_bounded_available":
+		return fmt.Sprintf("transcript-only fallback with bounded durable history (%d chunks)", session.TranscriptRetainedChunks)
+	case "transcript_only_bounded_partial":
+		return fmt.Sprintf("transcript-only fallback with partial durable history (%d retained, %d dropped)", session.TranscriptRetainedChunks, session.TranscriptDroppedChunks)
+	default:
+		return ""
+	}
+}
+
+func transcriptReviewStatusLine(session SessionState) string {
+	current, ok := knownShellSessionByID(session, session.SessionID)
+	if !ok || current.TranscriptReviewedUpTo <= 0 {
+		return "none"
+	}
+	scope := "all-sources"
+	if source := strings.TrimSpace(current.TranscriptReviewSource); source != "" {
+		scope = source
+	}
+	if current.TranscriptReviewStale {
+		if current.TranscriptReviewOldestUnreviewed > 0 && current.TranscriptNewestSequence >= current.TranscriptReviewOldestUnreviewed {
+			return fmt.Sprintf(
+				"seq %d (%s), unreviewed retained range %d-%d (+%d)",
+				current.TranscriptReviewedUpTo,
+				scope,
+				current.TranscriptReviewOldestUnreviewed,
+				current.TranscriptNewestSequence,
+				max(1, current.TranscriptReviewNewer),
+			)
+		}
+		return fmt.Sprintf("seq %d (%s), newer retained evidence +%d", current.TranscriptReviewedUpTo, scope, max(1, current.TranscriptReviewNewer))
+	}
+	return fmt.Sprintf("seq %d (%s), up-to-date within retained window", current.TranscriptReviewedUpTo, scope)
 }
 
 func observedAt(ui UIState) time.Time {

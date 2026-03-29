@@ -16,6 +16,7 @@ import (
 	"tuku/internal/domain/handoff"
 	"tuku/internal/domain/proof"
 	rundomain "tuku/internal/domain/run"
+	"tuku/internal/domain/transition"
 )
 
 type HandoffLaunchStatus string
@@ -41,6 +42,7 @@ type LaunchHandoffResult struct {
 	TargetWorker      rundomain.WorkerKind
 	LaunchStatus      HandoffLaunchStatus
 	LaunchID          string
+	TransitionReceiptID common.EventID
 	CanonicalResponse string
 	Payload           *handoff.LaunchPayload
 }
@@ -81,7 +83,7 @@ func (c *Coordinator) LaunchHandoff(ctx context.Context, req LaunchHandoffReques
 	var launchErr error
 	launchOut, launchErr = c.handoffLauncher.LaunchHandoff(ctx, launchReq)
 
-	result, err := c.finalizeHandoffLaunch(prepared, launchOut, launchErr)
+	result, err := c.finalizeHandoffLaunch(ctx, prepared, launchOut, launchErr)
 	if err != nil {
 		return LaunchHandoffResult{}, err
 	}
@@ -228,10 +230,14 @@ func (c *Coordinator) prepareHandoffLaunch(ctx context.Context, taskID common.Ta
 	return &prepared, nil, nil
 }
 
-func (c *Coordinator) finalizeHandoffLaunch(prepared *preparedHandoffLaunch, launchOut adapter_contract.HandoffLaunchResult, launchErr error) (LaunchHandoffResult, error) {
+func (c *Coordinator) finalizeHandoffLaunch(ctx context.Context, prepared *preparedHandoffLaunch, launchOut adapter_contract.HandoffLaunchResult, launchErr error) (LaunchHandoffResult, error) {
 	var result LaunchHandoffResult
 	err := c.withTx(func(txc *Coordinator) error {
 		caps, err := txc.store.Capsules().Get(prepared.TaskID)
+		if err != nil {
+			return err
+		}
+		beforeSnapshot, err := txc.captureContinuityTransitionSnapshot(ctx, prepared.TaskID)
 		if err != nil {
 			return err
 		}
@@ -286,6 +292,35 @@ func (c *Coordinator) finalizeHandoffLaunch(prepared *preparedHandoffLaunch, lau
 			if err := txc.appendProof(caps, proof.EventHandoffLaunchFailed, proof.ActorSystem, "tuku-daemon", payload, runID); err != nil {
 				return err
 			}
+			afterSnapshot, err := txc.captureContinuityTransitionSnapshot(ctx, prepared.TaskID)
+			if err != nil {
+				return err
+			}
+			transitionReceipt, created, err := txc.recordContinuityTransitionReceipt(caps, continuityTransitionRecordInput{
+				TaskID:           prepared.TaskID,
+				TransitionKind:   transition.KindHandoffLaunch,
+				TransitionHandle: launchRec.AttemptID,
+				TriggerAction:    "handoff.launch",
+				TriggerSource:    "user",
+				HandoffID:        prepared.Packet.HandoffID,
+				LaunchAttemptID:  launchRec.AttemptID,
+				LaunchID:         launchRec.LaunchID,
+				Summary: fmt.Sprintf(
+					"handoff launch attempt %s failed (%s -> %s) under review posture %s",
+					launchRec.AttemptID,
+					beforeSnapshot.HandoffContinuity.State,
+					afterSnapshot.HandoffContinuity.State,
+					transitionReviewPostureFromProgression(beforeSnapshot.Review),
+				),
+				Before: beforeSnapshot,
+				After:  afterSnapshot,
+			})
+			if err != nil {
+				return err
+			}
+			if created {
+				payload["transition_receipt_id"] = transitionReceipt.ReceiptID
+			}
 			canonical := fmt.Sprintf(
 				"Claude handoff launch failed for packet %s: %s. No execution worker state was mutated; review the launch evidence and retry.",
 				prepared.Packet.HandoffID,
@@ -300,6 +335,7 @@ func (c *Coordinator) finalizeHandoffLaunch(prepared *preparedHandoffLaunch, lau
 				TargetWorker:      target,
 				LaunchStatus:      HandoffLaunchStatusFailed,
 				LaunchID:          launchRec.LaunchID,
+				TransitionReceiptID: transitionReceipt.ReceiptID,
 				CanonicalResponse: canonical,
 				Payload:           &prepared.Payload,
 			}
@@ -371,6 +407,35 @@ func (c *Coordinator) finalizeHandoffLaunch(prepared *preparedHandoffLaunch, lau
 		if err := txc.appendProof(caps, proof.EventHandoffLaunchCompleted, proof.ActorSystem, "tuku-daemon", payload, runID); err != nil {
 			return err
 		}
+		afterSnapshot, err := txc.captureContinuityTransitionSnapshot(ctx, prepared.TaskID)
+		if err != nil {
+			return err
+		}
+		transitionReceipt, created, err := txc.recordContinuityTransitionReceipt(caps, continuityTransitionRecordInput{
+			TaskID:           prepared.TaskID,
+			TransitionKind:   transition.KindHandoffLaunch,
+			TransitionHandle: launchRec.AttemptID,
+			TriggerAction:    "handoff.launch",
+			TriggerSource:    "user",
+			HandoffID:        prepared.Packet.HandoffID,
+			LaunchAttemptID:  launchRec.AttemptID,
+			LaunchID:         launchRec.LaunchID,
+			Summary: fmt.Sprintf(
+				"handoff launch attempt %s completed (%s -> %s) under review posture %s",
+				launchRec.AttemptID,
+				beforeSnapshot.HandoffContinuity.State,
+				afterSnapshot.HandoffContinuity.State,
+				transitionReviewPostureFromProgression(beforeSnapshot.Review),
+			),
+			Before: beforeSnapshot,
+			After:  afterSnapshot,
+		})
+		if err != nil {
+			return err
+		}
+		if created {
+			payload["transition_receipt_id"] = transitionReceipt.ReceiptID
+		}
 		canonical := txc.buildLaunchCanonicalSuccess(prepared.Packet.HandoffID, launchOut.LaunchID, ack)
 		if err := txc.emitCanonicalConversation(caps, canonical, payload, runID); err != nil {
 			return err
@@ -381,6 +446,7 @@ func (c *Coordinator) finalizeHandoffLaunch(prepared *preparedHandoffLaunch, lau
 			TargetWorker:      target,
 			LaunchStatus:      HandoffLaunchStatusCompleted,
 			LaunchID:          launchRec.LaunchID,
+			TransitionReceiptID: transitionReceipt.ReceiptID,
 			CanonicalResponse: canonical,
 			Payload:           &prepared.Payload,
 		}

@@ -10,10 +10,11 @@ const maxSessionJournalEntries = 40
 
 func newSessionState(now time.Time) SessionState {
 	return SessionState{
-		SessionID:        fmt.Sprintf("shs_%d", now.UTC().UnixNano()),
-		StartedAt:        now.UTC(),
-		AttachCapability: WorkerAttachCapabilityNone,
-		Journal:          make([]SessionEvent, 0, 8),
+		SessionID:             fmt.Sprintf("shs_%d", now.UTC().UnixNano()),
+		StartedAt:             now.UTC(),
+		WorkerSessionIDSource: WorkerSessionIDSourceNone,
+		AttachCapability:      WorkerAttachCapabilityNone,
+		Journal:               make([]SessionEvent, 0, 8),
 	}
 }
 

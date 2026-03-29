@@ -9,6 +9,7 @@ import (
 	"tuku/internal/domain/handoff"
 	"tuku/internal/domain/proof"
 	rundomain "tuku/internal/domain/run"
+	"tuku/internal/domain/transition"
 )
 
 type RecordHandoffResolutionRequest struct {
@@ -22,6 +23,7 @@ type RecordHandoffResolutionRequest struct {
 type RecordHandoffResolutionResult struct {
 	TaskID                common.TaskID
 	Record                handoff.Resolution
+	TransitionReceiptID   common.EventID
 	HandoffContinuity     HandoffContinuity
 	RecoveryClass         RecoveryClass
 	RecommendedAction     RecoveryAction
@@ -75,6 +77,10 @@ func (c *Coordinator) RecordHandoffResolution(ctx context.Context, req RecordHan
 	var result RecordHandoffResolutionResult
 	err = c.withTx(func(txc *Coordinator) error {
 		current, err := txc.assessContinue(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		beforeSnapshot, err := txc.captureContinuityTransitionSnapshot(ctx, taskID)
 		if err != nil {
 			return err
 		}
@@ -136,6 +142,36 @@ func (c *Coordinator) RecordHandoffResolution(ctx context.Context, req RecordHan
 		payload["ready_for_next_run"] = updatedRecovery.ReadyForNextRun
 		payload["ready_for_handoff_launch"] = updatedRecovery.ReadyForHandoffLaunch
 		payload["recovery_reason"] = updatedRecovery.Reason
+		afterSnapshot, err := txc.captureContinuityTransitionSnapshot(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		transitionReceipt, created, err := txc.recordContinuityTransitionReceipt(caps, continuityTransitionRecordInput{
+			TaskID:           taskID,
+			TransitionKind:   transition.KindHandoffResolution,
+			TransitionHandle: record.ResolutionID,
+			TriggerAction:    "handoff.resolve",
+			TriggerSource:    "user",
+			HandoffID:        record.HandoffID,
+			LaunchAttemptID:  record.LaunchAttemptID,
+			LaunchID:         record.LaunchID,
+			ResolutionID:     record.ResolutionID,
+			Summary: fmt.Sprintf(
+				"handoff resolution %s recorded (%s -> %s) under review posture %s",
+				record.ResolutionID,
+				beforeSnapshot.HandoffContinuity.State,
+				afterSnapshot.HandoffContinuity.State,
+				transitionReviewPostureFromProgression(beforeSnapshot.Review),
+			),
+			Before: beforeSnapshot,
+			After:  afterSnapshot,
+		})
+		if err != nil {
+			return err
+		}
+		if created {
+			payload["transition_receipt_id"] = transitionReceipt.ReceiptID
+		}
 		if err := txc.emitCanonicalConversation(caps, canonical, payload, runID); err != nil {
 			return err
 		}
@@ -143,6 +179,7 @@ func (c *Coordinator) RecordHandoffResolution(ctx context.Context, req RecordHan
 		result = RecordHandoffResolutionResult{
 			TaskID:                taskID,
 			Record:                record,
+			TransitionReceiptID:   transitionReceipt.ReceiptID,
 			HandoffContinuity:     updatedContinuity,
 			RecoveryClass:         updatedRecovery.RecoveryClass,
 			RecommendedAction:     updatedRecovery.RecommendedAction,

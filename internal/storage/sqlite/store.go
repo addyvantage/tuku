@@ -94,6 +94,18 @@ func (s *Store) OperatorStepReceipts() storage.OperatorStepReceiptStore {
 	return &operatorStepReceiptRepo{q: s.db}
 }
 
+func (s *Store) TransitionReceipts() storage.TransitionReceiptStore {
+	return &transitionReceiptRepo{q: s.db}
+}
+
+func (s *Store) IncidentTriages() storage.IncidentTriageStore {
+	return &incidentTriageRepo{q: s.db}
+}
+
+func (s *Store) IncidentFollowUps() storage.IncidentFollowUpStore {
+	return &incidentFollowUpRepo{q: s.db}
+}
+
 func (s *Store) ContextPacks() storage.ContextPackStore {
 	panic("TODO: sqlite context-pack repository not implemented in milestone 1")
 }
@@ -159,6 +171,18 @@ func (s *txStore) OperatorStepReceipts() storage.OperatorStepReceiptStore {
 	return &operatorStepReceiptRepo{q: s.tx}
 }
 
+func (s *txStore) TransitionReceipts() storage.TransitionReceiptStore {
+	return &transitionReceiptRepo{q: s.tx}
+}
+
+func (s *txStore) IncidentTriages() storage.IncidentTriageStore {
+	return &incidentTriageRepo{q: s.tx}
+}
+
+func (s *txStore) IncidentFollowUps() storage.IncidentFollowUpStore {
+	return &incidentFollowUpRepo{q: s.tx}
+}
+
 func (s *txStore) ContextPacks() storage.ContextPackStore {
 	panic("TODO: sqlite context-pack repository not implemented in milestone 1")
 }
@@ -216,10 +240,21 @@ CREATE TABLE IF NOT EXISTS intent_states (
 	task_id TEXT NOT NULL,
 	version INTEGER NOT NULL,
 	class TEXT NOT NULL,
+	posture TEXT NOT NULL DEFAULT 'CLARIFICATION_NEEDED',
+	execution_readiness TEXT NOT NULL DEFAULT 'CLARIFICATION_NEEDED',
+	objective TEXT NOT NULL DEFAULT '',
+	requested_outcome TEXT NOT NULL DEFAULT '',
 	normalized_action TEXT NOT NULL,
+	scope_summary TEXT NOT NULL DEFAULT '',
+	explicit_constraints_json TEXT NOT NULL DEFAULT '[]',
+	done_criteria_json TEXT NOT NULL DEFAULT '[]',
 	confidence REAL NOT NULL,
 	ambiguity_flags_json TEXT NOT NULL,
+	clarification_questions_json TEXT NOT NULL DEFAULT '[]',
 	requires_clarification INTEGER NOT NULL,
+	readiness_reason TEXT NOT NULL DEFAULT '',
+	compilation_notes TEXT NOT NULL DEFAULT '',
+	bounded_evidence_messages INTEGER NOT NULL DEFAULT 0,
 	source_message_ids_json TEXT NOT NULL,
 	proposed_phase TEXT NOT NULL,
 	created_at TEXT NOT NULL
@@ -234,12 +269,20 @@ CREATE TABLE IF NOT EXISTS execution_briefs (
 	capsule_version INTEGER NOT NULL,
 	version INTEGER NOT NULL,
 	created_at TEXT NOT NULL,
+	posture TEXT NOT NULL DEFAULT 'CLARIFICATION_NEEDED',
 	objective TEXT NOT NULL,
+	requested_outcome TEXT NOT NULL DEFAULT '',
 	normalized_action TEXT NOT NULL,
+	scope_summary TEXT NOT NULL DEFAULT '',
 	scope_in_json TEXT NOT NULL,
 	scope_out_json TEXT NOT NULL,
 	constraints_json TEXT NOT NULL,
 	done_criteria_json TEXT NOT NULL,
+	ambiguity_flags_json TEXT NOT NULL DEFAULT '[]',
+	clarification_questions_json TEXT NOT NULL DEFAULT '[]',
+	requires_clarification INTEGER NOT NULL DEFAULT 0,
+	worker_framing TEXT NOT NULL DEFAULT '',
+	bounded_evidence_messages INTEGER NOT NULL DEFAULT 0,
 	context_pack_id TEXT NOT NULL,
 	verbosity TEXT NOT NULL,
 	policy_profile_id TEXT NOT NULL,
@@ -253,7 +296,19 @@ CREATE TABLE IF NOT EXISTS execution_runs (
 	task_id TEXT NOT NULL,
 	brief_id TEXT NOT NULL,
 	worker_kind TEXT NOT NULL,
+	worker_run_id TEXT,
+	shell_session_id TEXT,
 	status TEXT NOT NULL,
+	command TEXT,
+	args_json TEXT,
+	exit_code INTEGER,
+	stdout TEXT,
+	stderr TEXT,
+	changed_files_json TEXT,
+	changed_files_semantics TEXT,
+	validation_signals_json TEXT,
+	output_artifact_ref TEXT,
+	structured_summary_json TEXT,
 	started_at TEXT NOT NULL,
 	ended_at TEXT,
 	interruption_reason TEXT,
@@ -316,6 +371,15 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_task_created
 	if err := ensureCapsuleColumns(db); err != nil {
 		return err
 	}
+	if err := ensureIntentStateColumns(db); err != nil {
+		return err
+	}
+	if err := ensureExecutionBriefColumns(db); err != nil {
+		return err
+	}
+	if err := ensureExecutionRunColumns(db); err != nil {
+		return err
+	}
 	if err := ensureShellSessionSchema(db); err != nil {
 		return err
 	}
@@ -323,6 +387,9 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_task_created
 		return err
 	}
 	if err := ensureOperatorStepReceiptSchema(db); err != nil {
+		return err
+	}
+	if err := ensureTransitionReceiptSchema(db); err != nil {
 		return err
 	}
 	return nil
@@ -347,6 +414,103 @@ func ensureCapsuleColumns(db *sql.DB) error {
 		}
 		if _, err := db.Exec(item.DDL); err != nil {
 			return fmt.Errorf("add column %s: %w", item.Name, err)
+		}
+	}
+	return nil
+}
+
+func ensureExecutionRunColumns(db *sql.DB) error {
+	type colDef struct {
+		Name string
+		DDL  string
+	}
+	needed := []colDef{
+		{Name: "worker_run_id", DDL: "ALTER TABLE execution_runs ADD COLUMN worker_run_id TEXT"},
+		{Name: "shell_session_id", DDL: "ALTER TABLE execution_runs ADD COLUMN shell_session_id TEXT"},
+		{Name: "command", DDL: "ALTER TABLE execution_runs ADD COLUMN command TEXT"},
+		{Name: "args_json", DDL: "ALTER TABLE execution_runs ADD COLUMN args_json TEXT"},
+		{Name: "exit_code", DDL: "ALTER TABLE execution_runs ADD COLUMN exit_code INTEGER"},
+		{Name: "stdout", DDL: "ALTER TABLE execution_runs ADD COLUMN stdout TEXT"},
+		{Name: "stderr", DDL: "ALTER TABLE execution_runs ADD COLUMN stderr TEXT"},
+		{Name: "changed_files_json", DDL: "ALTER TABLE execution_runs ADD COLUMN changed_files_json TEXT"},
+		{Name: "changed_files_semantics", DDL: "ALTER TABLE execution_runs ADD COLUMN changed_files_semantics TEXT"},
+		{Name: "validation_signals_json", DDL: "ALTER TABLE execution_runs ADD COLUMN validation_signals_json TEXT"},
+		{Name: "output_artifact_ref", DDL: "ALTER TABLE execution_runs ADD COLUMN output_artifact_ref TEXT"},
+		{Name: "structured_summary_json", DDL: "ALTER TABLE execution_runs ADD COLUMN structured_summary_json TEXT"},
+	}
+	for _, item := range needed {
+		ok, err := hasColumn(db, "execution_runs", item.Name)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.Exec(item.DDL); err != nil {
+			return fmt.Errorf("add execution_runs column %s: %w", item.Name, err)
+		}
+	}
+	return nil
+}
+
+func ensureIntentStateColumns(db *sql.DB) error {
+	type colDef struct {
+		Name string
+		DDL  string
+	}
+	needed := []colDef{
+		{Name: "posture", DDL: "ALTER TABLE intent_states ADD COLUMN posture TEXT NOT NULL DEFAULT 'CLARIFICATION_NEEDED'"},
+		{Name: "execution_readiness", DDL: "ALTER TABLE intent_states ADD COLUMN execution_readiness TEXT NOT NULL DEFAULT 'CLARIFICATION_NEEDED'"},
+		{Name: "objective", DDL: "ALTER TABLE intent_states ADD COLUMN objective TEXT NOT NULL DEFAULT ''"},
+		{Name: "requested_outcome", DDL: "ALTER TABLE intent_states ADD COLUMN requested_outcome TEXT NOT NULL DEFAULT ''"},
+		{Name: "scope_summary", DDL: "ALTER TABLE intent_states ADD COLUMN scope_summary TEXT NOT NULL DEFAULT ''"},
+		{Name: "explicit_constraints_json", DDL: "ALTER TABLE intent_states ADD COLUMN explicit_constraints_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "done_criteria_json", DDL: "ALTER TABLE intent_states ADD COLUMN done_criteria_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "clarification_questions_json", DDL: "ALTER TABLE intent_states ADD COLUMN clarification_questions_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "readiness_reason", DDL: "ALTER TABLE intent_states ADD COLUMN readiness_reason TEXT NOT NULL DEFAULT ''"},
+		{Name: "compilation_notes", DDL: "ALTER TABLE intent_states ADD COLUMN compilation_notes TEXT NOT NULL DEFAULT ''"},
+		{Name: "bounded_evidence_messages", DDL: "ALTER TABLE intent_states ADD COLUMN bounded_evidence_messages INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, item := range needed {
+		ok, err := hasColumn(db, "intent_states", item.Name)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.Exec(item.DDL); err != nil {
+			return fmt.Errorf("add intent_states column %s: %w", item.Name, err)
+		}
+	}
+	return nil
+}
+
+func ensureExecutionBriefColumns(db *sql.DB) error {
+	type colDef struct {
+		Name string
+		DDL  string
+	}
+	needed := []colDef{
+		{Name: "posture", DDL: "ALTER TABLE execution_briefs ADD COLUMN posture TEXT NOT NULL DEFAULT 'CLARIFICATION_NEEDED'"},
+		{Name: "requested_outcome", DDL: "ALTER TABLE execution_briefs ADD COLUMN requested_outcome TEXT NOT NULL DEFAULT ''"},
+		{Name: "scope_summary", DDL: "ALTER TABLE execution_briefs ADD COLUMN scope_summary TEXT NOT NULL DEFAULT ''"},
+		{Name: "ambiguity_flags_json", DDL: "ALTER TABLE execution_briefs ADD COLUMN ambiguity_flags_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "clarification_questions_json", DDL: "ALTER TABLE execution_briefs ADD COLUMN clarification_questions_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "requires_clarification", DDL: "ALTER TABLE execution_briefs ADD COLUMN requires_clarification INTEGER NOT NULL DEFAULT 0"},
+		{Name: "worker_framing", DDL: "ALTER TABLE execution_briefs ADD COLUMN worker_framing TEXT NOT NULL DEFAULT ''"},
+		{Name: "bounded_evidence_messages", DDL: "ALTER TABLE execution_briefs ADD COLUMN bounded_evidence_messages INTEGER NOT NULL DEFAULT 0"},
+	}
+	for _, item := range needed {
+		ok, err := hasColumn(db, "execution_briefs", item.Name)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.Exec(item.DDL); err != nil {
+			return fmt.Errorf("add execution_briefs column %s: %w", item.Name, err)
 		}
 	}
 	return nil
@@ -636,19 +800,36 @@ func (r *intentRepo) Save(state intent.State) error {
 	if err != nil {
 		return err
 	}
+	explicitConstraintsJSON, err := marshalStringSlice(state.ExplicitConstraints)
+	if err != nil {
+		return err
+	}
+	doneCriteriaJSON, err := marshalStringSlice(state.DoneCriteria)
+	if err != nil {
+		return err
+	}
+	clarificationQuestionsJSON, err := marshalStringSlice(state.ClarificationQuestions)
+	if err != nil {
+		return err
+	}
 	sourceJSON, err := marshalMessageSlice(state.SourceMessageIDs)
 	if err != nil {
 		return err
 	}
 	_, err = r.q.Exec(`
 INSERT INTO intent_states(
-	intent_id, task_id, version, class, normalized_action, confidence,
-	ambiguity_flags_json, requires_clarification, source_message_ids_json,
-	proposed_phase, created_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+	intent_id, task_id, version, class, posture, execution_readiness,
+	objective, requested_outcome, normalized_action, scope_summary,
+	explicit_constraints_json, done_criteria_json, confidence, ambiguity_flags_json,
+	clarification_questions_json, requires_clarification, readiness_reason, compilation_notes,
+	bounded_evidence_messages, source_message_ids_json, proposed_phase, created_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 `,
-		string(state.IntentID), string(state.TaskID), state.Version, string(state.Class), state.NormalizedAction,
-		state.Confidence, ambJSON, boolToInt(state.RequiresClarification), sourceJSON,
+		string(state.IntentID), string(state.TaskID), state.Version, string(state.Class), string(state.Posture), string(state.ExecutionReadiness),
+		state.Objective, state.RequestedOutcome, state.NormalizedAction, state.ScopeSummary,
+		explicitConstraintsJSON, doneCriteriaJSON, state.Confidence, ambJSON,
+		clarificationQuestionsJSON, boolToInt(state.RequiresClarification), state.ReadinessReason, state.CompilationNotes,
+		state.BoundedEvidenceMessages, sourceJSON,
 		string(state.ProposedPhase), state.CreatedAt.Format(sqliteTimestampLayout),
 	)
 	if err != nil {
@@ -659,9 +840,11 @@ INSERT INTO intent_states(
 
 func (r *intentRepo) LatestByTask(taskID common.TaskID) (intent.State, error) {
 	row := r.q.QueryRow(`
-SELECT intent_id, task_id, version, class, normalized_action, confidence,
-	ambiguity_flags_json, requires_clarification, source_message_ids_json,
-	proposed_phase, created_at
+SELECT intent_id, task_id, version, class, posture, execution_readiness,
+	objective, requested_outcome, normalized_action, scope_summary,
+	explicit_constraints_json, done_criteria_json, confidence, ambiguity_flags_json,
+	clarification_questions_json, requires_clarification, readiness_reason, compilation_notes,
+	bounded_evidence_messages, source_message_ids_json, proposed_phase, created_at
 FROM intent_states
 WHERE task_id = ?
 ORDER BY created_at DESC
@@ -669,17 +852,37 @@ LIMIT 1
 `, string(taskID))
 
 	var st intent.State
-	var ambJSON, sourceJSON, proposedPhase, ts string
+	var explicitConstraintsJSON, doneCriteriaJSON string
+	var ambJSON, clarificationQuestionsJSON string
+	var sourceJSON, proposedPhase, ts string
+	var posture, readiness string
 	var requiresInt int
 	err := row.Scan(
-		&st.IntentID, &st.TaskID, &st.Version, &st.Class, &st.NormalizedAction, &st.Confidence,
-		&ambJSON, &requiresInt, &sourceJSON,
+		&st.IntentID, &st.TaskID, &st.Version, &st.Class, &posture, &readiness,
+		&st.Objective, &st.RequestedOutcome, &st.NormalizedAction, &st.ScopeSummary,
+		&explicitConstraintsJSON, &doneCriteriaJSON, &st.Confidence, &ambJSON,
+		&clarificationQuestionsJSON, &requiresInt, &st.ReadinessReason, &st.CompilationNotes,
+		&st.BoundedEvidenceMessages, &sourceJSON,
 		&proposedPhase, &ts,
 	)
 	if err != nil {
 		return intent.State{}, err
 	}
+	st.Posture = intent.Posture(posture)
+	st.ExecutionReadiness = intent.Readiness(readiness)
+	st.ExplicitConstraints, err = unmarshalStringSlice(explicitConstraintsJSON)
+	if err != nil {
+		return intent.State{}, err
+	}
+	st.DoneCriteria, err = unmarshalStringSlice(doneCriteriaJSON)
+	if err != nil {
+		return intent.State{}, err
+	}
 	st.AmbiguityFlags, err = unmarshalStringSlice(ambJSON)
+	if err != nil {
+		return intent.State{}, err
+	}
+	st.ClarificationQuestions, err = unmarshalStringSlice(clarificationQuestionsJSON)
 	if err != nil {
 		return intent.State{}, err
 	}
@@ -713,15 +916,29 @@ func (r *briefRepo) Save(b brief.ExecutionBrief) error {
 	if err != nil {
 		return err
 	}
+	ambiguityJSON, err := marshalStringSlice(b.AmbiguityFlags)
+	if err != nil {
+		return err
+	}
+	clarificationQuestionsJSON, err := marshalStringSlice(b.ClarificationQuestions)
+	if err != nil {
+		return err
+	}
+	requiresClarification := 0
+	if b.RequiresClarification {
+		requiresClarification = 1
+	}
 	_, err = r.q.Exec(`
 INSERT INTO execution_briefs(
-	brief_id, task_id, intent_id, capsule_version, version, created_at, objective,
-	normalized_action, scope_in_json, scope_out_json, constraints_json, done_criteria_json,
+	brief_id, task_id, intent_id, capsule_version, version, created_at, posture, objective,
+	requested_outcome, normalized_action, scope_summary, scope_in_json, scope_out_json, constraints_json, done_criteria_json,
+	ambiguity_flags_json, clarification_questions_json, requires_clarification, worker_framing, bounded_evidence_messages,
 	context_pack_id, verbosity, policy_profile_id, brief_hash
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 `,
 		string(b.BriefID), string(b.TaskID), string(b.IntentID), int64(b.CapsuleVersion), b.Version, b.CreatedAt.Format(sqliteTimestampLayout),
-		b.Objective, b.NormalizedAction, scopeInJSON, scopeOutJSON, constraintsJSON, doneJSON,
+		string(b.Posture), b.Objective, b.RequestedOutcome, b.NormalizedAction, b.ScopeSummary, scopeInJSON, scopeOutJSON, constraintsJSON, doneJSON,
+		ambiguityJSON, clarificationQuestionsJSON, requiresClarification, b.WorkerFraming, b.BoundedEvidenceMessages,
 		string(b.ContextPackID), string(b.Verbosity), b.PolicyProfileID, b.BriefHash,
 	)
 	if err != nil {
@@ -732,8 +949,9 @@ INSERT INTO execution_briefs(
 
 func (r *briefRepo) Get(briefID common.BriefID) (brief.ExecutionBrief, error) {
 	row := r.q.QueryRow(`
-SELECT brief_id, task_id, intent_id, capsule_version, version, created_at, objective,
-	normalized_action, scope_in_json, scope_out_json, constraints_json, done_criteria_json,
+SELECT brief_id, task_id, intent_id, capsule_version, version, created_at, posture, objective,
+	requested_outcome, normalized_action, scope_summary, scope_in_json, scope_out_json, constraints_json, done_criteria_json,
+	ambiguity_flags_json, clarification_questions_json, requires_clarification, worker_framing, bounded_evidence_messages,
 	context_pack_id, verbosity, policy_profile_id, brief_hash
 FROM execution_briefs WHERE brief_id = ?
 `, string(briefID))
@@ -742,8 +960,9 @@ FROM execution_briefs WHERE brief_id = ?
 
 func (r *briefRepo) LatestByTask(taskID common.TaskID) (brief.ExecutionBrief, error) {
 	row := r.q.QueryRow(`
-SELECT brief_id, task_id, intent_id, capsule_version, version, created_at, objective,
-	normalized_action, scope_in_json, scope_out_json, constraints_json, done_criteria_json,
+SELECT brief_id, task_id, intent_id, capsule_version, version, created_at, posture, objective,
+	requested_outcome, normalized_action, scope_summary, scope_in_json, scope_out_json, constraints_json, done_criteria_json,
+	ambiguity_flags_json, clarification_questions_json, requires_clarification, worker_framing, bounded_evidence_messages,
 	context_pack_id, verbosity, policy_profile_id, brief_hash
 FROM execution_briefs WHERE task_id = ?
 ORDER BY created_at DESC
@@ -753,15 +972,30 @@ LIMIT 1
 }
 
 func (r *runRepo) Create(execRun run.ExecutionRun) error {
-	_, err := r.q.Exec(`
+	argsJSON, err := marshalStringSlice(execRun.Args)
+	if err != nil {
+		return err
+	}
+	changedFilesJSON, err := marshalStringSlice(execRun.ChangedFiles)
+	if err != nil {
+		return err
+	}
+	validationSignalsJSON, err := marshalStringSlice(execRun.ValidationSignals)
+	if err != nil {
+		return err
+	}
+	_, err = r.q.Exec(`
 INSERT INTO execution_runs(
-	run_id, task_id, brief_id, worker_kind, status, started_at, ended_at,
-	interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+	run_id, task_id, brief_id, worker_kind, worker_run_id, shell_session_id, status, command, args_json, exit_code,
+	stdout, stderr, changed_files_json, changed_files_semantics, validation_signals_json, output_artifact_ref, structured_summary_json,
+	started_at, ended_at, interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 `,
 		string(execRun.RunID), string(execRun.TaskID), string(execRun.BriefID), string(execRun.WorkerKind),
-		string(execRun.Status), execRun.StartedAt.Format(sqliteTimestampLayout), nilIfTime(execRun.EndedAt),
-		nilIfString(execRun.InterruptionReason), string(execRun.CreatedFromPhase), nilIfString(execRun.LastKnownSummary),
+		nilIfString(execRun.WorkerRunID), nilIfString(execRun.ShellSessionID), string(execRun.Status),
+		nilIfString(execRun.Command), argsJSON, nilIfInt(execRun.ExitCode),
+		nilIfString(execRun.Stdout), nilIfString(execRun.Stderr), changedFilesJSON, nilIfString(execRun.ChangedFilesSemantics), validationSignalsJSON, nilIfString(execRun.OutputArtifactRef), nilIfString(execRun.StructuredSummary),
+		execRun.StartedAt.Format(sqliteTimestampLayout), nilIfTime(execRun.EndedAt), nilIfString(execRun.InterruptionReason), string(execRun.CreatedFromPhase), nilIfString(execRun.LastKnownSummary),
 		execRun.CreatedAt.Format(sqliteTimestampLayout), execRun.UpdatedAt.Format(sqliteTimestampLayout),
 	)
 	if err != nil {
@@ -772,8 +1006,9 @@ INSERT INTO execution_runs(
 
 func (r *runRepo) Get(runID common.RunID) (run.ExecutionRun, error) {
 	row := r.q.QueryRow(`
-SELECT run_id, task_id, brief_id, worker_kind, status, started_at, ended_at,
-	interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
+SELECT run_id, task_id, brief_id, worker_kind, worker_run_id, shell_session_id, status, command, args_json, exit_code,
+	stdout, stderr, changed_files_json, changed_files_semantics, validation_signals_json, output_artifact_ref, structured_summary_json,
+	started_at, ended_at, interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
 FROM execution_runs
 WHERE run_id = ?
 `, string(runID))
@@ -782,20 +1017,54 @@ WHERE run_id = ?
 
 func (r *runRepo) LatestByTask(taskID common.TaskID) (run.ExecutionRun, error) {
 	row := r.q.QueryRow(`
-SELECT run_id, task_id, brief_id, worker_kind, status, started_at, ended_at,
-	interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
+SELECT run_id, task_id, brief_id, worker_kind, worker_run_id, shell_session_id, status, command, args_json, exit_code,
+	stdout, stderr, changed_files_json, changed_files_semantics, validation_signals_json, output_artifact_ref, structured_summary_json,
+	started_at, ended_at, interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
 FROM execution_runs
 WHERE task_id = ?
-ORDER BY created_at DESC
+ORDER BY created_at DESC, run_id DESC
 LIMIT 1
 `, string(taskID))
 	return scanRun(row)
 }
 
+func (r *runRepo) ListByTask(taskID common.TaskID, limit int) ([]run.ExecutionRun, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := r.q.Query(`
+SELECT run_id, task_id, brief_id, worker_kind, worker_run_id, shell_session_id, status, command, args_json, exit_code,
+	stdout, stderr, changed_files_json, changed_files_semantics, validation_signals_json, output_artifact_ref, structured_summary_json,
+	started_at, ended_at, interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
+FROM execution_runs
+WHERE task_id = ?
+ORDER BY created_at DESC, run_id DESC
+LIMIT ?
+`, string(taskID), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]run.ExecutionRun, 0, limit)
+	for rows.Next() {
+		record, err := scanRunScannable(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (r *runRepo) LatestRunningByTask(taskID common.TaskID) (run.ExecutionRun, error) {
 	row := r.q.QueryRow(`
-SELECT run_id, task_id, brief_id, worker_kind, status, started_at, ended_at,
-	interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
+SELECT run_id, task_id, brief_id, worker_kind, worker_run_id, shell_session_id, status, command, args_json, exit_code,
+	stdout, stderr, changed_files_json, changed_files_semantics, validation_signals_json, output_artifact_ref, structured_summary_json,
+	started_at, ended_at, interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
 FROM execution_runs
 WHERE task_id = ? AND status = ?
 ORDER BY updated_at DESC
@@ -805,13 +1074,28 @@ LIMIT 1
 }
 
 func (r *runRepo) Update(execRun run.ExecutionRun) error {
+	argsJSON, err := marshalStringSlice(execRun.Args)
+	if err != nil {
+		return err
+	}
+	changedFilesJSON, err := marshalStringSlice(execRun.ChangedFiles)
+	if err != nil {
+		return err
+	}
+	validationSignalsJSON, err := marshalStringSlice(execRun.ValidationSignals)
+	if err != nil {
+		return err
+	}
 	res, err := r.q.Exec(`
 UPDATE execution_runs SET
-	task_id=?, brief_id=?, worker_kind=?, status=?, started_at=?, ended_at=?,
-	interruption_reason=?, created_from_phase=?, last_known_summary=?, created_at=?, updated_at=?
+	task_id=?, brief_id=?, worker_kind=?, worker_run_id=?, shell_session_id=?, status=?, command=?, args_json=?, exit_code=?,
+	stdout=?, stderr=?, changed_files_json=?, changed_files_semantics=?, validation_signals_json=?, output_artifact_ref=?, structured_summary_json=?,
+	started_at=?, ended_at=?, interruption_reason=?, created_from_phase=?, last_known_summary=?, created_at=?, updated_at=?
 WHERE run_id = ?
 `,
-		string(execRun.TaskID), string(execRun.BriefID), string(execRun.WorkerKind), string(execRun.Status),
+		string(execRun.TaskID), string(execRun.BriefID), string(execRun.WorkerKind), nilIfString(execRun.WorkerRunID), nilIfString(execRun.ShellSessionID), string(execRun.Status),
+		nilIfString(execRun.Command), argsJSON, nilIfInt(execRun.ExitCode),
+		nilIfString(execRun.Stdout), nilIfString(execRun.Stderr), changedFilesJSON, nilIfString(execRun.ChangedFilesSemantics), validationSignalsJSON, nilIfString(execRun.OutputArtifactRef), nilIfString(execRun.StructuredSummary),
 		execRun.StartedAt.Format(sqliteTimestampLayout), nilIfTime(execRun.EndedAt),
 		nilIfString(execRun.InterruptionReason), string(execRun.CreatedFromPhase), nilIfString(execRun.LastKnownSummary),
 		execRun.CreatedAt.Format(sqliteTimestampLayout), execRun.UpdatedAt.Format(sqliteTimestampLayout),
@@ -1019,6 +1303,13 @@ func nilIfString(value string) any {
 	return value
 }
 
+func nilIfInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return int64(*value)
+}
+
 func boolToInt(v bool) int {
 	if v {
 		return 1
@@ -1124,15 +1415,20 @@ func unmarshalDecisionSlice(value string) ([]common.DecisionID, error) {
 func scanBrief(row *sql.Row) (brief.ExecutionBrief, error) {
 	var b brief.ExecutionBrief
 	var createdAt string
+	var posture string
 	var scopeInJSON, scopeOutJSON, constraintsJSON, doneJSON string
+	var ambiguityJSON, clarificationQuestionsJSON string
+	var requiresClarificationInt int
 	err := row.Scan(
-		&b.BriefID, &b.TaskID, &b.IntentID, &b.CapsuleVersion, &b.Version, &createdAt, &b.Objective,
-		&b.NormalizedAction, &scopeInJSON, &scopeOutJSON, &constraintsJSON, &doneJSON,
+		&b.BriefID, &b.TaskID, &b.IntentID, &b.CapsuleVersion, &b.Version, &createdAt, &posture, &b.Objective,
+		&b.RequestedOutcome, &b.NormalizedAction, &b.ScopeSummary, &scopeInJSON, &scopeOutJSON, &constraintsJSON, &doneJSON,
+		&ambiguityJSON, &clarificationQuestionsJSON, &requiresClarificationInt, &b.WorkerFraming, &b.BoundedEvidenceMessages,
 		&b.ContextPackID, &b.Verbosity, &b.PolicyProfileID, &b.BriefHash,
 	)
 	if err != nil {
 		return brief.ExecutionBrief{}, err
 	}
+	b.Posture = brief.Posture(posture)
 	b.CreatedAt, err = time.Parse(sqliteTimestampLayout, createdAt)
 	if err != nil {
 		return brief.ExecutionBrief{}, err
@@ -1153,21 +1449,97 @@ func scanBrief(row *sql.Row) (brief.ExecutionBrief, error) {
 	if err != nil {
 		return brief.ExecutionBrief{}, err
 	}
+	b.AmbiguityFlags, err = unmarshalStringSlice(ambiguityJSON)
+	if err != nil {
+		return brief.ExecutionBrief{}, err
+	}
+	b.ClarificationQuestions, err = unmarshalStringSlice(clarificationQuestionsJSON)
+	if err != nil {
+		return brief.ExecutionBrief{}, err
+	}
+	b.RequiresClarification = requiresClarificationInt == 1
 	return b, nil
 }
 
+type sqlScannable interface {
+	Scan(dest ...any) error
+}
+
 func scanRun(row *sql.Row) (run.ExecutionRun, error) {
+	return scanRunScannable(row)
+}
+
+func scanRunScannable(row sqlScannable) (run.ExecutionRun, error) {
 	var r run.ExecutionRun
 	var startedAt, createdAt, updatedAt string
 	var endedAt sql.NullString
+	var workerRunID sql.NullString
+	var shellSessionID sql.NullString
+	var command sql.NullString
+	var argsJSON sql.NullString
+	var exitCode sql.NullInt64
+	var stdout sql.NullString
+	var stderr sql.NullString
+	var changedFilesJSON sql.NullString
+	var changedFilesSemantics sql.NullString
+	var validationSignalsJSON sql.NullString
+	var outputArtifactRef sql.NullString
+	var structuredSummary sql.NullString
 	var interruption sql.NullString
 	var summary sql.NullString
 	err := row.Scan(
-		&r.RunID, &r.TaskID, &r.BriefID, &r.WorkerKind, &r.Status, &startedAt, &endedAt,
-		&interruption, &r.CreatedFromPhase, &summary, &createdAt, &updatedAt,
+		&r.RunID, &r.TaskID, &r.BriefID, &r.WorkerKind, &workerRunID, &shellSessionID, &r.Status, &command, &argsJSON, &exitCode,
+		&stdout, &stderr, &changedFilesJSON, &changedFilesSemantics, &validationSignalsJSON, &outputArtifactRef, &structuredSummary,
+		&startedAt, &endedAt, &interruption, &r.CreatedFromPhase, &summary, &createdAt, &updatedAt,
 	)
 	if err != nil {
 		return run.ExecutionRun{}, err
+	}
+	if workerRunID.Valid {
+		r.WorkerRunID = workerRunID.String
+	}
+	if shellSessionID.Valid {
+		r.ShellSessionID = shellSessionID.String
+	}
+	if command.Valid {
+		r.Command = command.String
+	}
+	if argsJSON.Valid {
+		r.Args, err = unmarshalStringSlice(argsJSON.String)
+		if err != nil {
+			return run.ExecutionRun{}, err
+		}
+	}
+	if exitCode.Valid {
+		code := int(exitCode.Int64)
+		r.ExitCode = &code
+	}
+	if stdout.Valid {
+		r.Stdout = stdout.String
+	}
+	if stderr.Valid {
+		r.Stderr = stderr.String
+	}
+	if changedFilesJSON.Valid {
+		r.ChangedFiles, err = unmarshalStringSlice(changedFilesJSON.String)
+		if err != nil {
+			return run.ExecutionRun{}, err
+		}
+	}
+	if changedFilesSemantics.Valid {
+		r.ChangedFilesSemantics = changedFilesSemantics.String
+	}
+	if validationSignalsJSON.Valid {
+		r.ValidationSignals, err = unmarshalStringSlice(validationSignalsJSON.String)
+		if err != nil {
+			return run.ExecutionRun{}, err
+		}
+	}
+	if outputArtifactRef.Valid {
+		r.OutputArtifactRef = outputArtifactRef.String
+	}
+	if structuredSummary.Valid {
+		r.StructuredSummary = structuredSummary.String
 	}
 	r.StartedAt, err = time.Parse(sqliteTimestampLayout, startedAt)
 	if err != nil {

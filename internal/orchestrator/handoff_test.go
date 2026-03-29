@@ -13,6 +13,8 @@ import (
 	"tuku/internal/domain/handoff"
 	"tuku/internal/domain/proof"
 	rundomain "tuku/internal/domain/run"
+	"tuku/internal/domain/shellsession"
+	"tuku/internal/domain/transition"
 	anchorgit "tuku/internal/git/anchor"
 	"tuku/internal/response/canonical"
 	"tuku/internal/storage"
@@ -528,6 +530,13 @@ func TestLaunchHandoffClaudeSuccessFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create handoff: %v", err)
 	}
+	if _, err := coord.AcceptHandoff(context.Background(), AcceptHandoffRequest{
+		TaskID:     string(taskID),
+		HandoffID:  createOut.HandoffID,
+		AcceptedBy: rundomain.WorkerKindClaude,
+	}); err != nil {
+		t.Fatalf("accept handoff: %v", err)
+	}
 
 	launchOut, err := coord.LaunchHandoff(context.Background(), LaunchHandoffRequest{
 		TaskID:    string(taskID),
@@ -547,6 +556,9 @@ func TestLaunchHandoffClaudeSuccessFlow(t *testing.T) {
 	}
 	if launchOut.Payload.BriefID != createOut.Packet.BriefID {
 		t.Fatalf("expected payload brief id %s, got %s", createOut.Packet.BriefID, launchOut.Payload.BriefID)
+	}
+	if launchOut.TransitionReceiptID == "" {
+		t.Fatal("expected continuity transition receipt id on launch result")
 	}
 	if !strings.Contains(strings.ToLower(launchOut.CanonicalResponse), "acknowledgment") {
 		t.Fatalf("expected canonical response to mention acknowledgment, got %q", launchOut.CanonicalResponse)
@@ -570,6 +582,46 @@ func TestLaunchHandoffClaudeSuccessFlow(t *testing.T) {
 	if ack.Summary == "" {
 		t.Fatal("expected non-empty acknowledgment summary")
 	}
+	transitionRec, err := store.TransitionReceipts().LatestByTask(taskID)
+	if err != nil {
+		t.Fatalf("latest continuity transition receipt: %v", err)
+	}
+	if transitionRec.ReceiptID != launchOut.TransitionReceiptID {
+		t.Fatalf("expected transition receipt id %s, got %s", launchOut.TransitionReceiptID, transitionRec.ReceiptID)
+	}
+	if transitionRec.TransitionKind != transition.KindHandoffLaunch {
+		t.Fatalf("expected handoff launch transition kind, got %s", transitionRec.TransitionKind)
+	}
+	if transitionRec.HandoffContinuityBefore != string(HandoffContinuityStateLaunchPendingOutcome) {
+		t.Fatalf("expected launch-pending continuity before launch completion, got %s", transitionRec.HandoffContinuityBefore)
+	}
+	if transitionRec.HandoffContinuityAfter == transitionRec.HandoffContinuityBefore {
+		t.Fatalf("expected continuity transition after launch, got before=%s after=%s", transitionRec.HandoffContinuityBefore, transitionRec.HandoffContinuityAfter)
+	}
+	if transitionRec.ReviewPosture != transition.ReviewPostureNone {
+		t.Fatalf("expected no-session review posture NONE in launch transition, got %s", transitionRec.ReviewPosture)
+	}
+	status, err := coord.StatusTask(context.Background(), string(taskID))
+	if err != nil {
+		t.Fatalf("status task: %v", err)
+	}
+	if status.LatestContinuityTransitionReceipt == nil || status.LatestContinuityTransitionReceipt.ReceiptID != launchOut.TransitionReceiptID {
+		t.Fatalf("expected status latest transition receipt %s, got %+v", launchOut.TransitionReceiptID, status.LatestContinuityTransitionReceipt)
+	}
+	inspectOut, err := coord.InspectTask(context.Background(), string(taskID))
+	if err != nil {
+		t.Fatalf("inspect task: %v", err)
+	}
+	if inspectOut.LatestContinuityTransitionReceipt == nil || inspectOut.LatestContinuityTransitionReceipt.ReceiptID != launchOut.TransitionReceiptID {
+		t.Fatalf("expected inspect latest transition receipt %s, got %+v", launchOut.TransitionReceiptID, inspectOut.LatestContinuityTransitionReceipt)
+	}
+	shellOut, err := coord.ShellSnapshotTask(context.Background(), string(taskID))
+	if err != nil {
+		t.Fatalf("shell snapshot: %v", err)
+	}
+	if shellOut.LatestContinuityTransitionReceipt == nil || shellOut.LatestContinuityTransitionReceipt.ReceiptID != launchOut.TransitionReceiptID {
+		t.Fatalf("expected shell snapshot latest transition receipt %s, got %+v", launchOut.TransitionReceiptID, shellOut.LatestContinuityTransitionReceipt)
+	}
 
 	events, err := store.Proofs().ListByTask(taskID, 500)
 	if err != nil {
@@ -586,6 +638,169 @@ func TestLaunchHandoffClaudeSuccessFlow(t *testing.T) {
 	}
 	if !hasEvent(events, proof.EventCanonicalResponseEmitted) {
 		t.Fatal("expected canonical response proof event")
+	}
+	if !hasEvent(events, proof.EventBranchHandoffTransitionRecorded) {
+		t.Fatal("expected branch/handoff transition proof event")
+	}
+}
+
+func TestLaunchHandoffTransitionReceiptSnapshotsSourceScopedStaleReviewAndAcknowledgment(t *testing.T) {
+	store := newTestStore(t)
+	launcher := newFakeHandoffLauncherSuccess()
+	coord := newTestCoordinatorWithLauncher(t, store, defaultAnchor(), newFakeAdapterSuccess(), launcher)
+	taskID := setupTaskWithBrief(t, coord)
+	base := time.Unix(1713100000, 0).UTC()
+
+	if _, err := coord.ReportShellSession(context.Background(), ReportShellSessionRequest{
+		TaskID:    string(taskID),
+		SessionID: "shs_launch_scope_stale",
+		HostMode:  "transcript",
+		HostState: "transcript-only",
+		StartedAt: base,
+		Active:    true,
+	}); err != nil {
+		t.Fatalf("report shell session: %v", err)
+	}
+	if _, err := coord.RecordShellTranscript(context.Background(), RecordShellTranscriptRequest{
+		TaskID:    string(taskID),
+		SessionID: "shs_launch_scope_stale",
+		Chunks: []RecordShellTranscriptChunk{
+			{Source: shellsession.TranscriptSourceWorkerOutput, Content: "worker line 1", CreatedAt: base.Add(1 * time.Second)},
+			{Source: shellsession.TranscriptSourceSystemNote, Content: "system note", CreatedAt: base.Add(2 * time.Second)},
+			{Source: shellsession.TranscriptSourceWorkerOutput, Content: "worker line 2", CreatedAt: base.Add(3 * time.Second)},
+		},
+	}); err != nil {
+		t.Fatalf("record shell transcript: %v", err)
+	}
+	if _, err := coord.RecordShellTranscriptReview(context.Background(), RecordShellTranscriptReviewRequest{
+		TaskID:          string(taskID),
+		SessionID:       "shs_launch_scope_stale",
+		Source:          string(shellsession.TranscriptSourceWorkerOutput),
+		ReviewedUpToSeq: 1,
+		Summary:         "reviewed worker output through first retained sequence",
+	}); err != nil {
+		t.Fatalf("record source-scoped transcript review: %v", err)
+	}
+	ackOut, err := coord.RecordOperatorReviewGapAcknowledgment(context.Background(), RecordOperatorReviewGapAcknowledgmentRequest{
+		TaskID:    string(taskID),
+		SessionID: "shs_launch_scope_stale",
+		Summary:   "launching handoff with source-scoped stale transcript review awareness",
+	})
+	if err != nil {
+		t.Fatalf("record operator review-gap acknowledgment: %v", err)
+	}
+	if ackOut.Acknowledgment.Class != shellsession.TranscriptReviewGapAckSourceScopedStale {
+		t.Fatalf("expected source-scoped stale acknowledgment class, got %+v", ackOut.Acknowledgment)
+	}
+
+	createOut, err := coord.CreateHandoff(context.Background(), CreateHandoffRequest{
+		TaskID:       string(taskID),
+		TargetWorker: rundomain.WorkerKindClaude,
+		Reason:       "launch under source-scoped stale review posture",
+		Mode:         handoff.ModeResume,
+	})
+	if err != nil {
+		t.Fatalf("create handoff: %v", err)
+	}
+	if _, err := coord.AcceptHandoff(context.Background(), AcceptHandoffRequest{
+		TaskID:     string(taskID),
+		HandoffID:  createOut.HandoffID,
+		AcceptedBy: rundomain.WorkerKindClaude,
+	}); err != nil {
+		t.Fatalf("accept handoff: %v", err)
+	}
+	launchOut, err := coord.LaunchHandoff(context.Background(), LaunchHandoffRequest{
+		TaskID:    string(taskID),
+		HandoffID: createOut.HandoffID,
+	})
+	if err != nil {
+		t.Fatalf("launch handoff: %v", err)
+	}
+	if launchOut.TransitionReceiptID == "" {
+		t.Fatal("expected launch transition receipt id")
+	}
+	transitionRec, err := store.TransitionReceipts().LatestByTask(taskID)
+	if err != nil {
+		t.Fatalf("latest transition receipt: %v", err)
+	}
+	if transitionRec.ReceiptID != launchOut.TransitionReceiptID {
+		t.Fatalf("expected transition receipt id %s, got %s", launchOut.TransitionReceiptID, transitionRec.ReceiptID)
+	}
+	if transitionRec.ReviewPosture != transition.ReviewPostureSourceScopedReviewStale {
+		t.Fatalf("expected source-scoped stale review posture, got %s", transitionRec.ReviewPosture)
+	}
+	if transitionRec.ReviewScope != shellsession.TranscriptSourceWorkerOutput {
+		t.Fatalf("expected worker-output review scope snapshot, got %s", transitionRec.ReviewScope)
+	}
+	if !transitionRec.ReviewGapPresent {
+		t.Fatal("expected review-gap present for source-scoped stale posture")
+	}
+	if !transitionRec.AcknowledgmentPresent {
+		t.Fatalf("expected acknowledgment-present transition receipt, got %+v", transitionRec)
+	}
+	if transitionRec.AcknowledgmentClass != shellsession.TranscriptReviewGapAckSourceScopedStale {
+		t.Fatalf("expected source-scoped stale acknowledgment class in transition receipt, got %s", transitionRec.AcknowledgmentClass)
+	}
+	if transitionRec.LatestReviewAckID != ackOut.Acknowledgment.AcknowledgmentID {
+		t.Fatalf("expected linked latest review-gap acknowledgment id %s, got %s", ackOut.Acknowledgment.AcknowledgmentID, transitionRec.LatestReviewAckID)
+	}
+	if transitionRec.OldestUnreviewedSequence == 0 || transitionRec.UnreviewedRetainedCount == 0 {
+		t.Fatalf("expected retained unreviewed snapshot evidence, got %+v", transitionRec)
+	}
+}
+
+func TestLaunchHandoffReplayCompletedDoesNotDuplicateTransitionReceipt(t *testing.T) {
+	store := newTestStore(t)
+	launcher := newFakeHandoffLauncherSuccess()
+	coord := newTestCoordinatorWithLauncher(t, store, defaultAnchor(), newFakeAdapterSuccess(), launcher)
+	taskID := setupTaskWithBrief(t, coord)
+
+	createOut, err := coord.CreateHandoff(context.Background(), CreateHandoffRequest{
+		TaskID:       string(taskID),
+		TargetWorker: rundomain.WorkerKindClaude,
+		Reason:       "transition receipt replay guard",
+		Mode:         handoff.ModeResume,
+	})
+	if err != nil {
+		t.Fatalf("create handoff: %v", err)
+	}
+	if _, err := coord.AcceptHandoff(context.Background(), AcceptHandoffRequest{
+		TaskID:     string(taskID),
+		HandoffID:  createOut.HandoffID,
+		AcceptedBy: rundomain.WorkerKindClaude,
+	}); err != nil {
+		t.Fatalf("accept handoff: %v", err)
+	}
+
+	first, err := coord.LaunchHandoff(context.Background(), LaunchHandoffRequest{
+		TaskID:    string(taskID),
+		HandoffID: createOut.HandoffID,
+	})
+	if err != nil {
+		t.Fatalf("first launch handoff: %v", err)
+	}
+	second, err := coord.LaunchHandoff(context.Background(), LaunchHandoffRequest{
+		TaskID:    string(taskID),
+		HandoffID: createOut.HandoffID,
+	})
+	if err != nil {
+		t.Fatalf("replayed launch handoff: %v", err)
+	}
+	if first.TransitionReceiptID == "" {
+		t.Fatalf("expected first launch transition receipt id, got %+v", first)
+	}
+	if second.TransitionReceiptID != "" {
+		t.Fatalf("expected replayed launch to reuse durable outcome without new transition receipt id, got %+v", second)
+	}
+	history, err := store.TransitionReceipts().ListByTask(taskID, 10)
+	if err != nil {
+		t.Fatalf("list transition receipts: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected exactly one transition receipt after replayed launch, got %+v", history)
+	}
+	if history[0].ReceiptID != first.TransitionReceiptID {
+		t.Fatalf("expected persisted transition receipt %s, got %+v", first.TransitionReceiptID, history[0])
 	}
 }
 
@@ -1456,6 +1671,9 @@ func TestRecordHandoffResolutionSupersededByLocalUnblocksAcceptedClaudeBranch(t 
 	if recorded.HandoffContinuity.State != HandoffContinuityStateResolved {
 		t.Fatalf("expected resolved handoff continuity, got %+v", recorded.HandoffContinuity)
 	}
+	if recorded.TransitionReceiptID == "" {
+		t.Fatal("expected transition receipt id on handoff resolution result")
+	}
 	if recorded.RecoveryClass != RecoveryClassReadyNextRun {
 		t.Fatalf("expected local next-run recovery after resolution, got %s", recorded.RecoveryClass)
 	}
@@ -1473,6 +1691,22 @@ func TestRecordHandoffResolutionSupersededByLocalUnblocksAcceptedClaudeBranch(t 
 	if persisted.ResolutionID != recorded.Record.ResolutionID {
 		t.Fatalf("expected persisted resolution %s, got %s", recorded.Record.ResolutionID, persisted.ResolutionID)
 	}
+	transitionRec, err := store.TransitionReceipts().LatestByTask(taskID)
+	if err != nil {
+		t.Fatalf("latest transition receipt: %v", err)
+	}
+	if transitionRec.ReceiptID != recorded.TransitionReceiptID {
+		t.Fatalf("expected transition receipt id %s, got %s", recorded.TransitionReceiptID, transitionRec.ReceiptID)
+	}
+	if transitionRec.TransitionKind != transition.KindHandoffResolution {
+		t.Fatalf("expected handoff-resolution transition kind, got %s", transitionRec.TransitionKind)
+	}
+	if transitionRec.BranchClassBefore != string(ActiveBranchClassHandoffClaude) || transitionRec.BranchClassAfter != string(ActiveBranchClassLocal) {
+		t.Fatalf("expected branch ownership to transition handoff->local, got before=%s after=%s", transitionRec.BranchClassBefore, transitionRec.BranchClassAfter)
+	}
+	if transitionRec.HandoffContinuityBefore != string(HandoffContinuityStateAcceptedNotLaunched) || transitionRec.HandoffContinuityAfter != string(HandoffContinuityStateNotApplicable) {
+		t.Fatalf("expected continuity transition accepted-not-launched->not-applicable after resolution, got before=%s after=%s", transitionRec.HandoffContinuityBefore, transitionRec.HandoffContinuityAfter)
+	}
 
 	status, err := coord.StatusTask(context.Background(), string(taskID))
 	if err != nil {
@@ -1483,6 +1717,9 @@ func TestRecordHandoffResolutionSupersededByLocalUnblocksAcceptedClaudeBranch(t 
 	}
 	if status.LatestResolutionKind != handoff.ResolutionSupersededByLocal {
 		t.Fatalf("expected resolution kind in status, got %s", status.LatestResolutionKind)
+	}
+	if status.LatestContinuityTransitionReceipt == nil || status.LatestContinuityTransitionReceipt.ReceiptID != recorded.TransitionReceiptID {
+		t.Fatalf("expected status transition receipt %s, got %+v", recorded.TransitionReceiptID, status.LatestContinuityTransitionReceipt)
 	}
 
 	inspectOut, err := coord.InspectTask(context.Background(), string(taskID))
@@ -1498,6 +1735,16 @@ func TestRecordHandoffResolutionSupersededByLocalUnblocksAcceptedClaudeBranch(t 
 	if inspectOut.HandoffContinuity == nil || inspectOut.HandoffContinuity.State != HandoffContinuityStateNotApplicable {
 		t.Fatalf("expected no active handoff continuity in inspect after resolution, got %+v", inspectOut.HandoffContinuity)
 	}
+	if inspectOut.LatestContinuityTransitionReceipt == nil || inspectOut.LatestContinuityTransitionReceipt.ReceiptID != recorded.TransitionReceiptID {
+		t.Fatalf("expected inspect transition receipt %s, got %+v", recorded.TransitionReceiptID, inspectOut.LatestContinuityTransitionReceipt)
+	}
+	shellOut, err := coord.ShellSnapshotTask(context.Background(), string(taskID))
+	if err != nil {
+		t.Fatalf("shell snapshot task: %v", err)
+	}
+	if shellOut.LatestContinuityTransitionReceipt == nil || shellOut.LatestContinuityTransitionReceipt.ReceiptID != recorded.TransitionReceiptID {
+		t.Fatalf("expected shell transition receipt %s, got %+v", recorded.TransitionReceiptID, shellOut.LatestContinuityTransitionReceipt)
+	}
 
 	events, err := store.Proofs().ListByTask(taskID, 500)
 	if err != nil {
@@ -1505,6 +1752,9 @@ func TestRecordHandoffResolutionSupersededByLocalUnblocksAcceptedClaudeBranch(t 
 	}
 	if countEvents(events, proof.EventHandoffResolutionRecorded) != 1 {
 		t.Fatalf("expected exactly one HANDOFF_RESOLUTION_RECORDED event, got %d", countEvents(events, proof.EventHandoffResolutionRecorded))
+	}
+	if countEvents(events, proof.EventBranchHandoffTransitionRecorded) < 1 {
+		t.Fatalf("expected transition proof event for resolution, got %d", countEvents(events, proof.EventBranchHandoffTransitionRecorded))
 	}
 }
 
@@ -1609,6 +1859,19 @@ func TestRecordHandoffResolutionRejectsNoActiveBranchAndReplaysDeterministically
 	}
 	if first.Record.ResolutionID != second.Record.ResolutionID {
 		t.Fatalf("expected replay reuse of resolution, got first=%s second=%s", first.Record.ResolutionID, second.Record.ResolutionID)
+	}
+	transitionHistory, err := store.TransitionReceipts().ListByTask(taskID, 10)
+	if err != nil {
+		t.Fatalf("list transition receipts: %v", err)
+	}
+	if len(transitionHistory) != 1 {
+		t.Fatalf("expected exactly one transition receipt for replayed resolution, got %+v", transitionHistory)
+	}
+	if first.TransitionReceiptID == "" || transitionHistory[0].ReceiptID != first.TransitionReceiptID {
+		t.Fatalf("expected first resolution transition receipt %s to remain latest, got %+v", first.TransitionReceiptID, transitionHistory[0])
+	}
+	if second.TransitionReceiptID != "" {
+		t.Fatalf("expected replayed resolution to avoid creating a new transition receipt id, got %+v", second)
 	}
 	if _, err := coord.RecordHandoffResolution(context.Background(), RecordHandoffResolutionRequest{
 		TaskID:  string(taskID),

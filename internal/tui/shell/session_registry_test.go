@@ -109,7 +109,7 @@ func TestSessionRegistrySummaryShowsAnotherKnownSession(t *testing.T) {
 	}
 
 	summary := sessionRegistrySummary(session)
-	if !strings.Contains(summary, "another attachable shell session is known") {
+	if !strings.Contains(summary, "attachable session known") {
 		t.Fatalf("expected another-session summary, got %q", summary)
 	}
 }
@@ -123,7 +123,7 @@ func TestSessionRegistrySummaryShowsStaleSession(t *testing.T) {
 	}
 
 	summary := sessionRegistrySummary(session)
-	if !strings.Contains(summary, "stale shell session is known") {
+	if !strings.Contains(summary, "stale session known") {
 		t.Fatalf("expected stale-session summary, got %q", summary)
 	}
 }
@@ -137,7 +137,7 @@ func TestSessionRegistrySummaryShowsPriorEndedSession(t *testing.T) {
 	}
 
 	summary := sessionRegistrySummary(session)
-	if !strings.Contains(summary, "prior ended shell session is known") {
+	if !strings.Contains(summary, "prior ended session known") {
 		t.Fatalf("expected prior-ended summary, got %q", summary)
 	}
 }
@@ -165,7 +165,32 @@ func TestSessionRegistrySummaryShowsActiveUnattachableSession(t *testing.T) {
 	}
 
 	summary := sessionRegistrySummary(session)
-	if !strings.Contains(summary, "another active but non-attachable shell session is known") {
+	if !strings.Contains(summary, "active non-attachable session known") {
 		t.Fatalf("expected active-unattachable summary, got %q", summary)
+	}
+}
+
+func TestRefreshWorkerSessionAnchorRequiresAuthoritativeIDForAttachable(t *testing.T) {
+	now := time.Unix(1710000000, 0).UTC()
+	session := newSessionState(now)
+
+	refreshWorkerSessionAnchor(&session, HostStatus{
+		Mode:                  HostModeCodexPTY,
+		State:                 HostStateLive,
+		WorkerSessionID:       "wks_heuristic",
+		WorkerSessionIDSource: WorkerSessionIDSourceHeuristic,
+	})
+	if session.AttachCapability != WorkerAttachCapabilityNone {
+		t.Fatalf("expected non-authoritative worker session id to remain non-attachable, got %s", session.AttachCapability)
+	}
+
+	refreshWorkerSessionAnchor(&session, HostStatus{
+		Mode:                  HostModeCodexPTY,
+		State:                 HostStateLive,
+		WorkerSessionID:       "wks_auth",
+		WorkerSessionIDSource: WorkerSessionIDSourceAuthoritative,
+	})
+	if session.AttachCapability != WorkerAttachCapabilityAttachable {
+		t.Fatalf("expected authoritative worker session id to become attachable, got %s", session.AttachCapability)
 	}
 }

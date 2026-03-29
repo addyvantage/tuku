@@ -10,12 +10,14 @@ import (
 	contextdomain "tuku/internal/domain/context"
 	"tuku/internal/domain/conversation"
 	"tuku/internal/domain/handoff"
+	"tuku/internal/domain/incidenttriage"
 	"tuku/internal/domain/intent"
 	"tuku/internal/domain/operatorstep"
 	"tuku/internal/domain/policy"
 	"tuku/internal/domain/proof"
 	"tuku/internal/domain/recoveryaction"
 	"tuku/internal/domain/run"
+	"tuku/internal/domain/transition"
 )
 
 type CapsuleStore interface {
@@ -50,6 +52,7 @@ type RunStore interface {
 	Create(run run.ExecutionRun) error
 	Get(runID common.RunID) (run.ExecutionRun, error)
 	LatestByTask(taskID common.TaskID) (run.ExecutionRun, error)
+	ListByTask(taskID common.TaskID, limit int) ([]run.ExecutionRun, error)
 	LatestRunningByTask(taskID common.TaskID) (run.ExecutionRun, error)
 	Update(run run.ExecutionRun) error
 }
@@ -91,6 +94,33 @@ type OperatorStepReceiptStore interface {
 	ListByTask(taskID common.TaskID, limit int) ([]operatorstep.Receipt, error)
 }
 
+type TransitionReceiptStore interface {
+	Create(record transition.Receipt) error
+	GetByTaskReceipt(taskID common.TaskID, receiptID common.EventID) (transition.Receipt, error)
+	LatestByTask(taskID common.TaskID) (transition.Receipt, error)
+	ListByTask(taskID common.TaskID, limit int) ([]transition.Receipt, error)
+	ListByTaskFiltered(taskID common.TaskID, filter transition.ReceiptListFilter) ([]transition.Receipt, error)
+	ListByTaskAfter(taskID common.TaskID, afterReceiptID common.EventID, afterCreatedAt time.Time, limit int) ([]transition.Receipt, error)
+}
+
+type IncidentTriageStore interface {
+	Create(record incidenttriage.Receipt) error
+	GetByTaskReceipt(taskID common.TaskID, receiptID common.EventID) (incidenttriage.Receipt, error)
+	LatestByTask(taskID common.TaskID) (incidenttriage.Receipt, error)
+	LatestByTaskAnchor(taskID common.TaskID, anchorTransitionReceiptID common.EventID) (incidenttriage.Receipt, error)
+	ListByTask(taskID common.TaskID, limit int) ([]incidenttriage.Receipt, error)
+	ListByTaskFiltered(taskID common.TaskID, filter incidenttriage.ReceiptListFilter) ([]incidenttriage.Receipt, error)
+}
+
+type IncidentFollowUpStore interface {
+	Create(record incidenttriage.FollowUpReceipt) error
+	GetByTaskReceipt(taskID common.TaskID, receiptID common.EventID) (incidenttriage.FollowUpReceipt, error)
+	LatestByTask(taskID common.TaskID) (incidenttriage.FollowUpReceipt, error)
+	LatestByTaskAnchor(taskID common.TaskID, anchorTransitionReceiptID common.EventID) (incidenttriage.FollowUpReceipt, error)
+	ListByTask(taskID common.TaskID, limit int) ([]incidenttriage.FollowUpReceipt, error)
+	ListByTaskFiltered(taskID common.TaskID, filter incidenttriage.FollowUpReceiptListFilter) ([]incidenttriage.FollowUpReceipt, error)
+}
+
 type ContextPackStore interface {
 	Save(pack contextdomain.Pack) error
 	Get(id common.ContextPackID) (contextdomain.Pack, error)
@@ -112,6 +142,9 @@ type Store interface {
 	Handoffs() HandoffStore
 	RecoveryActions() RecoveryActionStore
 	OperatorStepReceipts() OperatorStepReceiptStore
+	TransitionReceipts() TransitionReceiptStore
+	IncidentTriages() IncidentTriageStore
+	IncidentFollowUps() IncidentFollowUpStore
 	ContextPacks() ContextPackStore
 	PolicyDecisions() PolicyDecisionStore
 	WithTx(fn func(Store) error) error

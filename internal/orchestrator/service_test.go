@@ -20,6 +20,7 @@ import (
 	"tuku/internal/domain/proof"
 	"tuku/internal/domain/recoveryaction"
 	rundomain "tuku/internal/domain/run"
+	"tuku/internal/domain/shellsession"
 	anchorgit "tuku/internal/git/anchor"
 	"tuku/internal/response/canonical"
 	"tuku/internal/storage"
@@ -461,6 +462,21 @@ func TestRunRealSuccessCompletesAndRecordsEvidence(t *testing.T) {
 	store := newTestStore(t)
 	coord := newTestCoordinator(t, store, defaultAnchor(), newFakeAdapterSuccess())
 	taskID := setupTaskWithBrief(t, coord)
+	if _, err := coord.ReportShellSession(context.Background(), ReportShellSessionRequest{
+		TaskID:                string(taskID),
+		SessionID:             "shs_run_success",
+		WorkerPreference:      "codex",
+		ResolvedWorker:        "codex",
+		WorkerSessionID:       "wks_run_success",
+		WorkerSessionIDSource: shellsession.WorkerSessionIDSourceAuthoritative,
+		AttachCapability:      shellsession.AttachCapabilityAttachable,
+		HostMode:              "codex-pty",
+		HostState:             "live",
+		StartedAt:             time.Unix(1710000000, 0).UTC(),
+		Active:                true,
+	}); err != nil {
+		t.Fatalf("report shell session before run: %v", err)
+	}
 
 	res, err := coord.RunTask(context.Background(), RunTaskRequest{TaskID: string(taskID), Action: "start", Mode: "real"})
 	if err != nil {
@@ -485,6 +501,27 @@ func TestRunRealSuccessCompletesAndRecordsEvidence(t *testing.T) {
 	}
 	if runRec.Status != rundomain.StatusCompleted {
 		t.Fatalf("expected run status completed, got %s", runRec.Status)
+	}
+	if runRec.WorkerRunID == "" {
+		t.Fatal("expected durable worker run id")
+	}
+	if runRec.ShellSessionID != "shs_run_success" {
+		t.Fatalf("expected durable shell session linkage, got %q", runRec.ShellSessionID)
+	}
+	if runRec.Command == "" {
+		t.Fatal("expected durable command evidence")
+	}
+	if runRec.ExitCode == nil || *runRec.ExitCode != 0 {
+		t.Fatalf("expected durable exit code 0, got %+v", runRec.ExitCode)
+	}
+	if runRec.Stdout == "" {
+		t.Fatal("expected durable stdout evidence")
+	}
+	if len(runRec.ChangedFiles) == 0 {
+		t.Fatal("expected durable changed file evidence")
+	}
+	if len(runRec.ValidationSignals) == 0 {
+		t.Fatal("expected durable validation signal evidence")
 	}
 
 	events, err := store.Proofs().ListByTask(taskID, 80)
@@ -538,6 +575,76 @@ func TestRunRealFailureMarksBlocked(t *testing.T) {
 	}
 }
 
+func TestStatusInspectAndShellSnapshotSurfaceDurableExecutionAndSessionEvidence(t *testing.T) {
+	store := newTestStore(t)
+	coord := newTestCoordinator(t, store, defaultAnchor(), newFakeAdapterSuccess())
+	taskID := setupTaskWithBrief(t, coord)
+	if _, err := coord.ReportShellSession(context.Background(), ReportShellSessionRequest{
+		TaskID:                string(taskID),
+		SessionID:             "shs_surface",
+		WorkerPreference:      "codex",
+		ResolvedWorker:        "codex",
+		WorkerSessionID:       "wks_surface",
+		WorkerSessionIDSource: shellsession.WorkerSessionIDSourceAuthoritative,
+		AttachCapability:      shellsession.AttachCapabilityAttachable,
+		HostMode:              "codex-pty",
+		HostState:             "live",
+		StartedAt:             time.Unix(1710000100, 0).UTC(),
+		Active:                true,
+	}); err != nil {
+		t.Fatalf("report shell session: %v", err)
+	}
+	runRes, err := coord.RunTask(context.Background(), RunTaskRequest{TaskID: string(taskID), Action: "start", Mode: "real"})
+	if err != nil {
+		t.Fatalf("run start real: %v", err)
+	}
+
+	statusOut, err := coord.StatusTask(context.Background(), string(taskID))
+	if err != nil {
+		t.Fatalf("status task: %v", err)
+	}
+	if statusOut.LatestRunID != runRes.RunID || statusOut.LatestRunWorkerRunID == "" {
+		t.Fatalf("expected status to surface run evidence, got %+v", statusOut)
+	}
+	if statusOut.LatestRunExitCode == nil || *statusOut.LatestRunExitCode != 0 {
+		t.Fatalf("expected status exit code 0, got %+v", statusOut.LatestRunExitCode)
+	}
+	if statusOut.LatestRunShellSessionID != "shs_surface" || statusOut.LatestShellSessionID == "" {
+		t.Fatalf("expected status shell linkage, got latest_run_shell=%q latest_shell=%q", statusOut.LatestRunShellSessionID, statusOut.LatestShellSessionID)
+	}
+	if statusOut.LatestShellEventKind == "" {
+		t.Fatal("expected status to surface latest shell event kind")
+	}
+
+	inspectOut, err := coord.InspectTask(context.Background(), string(taskID))
+	if err != nil {
+		t.Fatalf("inspect task: %v", err)
+	}
+	if inspectOut.Run == nil || inspectOut.Run.WorkerRunID == "" || inspectOut.Run.Stdout == "" {
+		t.Fatalf("expected inspect to surface durable run evidence, got %+v", inspectOut.Run)
+	}
+	if len(inspectOut.ShellSessions) == 0 {
+		t.Fatal("expected inspect to surface durable shell sessions")
+	}
+	if len(inspectOut.RecentShellEvents) == 0 {
+		t.Fatal("expected inspect to surface durable shell events")
+	}
+
+	shellOut, err := coord.ShellSnapshotTask(context.Background(), string(taskID))
+	if err != nil {
+		t.Fatalf("shell snapshot task: %v", err)
+	}
+	if shellOut.Run == nil || shellOut.Run.WorkerRunID == "" || shellOut.Run.Stdout == "" {
+		t.Fatalf("expected shell snapshot run evidence, got %+v", shellOut.Run)
+	}
+	if len(shellOut.ShellSessions) == 0 {
+		t.Fatal("expected shell snapshot to surface shell sessions")
+	}
+	if len(shellOut.RecentShellEvents) == 0 {
+		t.Fatal("expected shell snapshot to surface shell session events")
+	}
+}
+
 func TestRunRealAdapterErrorMarksBlocked(t *testing.T) {
 	store := newTestStore(t)
 	coord := newTestCoordinator(t, store, defaultAnchor(), newFakeAdapterError(errors.New("codex missing")))
@@ -549,6 +656,16 @@ func TestRunRealAdapterErrorMarksBlocked(t *testing.T) {
 	}
 	if res.RunStatus != rundomain.StatusFailed {
 		t.Fatalf("expected failed status, got %s", res.RunStatus)
+	}
+	latestRun, err := store.Runs().LatestByTask(taskID)
+	if err != nil {
+		t.Fatalf("latest run by task: %v", err)
+	}
+	if latestRun.Status != rundomain.StatusFailed {
+		t.Fatalf("expected durable failed run status, got %s", latestRun.Status)
+	}
+	if _, err := store.Runs().LatestRunningByTask(taskID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected no stale RUNNING run after adapter error, got err=%v", err)
 	}
 }
 
@@ -4030,6 +4147,18 @@ func (s *faultInjectedStore) OperatorStepReceipts() storage.OperatorStepReceiptS
 	return s.base.OperatorStepReceipts()
 }
 
+func (s *faultInjectedStore) TransitionReceipts() storage.TransitionReceiptStore {
+	return s.base.TransitionReceipts()
+}
+
+func (s *faultInjectedStore) IncidentTriages() storage.IncidentTriageStore {
+	return s.base.IncidentTriages()
+}
+
+func (s *faultInjectedStore) IncidentFollowUps() storage.IncidentFollowUpStore {
+	return s.base.IncidentFollowUps()
+}
+
 func (s *faultInjectedStore) ContextPacks() storage.ContextPackStore {
 	return s.base.ContextPacks()
 }
@@ -4071,6 +4200,18 @@ func (s *txCountingStore) Briefs() storage.BriefStore {
 
 func (s *txCountingStore) OperatorStepReceipts() storage.OperatorStepReceiptStore {
 	return s.base.OperatorStepReceipts()
+}
+
+func (s *txCountingStore) TransitionReceipts() storage.TransitionReceiptStore {
+	return s.base.TransitionReceipts()
+}
+
+func (s *txCountingStore) IncidentTriages() storage.IncidentTriageStore {
+	return s.base.IncidentTriages()
+}
+
+func (s *txCountingStore) IncidentFollowUps() storage.IncidentFollowUpStore {
+	return s.base.IncidentFollowUps()
 }
 
 func (s *txCountingStore) Proofs() storage.ProofStore {

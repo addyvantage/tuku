@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +50,22 @@ type stubSnapshotSource struct {
 	next     []Snapshot
 }
 
+type stubTranscriptSink struct {
+	appends []transcriptAppendCall
+	err     error
+}
+
+type transcriptAppendCall struct {
+	taskID    string
+	sessionID string
+	chunks    []TranscriptEvidenceChunk
+}
+
+type transcriptProviderStubHost struct {
+	stubHost
+	pending []TranscriptEvidenceChunk
+}
+
 func (s *stubSnapshotSource) Load(taskID string) (Snapshot, error) {
 	s.loads = append(s.loads, taskID)
 	if s.err != nil {
@@ -61,6 +78,32 @@ func (s *stubSnapshotSource) Load(taskID string) (Snapshot, error) {
 		return next, nil
 	}
 	return s.snapshot, nil
+}
+
+func (s *stubTranscriptSink) Append(taskID string, sessionID string, chunks []TranscriptEvidenceChunk) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.appends = append(s.appends, transcriptAppendCall{
+		taskID:    taskID,
+		sessionID: sessionID,
+		chunks:    append([]TranscriptEvidenceChunk{}, chunks...),
+	})
+	return nil
+}
+
+func (h *transcriptProviderStubHost) DrainTranscriptEvidence(limit int) []TranscriptEvidenceChunk {
+	if len(h.pending) == 0 {
+		return nil
+	}
+	if limit <= 0 || limit >= len(h.pending) {
+		out := append([]TranscriptEvidenceChunk{}, h.pending...)
+		h.pending = nil
+		return out
+	}
+	out := append([]TranscriptEvidenceChunk{}, h.pending[:limit]...)
+	h.pending = append([]TranscriptEvidenceChunk{}, h.pending[limit:]...)
+	return out
 }
 
 func (s *stubLifecycleSink) Record(taskID string, sessionID string, kind PersistedLifecycleKind, status HostStatus) error {
@@ -266,6 +309,50 @@ func TestExecutePrimaryOperatorStepRejectsGuidanceOnlyPrimaryStep(t *testing.T) 
 	}
 	if ui.LastPrimaryActionResult != nil {
 		t.Fatalf("expected no execution summary for non-executable step, got %+v", ui.LastPrimaryActionResult)
+	}
+}
+
+func TestFlushTranscriptEvidenceAppendsDrainedChunks(t *testing.T) {
+	host := &transcriptProviderStubHost{
+		stubHost: stubHost{},
+		pending: []TranscriptEvidenceChunk{
+			{Source: "worker_output", Content: "line 1", CreatedAt: time.Unix(1710000000, 0).UTC()},
+			{Source: "worker_output", Content: "line 2", CreatedAt: time.Unix(1710000001, 0).UTC()},
+		},
+	}
+	sink := &stubTranscriptSink{}
+	ui := &UIState{}
+
+	flushTranscriptEvidence("tsk_1", "shs_1", host, sink, ui)
+
+	if len(sink.appends) != 1 {
+		t.Fatalf("expected one transcript append call, got %d", len(sink.appends))
+	}
+	if sink.appends[0].taskID != "tsk_1" || sink.appends[0].sessionID != "shs_1" {
+		t.Fatalf("unexpected transcript append routing: %+v", sink.appends[0])
+	}
+	if len(sink.appends[0].chunks) != 2 {
+		t.Fatalf("expected two appended transcript chunks, got %+v", sink.appends[0].chunks)
+	}
+	if len(host.pending) != 0 {
+		t.Fatalf("expected transcript host pending buffer to drain, still have %d", len(host.pending))
+	}
+}
+
+func TestFlushTranscriptEvidenceSurfacesSinkFailure(t *testing.T) {
+	host := &transcriptProviderStubHost{
+		stubHost: stubHost{},
+		pending: []TranscriptEvidenceChunk{
+			{Source: "worker_output", Content: "line 1", CreatedAt: time.Unix(1710000000, 0).UTC()},
+		},
+	}
+	sink := &stubTranscriptSink{err: errors.New("append failed")}
+	ui := &UIState{}
+
+	flushTranscriptEvidence("tsk_1", "shs_1", host, sink, ui)
+
+	if !strings.Contains(ui.LastError, "shell transcript evidence append failed") {
+		t.Fatalf("expected transcript append failure surfaced in ui error, got %q", ui.LastError)
 	}
 }
 

@@ -9,39 +9,58 @@ import (
 	"tuku/internal/domain/handoff"
 	"tuku/internal/domain/operatorstep"
 	"tuku/internal/domain/proof"
+	"tuku/internal/domain/shellsession"
+	"tuku/internal/domain/transition"
 )
 
 type ExecutePrimaryOperatorStepRequest struct {
-	TaskID string
+	TaskID                      string
+	AcknowledgeReviewGap        bool
+	ReviewGapSessionID          string
+	ReviewGapAcknowledgmentKind string
+	ReviewGapSummary            string
 }
 
 type ExecutePrimaryOperatorStepResult struct {
-	TaskID                     common.TaskID
-	Receipt                    operatorstep.Receipt
-	ActiveBranch               ActiveBranchProvenance
-	OperatorDecision           OperatorDecisionSummary
-	OperatorExecutionPlan      OperatorExecutionPlan
-	RecoveryClass              RecoveryClass
-	RecommendedAction          RecoveryAction
-	ReadyForNextRun            bool
-	ReadyForHandoffLaunch      bool
-	RecoveryReason             string
-	CanonicalResponse          string
-	RecentOperatorStepReceipts []operatorstep.Receipt
+	TaskID                                   common.TaskID
+	Receipt                                  operatorstep.Receipt
+	ActiveBranch                             ActiveBranchProvenance
+	OperatorDecision                         OperatorDecisionSummary
+	OperatorExecutionPlan                    OperatorExecutionPlan
+	RecoveryClass                            RecoveryClass
+	RecommendedAction                        RecoveryAction
+	ReadyForNextRun                          bool
+	ReadyForHandoffLaunch                    bool
+	RecoveryReason                           string
+	CanonicalResponse                        string
+	RecentOperatorStepReceipts               []operatorstep.Receipt
+	LatestContinuityTransitionReceipt        *ContinuityTransitionReceiptSummary
+	RecentContinuityTransitionReceipts       []ContinuityTransitionReceiptSummary
+	LatestContinuityIncidentTriageReceipt    *ContinuityIncidentTriageReceiptSummary
+	RecentContinuityIncidentTriageReceipts   []ContinuityIncidentTriageReceiptSummary
+	ContinuityIncidentTriageHistoryRollup    *ContinuityIncidentTriageHistoryRollupSummary
+	LatestContinuityIncidentFollowUpReceipt  *ContinuityIncidentFollowUpReceiptSummary
+	RecentContinuityIncidentFollowUpReceipts []ContinuityIncidentFollowUpReceiptSummary
+	ContinuityIncidentFollowUpHistoryRollup  *ContinuityIncidentFollowUpHistoryRollupSummary
+	ContinuityIncidentFollowUp               *ContinuityIncidentFollowUpSummary
+	LatestTranscriptReviewGapAcknowledgment  *TranscriptReviewGapAcknowledgmentSummary
+	RecentTranscriptReviewGapAcknowledgments []TranscriptReviewGapAcknowledgmentSummary
 }
 
 type operatorStepExecutionDispatch struct {
-	attempted         bool
-	resultClass       operatorstep.ResultClass
-	summary           string
-	reason            string
-	canonicalResponse string
-	runID             common.RunID
-	checkpointID      common.CheckpointID
-	briefID           common.BriefID
-	handoffID         string
-	launchAttemptID   string
-	launchID          string
+	attempted           bool
+	resultClass         operatorstep.ResultClass
+	summary             string
+	reason              string
+	canonicalResponse   string
+	runID               common.RunID
+	checkpointID        common.CheckpointID
+	briefID             common.BriefID
+	handoffID           string
+	launchAttemptID     string
+	launchID            string
+	transitionReceiptID common.EventID
+	transitionKind      transition.Kind
 }
 
 func (c *Coordinator) ExecutePrimaryOperatorStep(ctx context.Context, req ExecutePrimaryOperatorStepRequest) (ExecutePrimaryOperatorStepResult, error) {
@@ -55,13 +74,35 @@ func (c *Coordinator) ExecutePrimaryOperatorStep(ctx context.Context, req Execut
 		return ExecutePrimaryOperatorStepResult{}, err
 	}
 	_, _, _, _, plan, continuity, _, _ := c.operatorTruthForAssessment(assessment)
+	sessions, err := c.classifiedShellSessions(taskID)
+	if err != nil {
+		return ExecutePrimaryOperatorStepResult{}, err
+	}
+	reviewProgression, err := deriveOperatorReviewProgressionForSessionID(sessions, strings.TrimSpace(req.ReviewGapSessionID))
+	if err != nil {
+		return ExecutePrimaryOperatorStepResult{}, err
+	}
+	var reviewGapAck *shellsession.TranscriptReviewGapAcknowledgment
+	if req.AcknowledgeReviewGap {
+		storedAck, ackErr := c.recordOperatorReviewGapAcknowledgmentFromProgression(
+			taskID,
+			reviewProgression,
+			req.ReviewGapAcknowledgmentKind,
+			req.ReviewGapSummary,
+			"task.operator.next",
+		)
+		if ackErr != nil {
+			return ExecutePrimaryOperatorStepResult{}, ackErr
+		}
+		reviewGapAck = &storedAck
+	}
 	if plan.PrimaryStep == nil {
 		receipt, recErr := c.recordOperatorStepReceipt(ctx, taskID, plan, continuity, operatorStepExecutionDispatch{
 			attempted:   false,
 			resultClass: operatorstep.ResultRejected,
 			summary:     "primary operator step is unavailable",
 			reason:      "no primary operator step is currently available",
-		}, nil)
+		}, nil, reviewProgression, reviewGapAck)
 		if recErr != nil {
 			return ExecutePrimaryOperatorStepResult{}, recErr
 		}
@@ -79,7 +120,7 @@ func (c *Coordinator) ExecutePrimaryOperatorStep(ctx context.Context, req Execut
 			resultClass: operatorstep.ResultRejected,
 			summary:     fmt.Sprintf("rejected %s", stepExecutionLabel(step.Action)),
 			reason:      reason,
-		}, &step)
+		}, &step, reviewProgression, reviewGapAck)
 		if recErr != nil {
 			return ExecutePrimaryOperatorStepResult{}, recErr
 		}
@@ -91,7 +132,10 @@ func (c *Coordinator) ExecutePrimaryOperatorStep(ctx context.Context, req Execut
 	}
 
 	dispatch := c.dispatchPrimaryOperatorStep(ctx, taskID, step, continuity)
-	receipt, err := c.recordOperatorStepReceipt(ctx, taskID, plan, continuity, dispatch, &step)
+	if reviewGapAck != nil && step.Action != "" {
+		reviewGapAck.ActionContext = fmt.Sprintf("task.operator.next:%s", strings.ToLower(string(step.Action)))
+	}
+	receipt, err := c.recordOperatorStepReceipt(ctx, taskID, plan, continuity, dispatch, &step, reviewProgression, reviewGapAck)
 	if err != nil {
 		return ExecutePrimaryOperatorStepResult{}, err
 	}
@@ -170,14 +214,20 @@ func (c *Coordinator) dispatchPrimaryOperatorStep(ctx context.Context, taskID co
 		if err != nil {
 			return classifyOperatorStepError(step, err)
 		}
+		transitionKind := transition.Kind("")
+		if out.TransitionReceiptID != "" {
+			transitionKind = transition.KindHandoffResolution
+		}
 		return operatorStepExecutionDispatch{
-			attempted:         true,
-			resultClass:       operatorstep.ResultSucceeded,
-			summary:           fmt.Sprintf("resolved active handoff %s as %s", out.Record.HandoffID, out.Record.Kind),
-			canonicalResponse: out.CanonicalResponse,
-			handoffID:         out.Record.HandoffID,
-			launchAttemptID:   out.Record.LaunchAttemptID,
-			launchID:          out.Record.LaunchID,
+			attempted:           true,
+			resultClass:         operatorstep.ResultSucceeded,
+			summary:             fmt.Sprintf("resolved active handoff %s as %s", out.Record.HandoffID, out.Record.Kind),
+			canonicalResponse:   out.CanonicalResponse,
+			handoffID:           out.Record.HandoffID,
+			launchAttemptID:     out.Record.LaunchAttemptID,
+			launchID:            out.Record.LaunchID,
+			transitionReceiptID: out.TransitionReceiptID,
+			transitionKind:      transitionKind,
 		}
 	default:
 		return operatorStepExecutionDispatch{
@@ -193,6 +243,7 @@ func launchDispatchFromResult(continuity HandoffContinuity, out LaunchHandoffRes
 	resultClass := operatorstep.ResultSucceeded
 	summary := fmt.Sprintf("launched accepted handoff %s", nonEmpty(out.HandoffID, continuity.HandoffID))
 	reason := ""
+	transitionKind := transition.Kind("")
 	switch out.LaunchStatus {
 	case HandoffLaunchStatusBlocked:
 		resultClass = operatorstep.ResultRejected
@@ -208,13 +259,18 @@ func launchDispatchFromResult(continuity HandoffContinuity, out LaunchHandoffRes
 			summary = fmt.Sprintf("reused durable launch result for handoff %s", nonEmpty(out.HandoffID, continuity.HandoffID))
 		}
 	}
+	if out.TransitionReceiptID != "" {
+		transitionKind = transition.KindHandoffLaunch
+	}
 	return operatorStepExecutionDispatch{
-		resultClass:       resultClass,
-		summary:           summary,
-		reason:            reason,
-		canonicalResponse: out.CanonicalResponse,
-		handoffID:         nonEmpty(out.HandoffID, continuity.HandoffID),
-		launchID:          out.LaunchID,
+		resultClass:         resultClass,
+		summary:             summary,
+		reason:              reason,
+		canonicalResponse:   out.CanonicalResponse,
+		handoffID:           nonEmpty(out.HandoffID, continuity.HandoffID),
+		launchID:            out.LaunchID,
+		transitionReceiptID: out.TransitionReceiptID,
+		transitionKind:      transitionKind,
 	}
 }
 
@@ -244,23 +300,38 @@ func stepExecutionLabel(action OperatorAction) string {
 	return strings.ToLower(strings.TrimSpace(string(action)))
 }
 
-func (c *Coordinator) recordOperatorStepReceipt(_ context.Context, taskID common.TaskID, plan OperatorExecutionPlan, continuity HandoffContinuity, dispatch operatorStepExecutionDispatch, step *OperatorExecutionStep) (operatorstep.Receipt, error) {
+func (c *Coordinator) recordOperatorStepReceipt(_ context.Context, taskID common.TaskID, plan OperatorExecutionPlan, continuity HandoffContinuity, dispatch operatorStepExecutionDispatch, step *OperatorExecutionStep, reviewProgression operatorReviewProgressionAssessment, reviewGapAck *shellsession.TranscriptReviewGapAcknowledgment) (operatorstep.Receipt, error) {
 	now := c.clock()
 	receipt := operatorstep.Receipt{
-		Version:            1,
-		ReceiptID:          c.idGenerator("orec"),
-		TaskID:             taskID,
-		ExecutionAttempted: dispatch.attempted,
-		ResultClass:        dispatch.resultClass,
-		Summary:            strings.TrimSpace(dispatch.summary),
-		Reason:             strings.TrimSpace(dispatch.reason),
-		RunID:              dispatch.runID,
-		CheckpointID:       dispatch.checkpointID,
-		BriefID:            dispatch.briefID,
-		HandoffID:          dispatch.handoffID,
-		LaunchAttemptID:    dispatch.launchAttemptID,
-		LaunchID:           dispatch.launchID,
-		CreatedAt:          now,
+		Version:                          1,
+		ReceiptID:                        c.idGenerator("orec"),
+		TaskID:                           taskID,
+		ExecutionAttempted:               dispatch.attempted,
+		ResultClass:                      dispatch.resultClass,
+		Summary:                          strings.TrimSpace(dispatch.summary),
+		Reason:                           strings.TrimSpace(dispatch.reason),
+		RunID:                            dispatch.runID,
+		CheckpointID:                     dispatch.checkpointID,
+		BriefID:                          dispatch.briefID,
+		HandoffID:                        dispatch.handoffID,
+		LaunchAttemptID:                  dispatch.launchAttemptID,
+		LaunchID:                         dispatch.launchID,
+		ReviewGapState:                   string(reviewProgression.State),
+		ReviewGapSessionID:               strings.TrimSpace(reviewProgression.SessionID),
+		ReviewGapClass:                   string(reviewProgression.AcknowledgmentClass),
+		ReviewGapPresent:                 reviewProgression.AcknowledgmentAdvisable,
+		ReviewGapReviewedUpTo:            reviewProgression.ReviewedUpToSequence,
+		ReviewGapOldestUnreviewed:        reviewProgression.OldestUnreviewedSequence,
+		ReviewGapNewestRetained:          reviewProgression.NewestRetainedSequence,
+		ReviewGapUnreviewedRetainedCount: reviewProgression.UnreviewedRetainedCount,
+		TransitionReceiptID:              dispatch.transitionReceiptID,
+		TransitionKind:                   string(dispatch.transitionKind),
+		CreatedAt:                        now,
+	}
+	if reviewGapAck != nil {
+		receipt.ReviewGapAcknowledged = true
+		receipt.ReviewGapAcknowledgmentID = reviewGapAck.AcknowledgmentID
+		receipt.ReviewGapAcknowledgmentClass = string(reviewGapAck.Class)
 	}
 	if step != nil {
 		receipt.ActionHandle = string(step.Action)
@@ -292,20 +363,33 @@ func (c *Coordinator) recordOperatorStepReceipt(_ context.Context, taskID common
 			return err
 		}
 		payload := map[string]any{
-			"receipt_id":           receipt.ReceiptID,
-			"action_handle":        receipt.ActionHandle,
-			"execution_domain":     receipt.ExecutionDomain,
-			"command_surface_kind": receipt.CommandSurfaceKind,
-			"execution_attempted":  receipt.ExecutionAttempted,
-			"result_class":         receipt.ResultClass,
-			"summary":              receipt.Summary,
-			"reason":               receipt.Reason,
-			"handoff_id":           receipt.HandoffID,
-			"launch_attempt_id":    receipt.LaunchAttemptID,
-			"launch_id":            receipt.LaunchID,
-			"brief_id":             receipt.BriefID,
-			"checkpoint_id":        receipt.CheckpointID,
-			"run_id":               receipt.RunID,
+			"receipt_id":                      receipt.ReceiptID,
+			"action_handle":                   receipt.ActionHandle,
+			"execution_domain":                receipt.ExecutionDomain,
+			"command_surface_kind":            receipt.CommandSurfaceKind,
+			"execution_attempted":             receipt.ExecutionAttempted,
+			"result_class":                    receipt.ResultClass,
+			"summary":                         receipt.Summary,
+			"reason":                          receipt.Reason,
+			"handoff_id":                      receipt.HandoffID,
+			"launch_attempt_id":               receipt.LaunchAttemptID,
+			"launch_id":                       receipt.LaunchID,
+			"brief_id":                        receipt.BriefID,
+			"checkpoint_id":                   receipt.CheckpointID,
+			"run_id":                          receipt.RunID,
+			"review_gap_state":                receipt.ReviewGapState,
+			"review_gap_session_id":           receipt.ReviewGapSessionID,
+			"review_gap_class":                receipt.ReviewGapClass,
+			"review_gap_present":              receipt.ReviewGapPresent,
+			"review_gap_acknowledged":         receipt.ReviewGapAcknowledged,
+			"review_gap_acknowledgment_id":    receipt.ReviewGapAcknowledgmentID,
+			"review_gap_acknowledgment_class": receipt.ReviewGapAcknowledgmentClass,
+			"review_gap_reviewed_up_to_seq":   receipt.ReviewGapReviewedUpTo,
+			"review_gap_oldest_unreviewed":    receipt.ReviewGapOldestUnreviewed,
+			"review_gap_newest_retained":      receipt.ReviewGapNewestRetained,
+			"review_gap_unreviewed_count":     receipt.ReviewGapUnreviewedRetainedCount,
+			"transition_receipt_id":           receipt.TransitionReceiptID,
+			"transition_kind":                 receipt.TransitionKind,
 		}
 		return txc.appendProof(caps, proof.EventOperatorStepExecutionRecorded, proof.ActorUser, "user", payload, runIDPointer(receipt.RunID))
 	})
@@ -321,23 +405,64 @@ func (c *Coordinator) buildPrimaryOperatorStepExecutionResult(ctx context.Contex
 		return ExecutePrimaryOperatorStepResult{}, err
 	}
 	recovery, branch, _, decision, plan, _, _, _ := c.operatorTruthForAssessment(assessment)
+	sessions, err := c.classifiedShellSessions(taskID)
+	if err != nil {
+		return ExecutePrimaryOperatorStepResult{}, err
+	}
+	reviewProgression := deriveOperatorReviewProgressionFromSessions(sessions)
+	applyReviewProgressionToOperatorDecision(&decision, reviewProgression)
+	applyReviewProgressionToOperatorExecutionPlan(&plan, reviewProgression)
 	recent, err := c.store.OperatorStepReceipts().ListByTask(taskID, 5)
 	if err != nil {
 		return ExecutePrimaryOperatorStepResult{}, err
 	}
+	latestGapAck, recentGapAcks, err := c.reviewGapAcknowledgmentProjection(taskID, sessions, defaultTranscriptReviewGapAckHistoryLimit)
+	if err != nil {
+		return ExecutePrimaryOperatorStepResult{}, err
+	}
+	latestTransition, recentTransitions, err := c.continuityTransitionReceiptProjection(taskID, defaultContinuityTransitionReceiptHistoryLimit)
+	if err != nil {
+		return ExecutePrimaryOperatorStepResult{}, err
+	}
+	latestTriage, recentTriages, triageRollup, err := c.continuityIncidentTriageHistoryProjection(taskID, defaultContinuityIncidentTriageHistoryLimit)
+	if err != nil {
+		return ExecutePrimaryOperatorStepResult{}, err
+	}
+	latestFollowUp, recentFollowUps, followUpRollup, err := c.continuityIncidentFollowUpHistoryProjection(taskID, defaultContinuityIncidentFollowUpReadLimit)
+	if err != nil {
+		return ExecutePrimaryOperatorStepResult{}, err
+	}
+	followUp := deriveFollowUpAwareAdvisory(
+		deriveContinuityIncidentFollowUpSummary(latestTransition, latestTriage, latestFollowUp),
+		followUpRollup,
+		recentFollowUps,
+	)
+	applyContinuityIncidentFollowUpToOperatorDecision(&decision, followUp)
+	applyContinuityIncidentFollowUpToOperatorExecutionPlan(&plan, followUp)
 	return ExecutePrimaryOperatorStepResult{
-		TaskID:                     taskID,
-		Receipt:                    receipt,
-		ActiveBranch:               branch,
-		OperatorDecision:           decision,
-		OperatorExecutionPlan:      plan,
-		RecoveryClass:              recovery.RecoveryClass,
-		RecommendedAction:          recovery.RecommendedAction,
-		ReadyForNextRun:            recovery.ReadyForNextRun,
-		ReadyForHandoffLaunch:      recovery.ReadyForHandoffLaunch,
-		RecoveryReason:             recovery.Reason,
-		CanonicalResponse:          canonicalResponse,
-		RecentOperatorStepReceipts: append([]operatorstep.Receipt{}, recent...),
+		TaskID:                                   taskID,
+		Receipt:                                  receipt,
+		ActiveBranch:                             branch,
+		OperatorDecision:                         decision,
+		OperatorExecutionPlan:                    plan,
+		RecoveryClass:                            recovery.RecoveryClass,
+		RecommendedAction:                        recovery.RecommendedAction,
+		ReadyForNextRun:                          recovery.ReadyForNextRun,
+		ReadyForHandoffLaunch:                    recovery.ReadyForHandoffLaunch,
+		RecoveryReason:                           recovery.Reason,
+		CanonicalResponse:                        canonicalResponse,
+		RecentOperatorStepReceipts:               append([]operatorstep.Receipt{}, recent...),
+		LatestContinuityTransitionReceipt:        latestTransition,
+		RecentContinuityTransitionReceipts:       recentTransitions,
+		LatestContinuityIncidentTriageReceipt:    latestTriage,
+		RecentContinuityIncidentTriageReceipts:   recentTriages,
+		ContinuityIncidentTriageHistoryRollup:    triageRollup,
+		LatestContinuityIncidentFollowUpReceipt:  latestFollowUp,
+		RecentContinuityIncidentFollowUpReceipts: recentFollowUps,
+		ContinuityIncidentFollowUpHistoryRollup:  followUpRollup,
+		ContinuityIncidentFollowUp:               followUp,
+		LatestTranscriptReviewGapAcknowledgment:  latestGapAck,
+		RecentTranscriptReviewGapAcknowledgments: recentGapAcks,
 	}, nil
 }
 

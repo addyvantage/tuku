@@ -20,13 +20,15 @@ const (
 )
 
 type CodexPTYHost struct {
-	binPath   string
-	extraArgs []string
+	binPath         string
+	extraArgs       []string
+	resumeSessionID string
 
 	mu       sync.Mutex
 	snapshot Snapshot
 	lines    []string
 	activity []string
+	transcriptPending []TranscriptEvidenceChunk
 	partial  string
 	status   HostStatus
 
@@ -39,12 +41,13 @@ func NewDefaultCodexPTYHost() *CodexPTYHost {
 		binPath:   strings.TrimSpace(os.Getenv("TUKU_SHELL_CODEX_BIN")),
 		extraArgs: strings.Fields(os.Getenv("TUKU_SHELL_CODEX_ARGS")),
 		status: HostStatus{
-			Mode:           HostModeCodexPTY,
-			State:          HostStateStarting,
-			Label:          "codex starting",
-			Width:          120,
-			Height:         24,
-			StateChangedAt: time.Now().UTC(),
+			Mode:                  HostModeCodexPTY,
+			State:                 HostStateStarting,
+			Label:                 "codex starting",
+			WorkerSessionIDSource: WorkerSessionIDSourceNone,
+			Width:                 120,
+			Height:                24,
+			StateChangedAt:        time.Now().UTC(),
 		},
 	}
 }
@@ -71,6 +74,9 @@ func (h *CodexPTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 	h.recordActivity("worker host starting: codex PTY session")
 
 	args := []string{"--no-alt-screen", "-C", snapshot.Repo.RepoRoot}
+	if sessionID := strings.TrimSpace(h.resumeSessionID); sessionID != "" {
+		args = append(args, "resume", sessionID)
+	}
 	args = append(args, h.extraArgs...)
 
 	cmd := exec.CommandContext(ctx, codexBin, args...)
@@ -91,6 +97,7 @@ func (h *CodexPTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 	h.mu.Lock()
 	h.lines = nil
 	h.activity = nil
+	h.transcriptPending = nil
 	h.partial = ""
 	h.cmd = cmd
 	h.ptyFile = ptmx
@@ -98,6 +105,12 @@ func (h *CodexPTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 	h.status.State = HostStateLive
 	h.status.Label = "codex live"
 	h.status.Note = ""
+	h.status.WorkerSessionID = strings.TrimSpace(h.resumeSessionID)
+	if h.status.WorkerSessionID != "" {
+		h.status.WorkerSessionIDSource = WorkerSessionIDSourceAuthoritative
+	} else {
+		h.status.WorkerSessionIDSource = WorkerSessionIDSourceNone
+	}
 	h.status.InputLive = true
 	h.status.ExitCode = nil
 	h.status.LastOutputAt = time.Time{}
@@ -134,6 +147,12 @@ func (h *CodexPTYHost) UpdateSnapshot(snapshot Snapshot) {
 	h.mu.Lock()
 	h.snapshot = snapshot
 	h.mu.Unlock()
+}
+
+func (h *CodexPTYHost) SetResumeSessionID(sessionID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.resumeSessionID = strings.TrimSpace(sessionID)
 }
 
 func (h *CodexPTYHost) Resize(width int, height int) bool {
@@ -266,6 +285,22 @@ func (h *CodexPTYHost) ActivityLines(limit int) []string {
 	return append([]string{}, h.activity[len(h.activity)-limit:]...)
 }
 
+func (h *CodexPTYHost) DrainTranscriptEvidence(limit int) []TranscriptEvidenceChunk {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.transcriptPending) == 0 {
+		return nil
+	}
+	if limit <= 0 || limit >= len(h.transcriptPending) {
+		out := append([]TranscriptEvidenceChunk{}, h.transcriptPending...)
+		h.transcriptPending = nil
+		return out
+	}
+	out := append([]TranscriptEvidenceChunk{}, h.transcriptPending[:limit]...)
+	h.transcriptPending = append([]TranscriptEvidenceChunk{}, h.transcriptPending[limit:]...)
+	return out
+}
+
 func (h *CodexPTYHost) readStream(file *os.File) {
 	reader := bufio.NewReader(file)
 	buf := make([]byte, 4096)
@@ -332,7 +367,15 @@ func (h *CodexPTYHost) appendOutput(chunk []byte) {
 		h.status.LastOutputAt = time.Now().UTC()
 	}
 	for _, line := range result.lines {
+		if detected, source := detectWorkerSessionIDWithSource(line); detected != "" && strings.TrimSpace(h.status.WorkerSessionID) == "" {
+			h.status.WorkerSessionID = detected
+			h.status.WorkerSessionIDSource = source
+		}
 		h.appendLineLocked(line)
+	}
+	if detected, source := detectWorkerSessionIDWithSource(result.partial); detected != "" && strings.TrimSpace(h.status.WorkerSessionID) == "" {
+		h.status.WorkerSessionID = detected
+		h.status.WorkerSessionIDSource = source
 	}
 	h.mu.Unlock()
 }
@@ -340,8 +383,18 @@ func (h *CodexPTYHost) appendOutput(chunk []byte) {
 func (h *CodexPTYHost) appendLineLocked(line string) {
 	line = strings.TrimRight(line, " ")
 	h.lines = append(h.lines, line)
+	if strings.TrimSpace(line) != "" {
+		h.transcriptPending = append(h.transcriptPending, TranscriptEvidenceChunk{
+			Source:    "worker_output",
+			Content:   line,
+			CreatedAt: time.Now().UTC(),
+		})
+	}
 	if len(h.lines) > hostMaxLines {
 		h.lines = h.lines[len(h.lines)-hostMaxLines:]
+	}
+	if len(h.transcriptPending) > hostMaxLines {
+		h.transcriptPending = h.transcriptPending[len(h.transcriptPending)-hostMaxLines:]
 	}
 }
 

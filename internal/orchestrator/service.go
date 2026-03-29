@@ -26,6 +26,7 @@ import (
 	"tuku/internal/domain/proof"
 	"tuku/internal/domain/recoveryaction"
 	rundomain "tuku/internal/domain/run"
+	"tuku/internal/domain/shellsession"
 	anchorgit "tuku/internal/git/anchor"
 	"tuku/internal/response/canonical"
 	"tuku/internal/storage"
@@ -54,6 +55,7 @@ type RunTaskRequest struct {
 	Action             string // start|complete|interrupt
 	Mode               string // real|noop
 	RunID              common.RunID
+	ShellSessionID     string
 	SimulateInterrupt  bool
 	InterruptionReason string
 }
@@ -101,102 +103,175 @@ type CreateCheckpointResult struct {
 }
 
 type StatusTaskResult struct {
-	TaskID                           common.TaskID
-	ConversationID                   common.ConversationID
-	Goal                             string
-	Phase                            phase.Phase
-	Status                           string
-	CurrentIntentID                  common.IntentID
-	CurrentIntentClass               intent.Class
-	CurrentIntentSummary             string
-	CurrentBriefID                   common.BriefID
-	CurrentBriefHash                 string
-	LatestRunID                      common.RunID
-	LatestRunStatus                  rundomain.Status
-	LatestRunSummary                 string
-	RepoAnchor                       anchorgit.Snapshot
-	LatestCheckpointID               common.CheckpointID
-	LatestCheckpointAt               time.Time
-	LatestCheckpointTrigger          checkpoint.Trigger
-	CheckpointResumable              bool
-	ResumeDescriptor                 string
-	LatestLaunchAttemptID            string
-	LatestLaunchID                   string
-	LatestLaunchStatus               handoff.LaunchStatus
-	LatestAcknowledgmentID           string
-	LatestAcknowledgmentStatus       handoff.AcknowledgmentStatus
-	LatestAcknowledgmentSummary      string
-	LatestFollowThroughID            string
-	LatestFollowThroughKind          handoff.FollowThroughKind
-	LatestFollowThroughSummary       string
-	LatestResolutionID               string
-	LatestResolutionKind             handoff.ResolutionKind
-	LatestResolutionSummary          string
-	LatestResolutionAt               time.Time
-	LaunchControlState               LaunchControlState
-	LaunchRetryDisposition           LaunchRetryDisposition
-	LaunchControlReason              string
-	HandoffContinuityState           HandoffContinuityState
-	HandoffContinuityReason          string
-	HandoffContinuationProven        bool
-	ActiveBranchClass                ActiveBranchClass
-	ActiveBranchRef                  string
-	ActiveBranchAnchorKind           ActiveBranchAnchorKind
-	ActiveBranchAnchorRef            string
-	ActiveBranchReason               string
-	LocalRunFinalizationState        LocalRunFinalizationState
-	LocalRunFinalizationRunID        common.RunID
-	LocalRunFinalizationStatus       rundomain.Status
-	LocalRunFinalizationCheckpointID common.CheckpointID
-	LocalRunFinalizationReason       string
-	LocalResumeAuthorityState        LocalResumeAuthorityState
-	LocalResumeMode                  LocalResumeMode
-	LocalResumeCheckpointID          common.CheckpointID
-	LocalResumeRunID                 common.RunID
-	LocalResumeReason                string
-	RequiredNextOperatorAction       OperatorAction
-	ActionAuthority                  []OperatorActionAuthority
-	OperatorDecision                 *OperatorDecisionSummary
-	OperatorExecutionPlan            *OperatorExecutionPlan
-	LatestOperatorStepReceipt        *operatorstep.Receipt
-	RecentOperatorStepReceipts       []operatorstep.Receipt
-	IsResumable                      bool
-	RecoveryClass                    RecoveryClass
-	RecommendedAction                RecoveryAction
-	ReadyForNextRun                  bool
-	ReadyForHandoffLaunch            bool
-	RecoveryReason                   string
-	LatestRecoveryAction             *recoveryaction.Record
-	LastEventID                      common.EventID
-	LastEventType                    proof.EventType
-	LastEventAt                      time.Time
+	TaskID                                      common.TaskID
+	ConversationID                              common.ConversationID
+	Goal                                        string
+	Phase                                       phase.Phase
+	Status                                      string
+	CurrentIntentID                             common.IntentID
+	CurrentIntentClass                          intent.Class
+	CurrentIntentSummary                        string
+	CompiledIntent                              *CompiledIntentSummary
+	CurrentBriefID                              common.BriefID
+	CurrentBriefHash                            string
+	CompiledBrief                               *CompiledBriefSummary
+	LatestRunID                                 common.RunID
+	LatestRunStatus                             rundomain.Status
+	LatestRunSummary                            string
+	LatestRunWorkerRunID                        string
+	LatestRunShellSessionID                     string
+	LatestRunCommand                            string
+	LatestRunArgs                               []string
+	LatestRunExitCode                           *int
+	LatestRunChangedFiles                       []string
+	LatestRunValidationSignals                  []string
+	LatestRunOutputArtifactRef                  string
+	LatestRunStructuredSummary                  string
+	RepoAnchor                                  anchorgit.Snapshot
+	LatestShellSessionID                        string
+	LatestShellSessionClass                     ShellSessionClass
+	LatestShellSessionReason                    string
+	LatestShellSessionGuidance                  string
+	LatestShellSessionWorkerSessionID           string
+	LatestShellSessionWorkerSessionIDSource     shellsession.WorkerSessionIDSource
+	LatestShellTranscriptState                  shellsession.TranscriptState
+	LatestShellTranscriptRetainedChunks         int
+	LatestShellTranscriptDroppedChunks          int
+	LatestShellTranscriptRetentionLimit         int
+	LatestShellTranscriptOldestSequence         int64
+	LatestShellTranscriptNewestSequence         int64
+	LatestShellTranscriptLastChunkAt            time.Time
+	LatestShellTranscriptReviewID               common.EventID
+	LatestShellTranscriptReviewSource           shellsession.TranscriptSource
+	LatestShellTranscriptReviewedUpTo           int64
+	LatestShellTranscriptReviewSummary          string
+	LatestShellTranscriptReviewAt               time.Time
+	LatestShellTranscriptReviewStale            bool
+	LatestShellTranscriptReviewNewer            int
+	LatestShellTranscriptReviewClosureState     shellsession.TranscriptReviewClosureState
+	LatestShellTranscriptReviewOldestUnreviewed int64
+	LatestShellSessionState                     string
+	LatestShellSessionUpdatedAt                 time.Time
+	LatestShellEventID                          common.EventID
+	LatestShellEventKind                        string
+	LatestShellEventSessionID                   string
+	LatestShellEventAt                          time.Time
+	LatestShellEventNote                        string
+	LatestCheckpointID                          common.CheckpointID
+	LatestCheckpointAt                          time.Time
+	LatestCheckpointTrigger                     checkpoint.Trigger
+	CheckpointResumable                         bool
+	ResumeDescriptor                            string
+	LatestLaunchAttemptID                       string
+	LatestLaunchID                              string
+	LatestLaunchStatus                          handoff.LaunchStatus
+	LatestAcknowledgmentID                      string
+	LatestAcknowledgmentStatus                  handoff.AcknowledgmentStatus
+	LatestAcknowledgmentSummary                 string
+	LatestFollowThroughID                       string
+	LatestFollowThroughKind                     handoff.FollowThroughKind
+	LatestFollowThroughSummary                  string
+	LatestResolutionID                          string
+	LatestResolutionKind                        handoff.ResolutionKind
+	LatestResolutionSummary                     string
+	LatestResolutionAt                          time.Time
+	LaunchControlState                          LaunchControlState
+	LaunchRetryDisposition                      LaunchRetryDisposition
+	LaunchControlReason                         string
+	HandoffContinuityState                      HandoffContinuityState
+	HandoffContinuityReason                     string
+	HandoffContinuationProven                   bool
+	ActiveBranchClass                           ActiveBranchClass
+	ActiveBranchRef                             string
+	ActiveBranchAnchorKind                      ActiveBranchAnchorKind
+	ActiveBranchAnchorRef                       string
+	ActiveBranchReason                          string
+	LocalRunFinalizationState                   LocalRunFinalizationState
+	LocalRunFinalizationRunID                   common.RunID
+	LocalRunFinalizationStatus                  rundomain.Status
+	LocalRunFinalizationCheckpointID            common.CheckpointID
+	LocalRunFinalizationReason                  string
+	LocalResumeAuthorityState                   LocalResumeAuthorityState
+	LocalResumeMode                             LocalResumeMode
+	LocalResumeCheckpointID                     common.CheckpointID
+	LocalResumeRunID                            common.RunID
+	LocalResumeReason                           string
+	RequiredNextOperatorAction                  OperatorAction
+	ActionAuthority                             []OperatorActionAuthority
+	OperatorDecision                            *OperatorDecisionSummary
+	OperatorExecutionPlan                       *OperatorExecutionPlan
+	LatestOperatorStepReceipt                   *operatorstep.Receipt
+	RecentOperatorStepReceipts                  []operatorstep.Receipt
+	LatestContinuityTransitionReceipt           *ContinuityTransitionReceiptSummary
+	RecentContinuityTransitionReceipts          []ContinuityTransitionReceiptSummary
+	ContinuityTransitionRiskSummary             *ContinuityTransitionRiskSummary
+	ContinuityIncidentSummary                   *ContinuityIncidentRiskSummary
+	LatestContinuityIncidentTriageReceipt       *ContinuityIncidentTriageReceiptSummary
+	RecentContinuityIncidentTriageReceipts      []ContinuityIncidentTriageReceiptSummary
+	ContinuityIncidentTriageHistoryRollup       *ContinuityIncidentTriageHistoryRollupSummary
+	LatestContinuityIncidentFollowUpReceipt     *ContinuityIncidentFollowUpReceiptSummary
+	RecentContinuityIncidentFollowUpReceipts    []ContinuityIncidentFollowUpReceiptSummary
+	ContinuityIncidentFollowUpHistoryRollup     *ContinuityIncidentFollowUpHistoryRollupSummary
+	ContinuityIncidentFollowUp                  *ContinuityIncidentFollowUpSummary
+	ContinuityIncidentTaskRisk                  *ContinuityIncidentTaskRiskSummary
+	LatestTranscriptReviewGapAcknowledgment     *TranscriptReviewGapAcknowledgmentSummary
+	RecentTranscriptReviewGapAcknowledgments    []TranscriptReviewGapAcknowledgmentSummary
+	IsResumable                                 bool
+	RecoveryClass                               RecoveryClass
+	RecommendedAction                           RecoveryAction
+	ReadyForNextRun                             bool
+	ReadyForHandoffLaunch                       bool
+	RecoveryReason                              string
+	LatestRecoveryAction                        *recoveryaction.Record
+	LastEventID                                 common.EventID
+	LastEventType                               proof.EventType
+	LastEventAt                                 time.Time
 }
 
 type InspectTaskResult struct {
-	TaskID                     common.TaskID
-	Intent                     *intent.State
-	Brief                      *brief.ExecutionBrief
-	Run                        *rundomain.ExecutionRun
-	Checkpoint                 *checkpoint.Checkpoint
-	Handoff                    *handoff.Packet
-	Launch                     *handoff.Launch
-	Acknowledgment             *handoff.Acknowledgment
-	FollowThrough              *handoff.FollowThrough
-	Resolution                 *handoff.Resolution
-	ActiveBranch               *ActiveBranchProvenance
-	LocalRunFinalization       *LocalRunFinalization
-	LocalResumeAuthority       *LocalResumeAuthority
-	ActionAuthority            *OperatorActionAuthoritySet
-	OperatorDecision           *OperatorDecisionSummary
-	OperatorExecutionPlan      *OperatorExecutionPlan
-	LatestOperatorStepReceipt  *operatorstep.Receipt
-	RecentOperatorStepReceipts []operatorstep.Receipt
-	LaunchControl              *LaunchControl
-	HandoffContinuity          *HandoffContinuity
-	Recovery                   *RecoveryAssessment
-	LatestRecoveryAction       *recoveryaction.Record
-	RecentRecoveryActions      []recoveryaction.Record
-	RepoAnchor                 anchorgit.Snapshot
+	TaskID                                   common.TaskID
+	Intent                                   *intent.State
+	CompiledIntent                           *CompiledIntentSummary
+	Brief                                    *brief.ExecutionBrief
+	CompiledBrief                            *CompiledBriefSummary
+	Run                                      *rundomain.ExecutionRun
+	Checkpoint                               *checkpoint.Checkpoint
+	Handoff                                  *handoff.Packet
+	Launch                                   *handoff.Launch
+	Acknowledgment                           *handoff.Acknowledgment
+	FollowThrough                            *handoff.FollowThrough
+	Resolution                               *handoff.Resolution
+	ActiveBranch                             *ActiveBranchProvenance
+	LocalRunFinalization                     *LocalRunFinalization
+	LocalResumeAuthority                     *LocalResumeAuthority
+	ActionAuthority                          *OperatorActionAuthoritySet
+	OperatorDecision                         *OperatorDecisionSummary
+	OperatorExecutionPlan                    *OperatorExecutionPlan
+	LatestOperatorStepReceipt                *operatorstep.Receipt
+	RecentOperatorStepReceipts               []operatorstep.Receipt
+	LatestContinuityTransitionReceipt        *ContinuityTransitionReceiptSummary
+	RecentContinuityTransitionReceipts       []ContinuityTransitionReceiptSummary
+	ContinuityTransitionRiskSummary          *ContinuityTransitionRiskSummary
+	ContinuityIncidentSummary                *ContinuityIncidentRiskSummary
+	LatestContinuityIncidentTriageReceipt    *ContinuityIncidentTriageReceiptSummary
+	RecentContinuityIncidentTriageReceipts   []ContinuityIncidentTriageReceiptSummary
+	ContinuityIncidentTriageHistoryRollup    *ContinuityIncidentTriageHistoryRollupSummary
+	LatestContinuityIncidentFollowUpReceipt  *ContinuityIncidentFollowUpReceiptSummary
+	RecentContinuityIncidentFollowUpReceipts []ContinuityIncidentFollowUpReceiptSummary
+	ContinuityIncidentFollowUpHistoryRollup  *ContinuityIncidentFollowUpHistoryRollupSummary
+	ContinuityIncidentFollowUp               *ContinuityIncidentFollowUpSummary
+	ContinuityIncidentTaskRisk               *ContinuityIncidentTaskRiskSummary
+	LatestTranscriptReviewGapAcknowledgment  *TranscriptReviewGapAcknowledgmentSummary
+	RecentTranscriptReviewGapAcknowledgments []TranscriptReviewGapAcknowledgmentSummary
+	LaunchControl                            *LaunchControl
+	HandoffContinuity                        *HandoffContinuity
+	Recovery                                 *RecoveryAssessment
+	LatestRecoveryAction                     *recoveryaction.Record
+	RecentRecoveryActions                    []recoveryaction.Record
+	ShellSessions                            []ShellSessionView
+	RecentShellEvents                        []shellsession.Event
+	RecentShellTranscript                    []shellsession.TranscriptChunk
+	RepoAnchor                               anchorgit.Snapshot
 }
 
 type Dependencies struct {
@@ -408,20 +483,8 @@ func (c *Coordinator) MessageTask(ctx context.Context, taskID string, message st
 			return err
 		}
 
-		briefArtifact, err := txc.briefBuilder.Build(brief.BuildInput{
-			TaskID:           caps.TaskID,
-			IntentID:         intentState.IntentID,
-			CapsuleVersion:   caps.Version,
-			Goal:             caps.Goal,
-			NormalizedAction: intentState.NormalizedAction,
-			Constraints:      caps.Constraints,
-			ScopeHints:       caps.TouchedFiles,
-			ScopeOutHints:    []string{},
-			DoneCriteria:     []string{"Execution plan is prepared and ready for worker dispatch"},
-			ContextPackID:    "",
-			Verbosity:        brief.VerbosityStandard,
-			PolicyProfileID:  "default-safe-v1",
-		})
+		briefInput := buildBriefInputV2(caps, intentState, nil, caps.Version)
+		briefArtifact, err := txc.briefBuilder.Build(briefInput)
 		if err != nil {
 			return err
 		}
@@ -431,12 +494,30 @@ func (c *Coordinator) MessageTask(ctx context.Context, taskID string, message st
 
 		caps.CurrentBriefID = briefArtifact.BriefID
 		caps.CurrentPhase = phase.PhaseBriefReady
-		caps.NextAction = "Execution brief is ready. Start a run with `tuku run --task <id>`."
+		switch briefArtifact.Posture {
+		case brief.PostureClarificationNeeded:
+			caps.NextAction = "Execution brief is clarification-needed. Refine scope/objective or continue with bounded planning before execution."
+		case brief.PosturePlanningOriented:
+			caps.NextAction = "Execution brief is planning-oriented. Validate scope/constraints, then execute the next bounded step."
+		case brief.PostureValidationOriented:
+			caps.NextAction = "Execution brief is validation-oriented. Run bounded validation and record evidence."
+		case brief.PostureRepairOriented:
+			caps.NextAction = "Execution brief is repair-oriented. Execute bounded repair work and record evidence."
+		default:
+			caps.NextAction = "Execution brief is ready. Start a run with `tuku run --task <id>`."
+		}
 		if err := txc.store.Capsules().Update(caps); err != nil {
 			return err
 		}
 
-		if err := txc.appendProof(caps, proof.EventBriefCreated, proof.ActorSystem, "tuku-brief-builder", map[string]any{"brief_id": briefArtifact.BriefID, "brief_hash": briefArtifact.BriefHash, "intent_id": intentState.IntentID}, nil); err != nil {
+		if err := txc.appendProof(caps, proof.EventBriefCreated, proof.ActorSystem, "tuku-brief-builder", map[string]any{
+			"brief_id":                 briefArtifact.BriefID,
+			"brief_hash":               briefArtifact.BriefHash,
+			"intent_id":                intentState.IntentID,
+			"brief_posture":            briefArtifact.Posture,
+			"requires_clarification":   briefArtifact.RequiresClarification,
+			"bounded_evidence_messages": briefArtifact.BoundedEvidenceMessages,
+		}, nil); err != nil {
 			return err
 		}
 		if err := txc.appendProof(caps, proof.EventTaskPhaseTransitioned, proof.ActorSystem, "tuku-daemon", map[string]any{"phase": caps.CurrentPhase, "reason": "intent and brief prepared"}, nil); err != nil {
@@ -1212,12 +1293,19 @@ func (c *Coordinator) prepareRealRun(ctx context.Context, req RunTaskRequest) (*
 		if runID == "" {
 			runID = common.RunID(txc.idGenerator("run"))
 		}
+		shellSessionID := strings.TrimSpace(req.ShellSessionID)
+		if shellSessionID == "" {
+			shellSessionID = txc.inferActiveShellSessionID(caps.TaskID)
+		}
+		initialExitCode := -1
 		runRec := rundomain.ExecutionRun{
 			RunID:              runID,
 			TaskID:             caps.TaskID,
 			BriefID:            b.BriefID,
 			WorkerKind:         rundomain.WorkerKindCodex,
+			ShellSessionID:     shellSessionID,
 			Status:             rundomain.StatusRunning,
+			ExitCode:           &initialExitCode,
 			StartedAt:          now,
 			CreatedFromPhase:   caps.CurrentPhase,
 			LastKnownSummary:   "Codex execution started",
@@ -1398,12 +1486,19 @@ func (c *Coordinator) startRunNoop(ctx context.Context, caps capsule.WorkCapsule
 	if runID == "" {
 		runID = common.RunID(c.idGenerator("run"))
 	}
+	shellSessionID := strings.TrimSpace(req.ShellSessionID)
+	if shellSessionID == "" {
+		shellSessionID = c.inferActiveShellSessionID(caps.TaskID)
+	}
+	initialExitCode := -1
 	r := rundomain.ExecutionRun{
 		RunID:              runID,
 		TaskID:             caps.TaskID,
 		BriefID:            b.BriefID,
 		WorkerKind:         rundomain.WorkerKindNoop,
+		ShellSessionID:     shellSessionID,
 		Status:             rundomain.StatusCreated,
+		ExitCode:           &initialExitCode,
 		StartedAt:          now,
 		CreatedFromPhase:   caps.CurrentPhase,
 		LastKnownSummary:   "No-op run created and awaiting placeholder execution",
@@ -1586,8 +1681,45 @@ func (c *Coordinator) resolveRunForAction(taskID common.TaskID, preferredRunID c
 	return runRecord, nil
 }
 
+func (c *Coordinator) inferActiveShellSessionID(taskID common.TaskID) string {
+	records, err := c.shellSessions.ListByTask(taskID)
+	if err != nil || len(records) == 0 {
+		return ""
+	}
+	views := classifyShellSessions(records, c.clock(), c.shellSessionStaleAfter)
+	for _, view := range views {
+		if !view.Active {
+			continue
+		}
+		if view.SessionClass == ShellSessionClassStale {
+			continue
+		}
+		return view.SessionID
+	}
+	return ""
+}
+
+func applyExecutionEvidence(runRec *rundomain.ExecutionRun, execResult adapter_contract.ExecutionResult) {
+	if runRec == nil {
+		return
+	}
+	runRec.WorkerRunID = strings.TrimSpace(string(execResult.WorkerRunID))
+	runRec.Command = strings.TrimSpace(execResult.Command)
+	runRec.Args = append([]string{}, execResult.Args...)
+	runRec.Stdout = execResult.Stdout
+	runRec.Stderr = execResult.Stderr
+	runRec.ChangedFiles = append([]string{}, execResult.ChangedFiles...)
+	runRec.ChangedFilesSemantics = strings.TrimSpace(execResult.ChangedFilesSemantics)
+	runRec.ValidationSignals = append([]string{}, execResult.ValidationSignals...)
+	runRec.OutputArtifactRef = strings.TrimSpace(execResult.OutputArtifactRef)
+	runRec.StructuredSummary = strings.TrimSpace(execResult.StructuredSummary)
+	exitCode := execResult.ExitCode
+	runRec.ExitCode = &exitCode
+}
+
 func (c *Coordinator) markRunCompleted(ctx context.Context, caps capsule.WorkCapsule, r rundomain.ExecutionRun, execResult adapter_contract.ExecutionResult) (RunTaskResult, error) {
 	now := c.clock()
+	applyExecutionEvidence(&r, execResult)
 	r.Status = rundomain.StatusCompleted
 	r.LastKnownSummary = execResult.Summary
 	r.EndedAt = &now
@@ -1638,6 +1770,7 @@ func (c *Coordinator) markRunCompleted(ctx context.Context, caps capsule.WorkCap
 
 func (c *Coordinator) markRunFailed(ctx context.Context, caps capsule.WorkCapsule, r rundomain.ExecutionRun, execResult adapter_contract.ExecutionResult, runErr error) (RunTaskResult, error) {
 	now := c.clock()
+	applyExecutionEvidence(&r, execResult)
 	if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
 		r.Status = rundomain.StatusInterrupted
 		r.InterruptionReason = runErr.Error()
@@ -1752,6 +1885,7 @@ func (c *Coordinator) StatusTask(ctx context.Context, taskID string) (StatusTask
 	if err == nil {
 		status.CurrentIntentClass = intentState.Class
 		status.CurrentIntentSummary = intentState.NormalizedAction
+		status.CompiledIntent = compiledIntentSummaryFromState(intentState)
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return StatusTaskResult{}, err
 	}
@@ -1760,17 +1894,82 @@ func (c *Coordinator) StatusTask(ctx context.Context, taskID string) (StatusTask
 		b, err := c.store.Briefs().Get(caps.CurrentBriefID)
 		if err == nil {
 			status.CurrentBriefHash = b.BriefHash
+			status.CompiledBrief = compiledBriefSummaryFromBrief(b)
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return StatusTaskResult{}, err
 		}
 	}
 
+	var latestRunForIncident *rundomain.ExecutionRun
 	if latestRun, err := c.store.Runs().LatestByTask(caps.TaskID); err == nil {
 		status.LatestRunID = latestRun.RunID
 		status.LatestRunStatus = latestRun.Status
 		status.LatestRunSummary = latestRun.LastKnownSummary
+		status.LatestRunWorkerRunID = latestRun.WorkerRunID
+		status.LatestRunShellSessionID = latestRun.ShellSessionID
+		status.LatestRunCommand = latestRun.Command
+		status.LatestRunArgs = append([]string{}, latestRun.Args...)
+		if latestRun.ExitCode != nil {
+			code := *latestRun.ExitCode
+			status.LatestRunExitCode = &code
+		}
+		status.LatestRunChangedFiles = append([]string{}, latestRun.ChangedFiles...)
+		status.LatestRunValidationSignals = append([]string{}, latestRun.ValidationSignals...)
+		status.LatestRunOutputArtifactRef = latestRun.OutputArtifactRef
+		status.LatestRunStructuredSummary = latestRun.StructuredSummary
+		runCopy := latestRun
+		latestRunForIncident = &runCopy
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return StatusTaskResult{}, err
+	}
+	var shellViews []ShellSessionView
+	if views, err := c.classifiedShellSessions(caps.TaskID); err != nil {
+		return StatusTaskResult{}, err
+	} else if len(views) > 0 {
+		shellViews = append([]ShellSessionView{}, views...)
+		if len(views) > 0 {
+			latestSession := views[0]
+			for _, session := range views[1:] {
+				if session.LastUpdatedAt.After(latestSession.LastUpdatedAt) {
+					latestSession = session
+				}
+			}
+			status.LatestShellSessionID = latestSession.SessionID
+			status.LatestShellSessionClass = latestSession.SessionClass
+			status.LatestShellSessionReason = latestSession.SessionClassReason
+			status.LatestShellSessionGuidance = latestSession.ReattachGuidance
+			status.LatestShellSessionWorkerSessionID = latestSession.WorkerSessionID
+			status.LatestShellSessionWorkerSessionIDSource = latestSession.WorkerSessionIDSource
+			status.LatestShellTranscriptState = latestSession.TranscriptState
+			status.LatestShellTranscriptRetainedChunks = latestSession.TranscriptRetainedChunks
+			status.LatestShellTranscriptDroppedChunks = latestSession.TranscriptDroppedChunks
+			status.LatestShellTranscriptRetentionLimit = latestSession.TranscriptRetentionLimit
+			status.LatestShellTranscriptOldestSequence = latestSession.TranscriptOldestSequence
+			status.LatestShellTranscriptNewestSequence = latestSession.TranscriptNewestSequence
+			status.LatestShellTranscriptLastChunkAt = latestSession.TranscriptLastChunkAt
+			status.LatestShellTranscriptReviewID = latestSession.TranscriptReviewID
+			status.LatestShellTranscriptReviewSource = latestSession.TranscriptReviewSource
+			status.LatestShellTranscriptReviewedUpTo = latestSession.TranscriptReviewedUpTo
+			status.LatestShellTranscriptReviewSummary = latestSession.TranscriptReviewSummary
+			status.LatestShellTranscriptReviewAt = latestSession.TranscriptReviewAt
+			status.LatestShellTranscriptReviewStale = latestSession.TranscriptReviewStale
+			status.LatestShellTranscriptReviewNewer = latestSession.TranscriptReviewNewer
+			status.LatestShellTranscriptReviewClosureState = latestSession.TranscriptReviewClosureState
+			status.LatestShellTranscriptReviewOldestUnreviewed = latestSession.TranscriptReviewOldestUnreviewed
+			status.LatestShellSessionState = string(latestSession.HostState)
+			status.LatestShellSessionUpdatedAt = latestSession.LastUpdatedAt
+		}
+	} else {
+		shellViews = views
+	}
+	if shellEvents, err := c.listShellSessionEvents(caps.TaskID, "", 1); err != nil {
+		return StatusTaskResult{}, err
+	} else if len(shellEvents) > 0 {
+		status.LatestShellEventID = shellEvents[0].EventID
+		status.LatestShellEventKind = string(shellEvents[0].Kind)
+		status.LatestShellEventSessionID = shellEvents[0].SessionID
+		status.LatestShellEventAt = shellEvents[0].CreatedAt
+		status.LatestShellEventNote = shellEvents[0].Note
 	}
 
 	checkpointResumable := false
@@ -1834,6 +2033,9 @@ func (c *Coordinator) StatusTask(ctx context.Context, taskID string) (StatusTask
 		return StatusTaskResult{}, err
 	} else {
 		recovery, branch, actions, decision, plan, _, runFinalization, localResume := c.operatorTruthForAssessment(assessment)
+		reviewProgression := deriveOperatorReviewProgressionFromSessions(shellViews)
+		applyReviewProgressionToOperatorDecision(&decision, reviewProgression)
+		applyReviewProgressionToOperatorExecutionPlan(&plan, reviewProgression)
 		applyRecoveryAssessmentToStatus(&status, recovery, checkpointResumable)
 		status.ActiveBranchClass = branch.Class
 		status.ActiveBranchRef = branch.BranchRef
@@ -1865,6 +2067,50 @@ func (c *Coordinator) StatusTask(ctx context.Context, taskID string) (StatusTask
 		status.RecentOperatorStepReceipts = append([]operatorstep.Receipt{}, recentReceipts...)
 	} else {
 		return StatusTaskResult{}, err
+	}
+	latestGapAck, recentGapAcks, err := c.reviewGapAcknowledgmentProjection(caps.TaskID, shellViews, 3)
+	if err != nil {
+		return StatusTaskResult{}, err
+	}
+	status.LatestTranscriptReviewGapAcknowledgment = latestGapAck
+	status.RecentTranscriptReviewGapAcknowledgments = append([]TranscriptReviewGapAcknowledgmentSummary{}, recentGapAcks...)
+	latestTransition, recentTransitions, err := c.continuityTransitionReceiptProjection(caps.TaskID, 3)
+	if err != nil {
+		return StatusTaskResult{}, err
+	}
+	status.LatestContinuityTransitionReceipt = latestTransition
+	status.RecentContinuityTransitionReceipts = append([]ContinuityTransitionReceiptSummary{}, recentTransitions...)
+	transitionRisk := deriveContinuityTransitionRiskSummary(status.RecentContinuityTransitionReceipts)
+	status.ContinuityTransitionRiskSummary = &transitionRisk
+	status.ContinuityIncidentSummary = continuityIncidentSummaryProjection(status.LatestContinuityTransitionReceipt, latestRunForIncident, status.LatestRecoveryAction)
+	latestTriage, recentTriages, triageRollup, err := c.continuityIncidentTriageHistoryProjection(caps.TaskID, 3)
+	if err != nil {
+		return StatusTaskResult{}, err
+	}
+	latestFollowUp, recentFollowUps, followUpRollup, err := c.continuityIncidentFollowUpHistoryProjection(caps.TaskID, 3)
+	if err != nil {
+		return StatusTaskResult{}, err
+	}
+	status.LatestContinuityIncidentTriageReceipt = latestTriage
+	status.RecentContinuityIncidentTriageReceipts = append([]ContinuityIncidentTriageReceiptSummary{}, recentTriages...)
+	status.ContinuityIncidentTriageHistoryRollup = triageRollup
+	status.LatestContinuityIncidentFollowUpReceipt = latestFollowUp
+	status.RecentContinuityIncidentFollowUpReceipts = append([]ContinuityIncidentFollowUpReceiptSummary{}, recentFollowUps...)
+	status.ContinuityIncidentFollowUpHistoryRollup = followUpRollup
+	status.ContinuityIncidentFollowUp = deriveFollowUpAwareAdvisory(
+		deriveContinuityIncidentFollowUpSummary(status.LatestContinuityTransitionReceipt, latestTriage, latestFollowUp),
+		followUpRollup,
+		status.RecentContinuityIncidentFollowUpReceipts,
+	)
+	status.ContinuityIncidentTaskRisk, err = c.continuityIncidentTaskRiskProjection(ctx, caps.TaskID, defaultContinuityIncidentTaskRiskReadLimit)
+	if err != nil {
+		return StatusTaskResult{}, err
+	}
+	if status.OperatorDecision != nil {
+		applyContinuityIncidentFollowUpToOperatorDecision(status.OperatorDecision, status.ContinuityIncidentFollowUp)
+	}
+	if status.OperatorExecutionPlan != nil {
+		applyContinuityIncidentFollowUpToOperatorExecutionPlan(status.OperatorExecutionPlan, status.ContinuityIncidentFollowUp)
 	}
 
 	events, err := c.store.Proofs().ListByTask(caps.TaskID, 1)
@@ -1899,6 +2145,7 @@ func (c *Coordinator) InspectTask(ctx context.Context, taskID string) (InspectTa
 	if in, err := c.store.Intents().LatestByTask(caps.TaskID); err == nil {
 		inCopy := in
 		out.Intent = &inCopy
+		out.CompiledIntent = compiledIntentSummaryFromState(inCopy)
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return InspectTaskResult{}, err
 	}
@@ -1908,6 +2155,7 @@ func (c *Coordinator) InspectTask(ctx context.Context, taskID string) (InspectTa
 		if err == nil {
 			briefCopy := b
 			out.Brief = &briefCopy
+			out.CompiledBrief = compiledBriefSummaryFromBrief(briefCopy)
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return InspectTaskResult{}, err
 		}
@@ -2006,6 +2254,82 @@ func (c *Coordinator) InspectTask(ctx context.Context, taskID string) (InspectTa
 		out.RecentOperatorStepReceipts = append([]operatorstep.Receipt{}, recentReceipts...)
 	} else {
 		return InspectTaskResult{}, err
+	}
+	if sessions, err := c.classifiedShellSessions(caps.TaskID); err == nil {
+		out.ShellSessions = sessions
+	} else {
+		return InspectTaskResult{}, err
+	}
+	reviewProgression := deriveOperatorReviewProgressionFromSessions(out.ShellSessions)
+	if out.OperatorDecision != nil {
+		applyReviewProgressionToOperatorDecision(out.OperatorDecision, reviewProgression)
+	}
+	if out.OperatorExecutionPlan != nil {
+		applyReviewProgressionToOperatorExecutionPlan(out.OperatorExecutionPlan, reviewProgression)
+	}
+	latestGapAck, recentGapAcks, err := c.reviewGapAcknowledgmentProjection(caps.TaskID, out.ShellSessions, 5)
+	if err != nil {
+		return InspectTaskResult{}, err
+	}
+	out.LatestTranscriptReviewGapAcknowledgment = latestGapAck
+	out.RecentTranscriptReviewGapAcknowledgments = append([]TranscriptReviewGapAcknowledgmentSummary{}, recentGapAcks...)
+	latestTransition, recentTransitions, err := c.continuityTransitionReceiptProjection(caps.TaskID, 5)
+	if err != nil {
+		return InspectTaskResult{}, err
+	}
+	out.LatestContinuityTransitionReceipt = latestTransition
+	out.RecentContinuityTransitionReceipts = append([]ContinuityTransitionReceiptSummary{}, recentTransitions...)
+	transitionRisk := deriveContinuityTransitionRiskSummary(out.RecentContinuityTransitionReceipts)
+	out.ContinuityTransitionRiskSummary = &transitionRisk
+	out.ContinuityIncidentSummary = continuityIncidentSummaryProjection(out.LatestContinuityTransitionReceipt, out.Run, out.LatestRecoveryAction)
+	latestTriage, recentTriages, triageRollup, err := c.continuityIncidentTriageHistoryProjection(caps.TaskID, 5)
+	if err != nil {
+		return InspectTaskResult{}, err
+	}
+	latestFollowUp, recentFollowUps, followUpRollup, err := c.continuityIncidentFollowUpHistoryProjection(caps.TaskID, 5)
+	if err != nil {
+		return InspectTaskResult{}, err
+	}
+	out.LatestContinuityIncidentTriageReceipt = latestTriage
+	out.RecentContinuityIncidentTriageReceipts = append([]ContinuityIncidentTriageReceiptSummary{}, recentTriages...)
+	out.ContinuityIncidentTriageHistoryRollup = triageRollup
+	out.LatestContinuityIncidentFollowUpReceipt = latestFollowUp
+	out.RecentContinuityIncidentFollowUpReceipts = append([]ContinuityIncidentFollowUpReceiptSummary{}, recentFollowUps...)
+	out.ContinuityIncidentFollowUpHistoryRollup = followUpRollup
+	out.ContinuityIncidentFollowUp = deriveFollowUpAwareAdvisory(
+		deriveContinuityIncidentFollowUpSummary(out.LatestContinuityTransitionReceipt, latestTriage, latestFollowUp),
+		followUpRollup,
+		out.RecentContinuityIncidentFollowUpReceipts,
+	)
+	out.ContinuityIncidentTaskRisk, err = c.continuityIncidentTaskRiskProjection(ctx, caps.TaskID, defaultContinuityIncidentTaskRiskReadLimit)
+	if err != nil {
+		return InspectTaskResult{}, err
+	}
+	if out.OperatorDecision != nil {
+		applyContinuityIncidentFollowUpToOperatorDecision(out.OperatorDecision, out.ContinuityIncidentFollowUp)
+	}
+	if out.OperatorExecutionPlan != nil {
+		applyContinuityIncidentFollowUpToOperatorExecutionPlan(out.OperatorExecutionPlan, out.ContinuityIncidentFollowUp)
+	}
+	if shellEvents, err := c.listShellSessionEvents(caps.TaskID, "", 20); err == nil {
+		out.RecentShellEvents = append([]shellsession.Event{}, shellEvents...)
+	} else {
+		return InspectTaskResult{}, err
+	}
+	latestSessionID := ""
+	latestUpdated := time.Time{}
+	for _, session := range out.ShellSessions {
+		if latestSessionID == "" || session.LastUpdatedAt.After(latestUpdated) {
+			latestSessionID = session.SessionID
+			latestUpdated = session.LastUpdatedAt
+		}
+	}
+	if latestSessionID != "" {
+		if transcript, err := c.listShellTranscript(caps.TaskID, latestSessionID, 40); err == nil {
+			out.RecentShellTranscript = append([]shellsession.TranscriptChunk{}, transcript...)
+		} else {
+			return InspectTaskResult{}, err
+		}
 	}
 
 	return out, nil

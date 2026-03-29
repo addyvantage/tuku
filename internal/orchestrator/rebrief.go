@@ -70,35 +70,7 @@ func (c *Coordinator) ExecuteRebrief(ctx context.Context, req ExecuteRebriefRequ
 		}
 
 		nextCapsuleVersion := caps.Version + 1
-		buildInput := brief.BuildInput{
-			TaskID:           caps.TaskID,
-			IntentID:         intentState.IntentID,
-			CapsuleVersion:   nextCapsuleVersion,
-			Goal:             caps.Goal,
-			NormalizedAction: nonEmpty(currentBrief.NormalizedAction, intentState.NormalizedAction),
-			Constraints:      append([]string{}, currentBrief.Constraints...),
-			ScopeHints:       append([]string{}, currentBrief.ScopeIn...),
-			ScopeOutHints:    append([]string{}, currentBrief.ScopeOut...),
-			DoneCriteria:     append([]string{}, currentBrief.DoneCriteria...),
-			ContextPackID:    currentBrief.ContextPackID,
-			Verbosity:        currentBrief.Verbosity,
-			PolicyProfileID:  currentBrief.PolicyProfileID,
-		}
-		if len(buildInput.Constraints) == 0 {
-			buildInput.Constraints = append([]string{}, caps.Constraints...)
-		}
-		if len(buildInput.ScopeHints) == 0 {
-			buildInput.ScopeHints = append([]string{}, caps.TouchedFiles...)
-		}
-		if len(buildInput.DoneCriteria) == 0 {
-			buildInput.DoneCriteria = []string{"Execution plan is prepared and ready for worker dispatch"}
-		}
-		if buildInput.Verbosity == "" {
-			buildInput.Verbosity = brief.VerbosityStandard
-		}
-		if strings.TrimSpace(buildInput.PolicyProfileID) == "" {
-			buildInput.PolicyProfileID = "default-safe-v1"
-		}
+		buildInput := buildBriefInputV2(caps, intentState, &currentBrief, nextCapsuleVersion)
 		newBrief, err := txc.briefBuilder.Build(buildInput)
 		if err != nil {
 			return err
@@ -111,7 +83,18 @@ func (c *Coordinator) ExecuteRebrief(ctx context.Context, req ExecuteRebriefRequ
 		caps.UpdatedAt = txc.clock()
 		caps.CurrentBriefID = newBrief.BriefID
 		caps.CurrentPhase = phase.PhaseBriefReady
-		caps.NextAction = "Execution brief regenerated. Start a run with `tuku run --task <id>`."
+		switch newBrief.Posture {
+		case brief.PostureClarificationNeeded:
+			caps.NextAction = "Execution brief regenerated as clarification-needed. Refine scope/objective before execution."
+		case brief.PosturePlanningOriented:
+			caps.NextAction = "Execution brief regenerated as planning-oriented. Finalize plan details, then execute bounded work."
+		case brief.PostureValidationOriented:
+			caps.NextAction = "Execution brief regenerated as validation-oriented. Run bounded validation and record evidence."
+		case brief.PostureRepairOriented:
+			caps.NextAction = "Execution brief regenerated as repair-oriented. Execute bounded repair work and record evidence."
+		default:
+			caps.NextAction = "Execution brief regenerated. Start a run with `tuku run --task <id>`."
+		}
 		if err := txc.store.Capsules().Update(caps); err != nil {
 			return err
 		}
@@ -122,6 +105,8 @@ func (c *Coordinator) ExecuteRebrief(ctx context.Context, req ExecuteRebriefRequ
 			"previous_brief_hash":    currentBrief.BriefHash,
 			"new_brief_id":           newBrief.BriefID,
 			"new_brief_hash":         newBrief.BriefHash,
+			"new_brief_posture":      newBrief.Posture,
+			"requires_clarification": newBrief.RequiresClarification,
 			"trigger_action_id":      assessment.LatestRecoveryAction.ActionID,
 			"trigger_action_kind":    assessment.LatestRecoveryAction.Kind,
 			"trigger_action_summary": assessment.LatestRecoveryAction.Summary,

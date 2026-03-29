@@ -13,9 +13,11 @@ import (
 type PersistedLifecycleKind string
 
 const (
-	PersistedLifecycleHostStarted PersistedLifecycleKind = "host_started"
-	PersistedLifecycleHostExited  PersistedLifecycleKind = "host_exited"
-	PersistedLifecycleFallback    PersistedLifecycleKind = "fallback_activated"
+	PersistedLifecycleHostStarted       PersistedLifecycleKind = "host_started"
+	PersistedLifecycleHostExited        PersistedLifecycleKind = "host_exited"
+	PersistedLifecycleFallback          PersistedLifecycleKind = "fallback_activated"
+	PersistedLifecycleReattachRequested PersistedLifecycleKind = "reattach_requested"
+	PersistedLifecycleReattachFailed    PersistedLifecycleKind = "reattach_failed"
 )
 
 type LifecycleSink interface {
@@ -43,16 +45,18 @@ func (s *IPCLifecycleSink) Record(taskID string, sessionID string, kind Persiste
 	defer cancel()
 
 	payload, err := json.Marshal(ipc.TaskShellLifecycleRequest{
-		TaskID:     common.TaskID(taskID),
-		SessionID:  sessionID,
-		Kind:       string(kind),
-		HostMode:   string(status.Mode),
-		HostState:  string(status.State),
-		Note:       status.Note,
-		InputLive:  status.InputLive,
-		ExitCode:   status.ExitCode,
-		PaneWidth:  status.Width,
-		PaneHeight: status.Height,
+		TaskID:                common.TaskID(taskID),
+		SessionID:             sessionID,
+		Kind:                  string(kind),
+		HostMode:              string(status.Mode),
+		HostState:             string(status.State),
+		WorkerSessionID:       status.WorkerSessionID,
+		WorkerSessionIDSource: string(status.WorkerSessionIDSource),
+		Note:                  status.Note,
+		InputLive:             status.InputLive,
+		ExitCode:              status.ExitCode,
+		PaneWidth:             status.Width,
+		PaneHeight:            status.Height,
 	})
 	if err != nil {
 		return err

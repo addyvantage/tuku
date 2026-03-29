@@ -4,19 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"tuku/internal/domain/brief"
 	"tuku/internal/domain/checkpoint"
 	"tuku/internal/domain/common"
 	"tuku/internal/domain/conversation"
 	"tuku/internal/domain/handoff"
+	"tuku/internal/domain/incidenttriage"
 	"tuku/internal/domain/operatorstep"
 	"tuku/internal/domain/phase"
 	"tuku/internal/domain/proof"
 	"tuku/internal/domain/recoveryaction"
 	"tuku/internal/domain/run"
 	"tuku/internal/domain/shellsession"
+	"tuku/internal/domain/transition"
 	anchorgit "tuku/internal/git/anchor"
 	"tuku/internal/ipc"
 	"tuku/internal/orchestrator"
@@ -177,6 +181,17 @@ func TestHandleRequestShellSnapshotRoute(t *testing.T) {
 				Status:        "ACTIVE",
 				IntentClass:   "implement",
 				IntentSummary: "implement: wire shell",
+				CompiledIntent: &orchestrator.CompiledIntentSummary{
+					IntentID:                "int_shell_1",
+					Class:                   "IMPLEMENT_CHANGE",
+					Posture:                 "EXECUTION_READY",
+					ExecutionReadiness:      "EXECUTION_READY",
+					Objective:               "Wire shell snapshot parity",
+					RequiresClarification:   false,
+					BoundedEvidenceMessages: 4,
+					Digest:                  "execution-ready intent in bounded recent evidence",
+					Advisory:                "Intent appears execution-ready within bounded recent evidence.",
+				},
 				ActiveBranch: &orchestrator.ShellActiveBranchSummary{
 					Class:                  orchestrator.ActiveBranchClassHandoffClaude,
 					BranchRef:              "hnd_1",
@@ -259,8 +274,61 @@ func TestHandleRequestShellSnapshotRoute(t *testing.T) {
 						{Code: "HANDOFF_MONITORING", Message: "downstream completion remains unproven"},
 					},
 				},
+				LatestContinuityTransitionReceipt: &orchestrator.ContinuityTransitionReceiptSummary{
+					ReceiptID:             "ctr_shell_1",
+					TaskID:                common.TaskID(taskID),
+					TransitionKind:        transition.KindHandoffLaunch,
+					HandoffStateBefore:    orchestrator.HandoffContinuityStateAcceptedNotLaunched,
+					HandoffStateAfter:     orchestrator.HandoffContinuityStateLaunchCompletedAckSeen,
+					ReviewGapPresent:      true,
+					ReviewPosture:         transition.ReviewPostureGlobalReviewStale,
+					AcknowledgmentPresent: false,
+					Summary:               "handoff launch occurred while transcript review remained stale",
+					CreatedAt:             time.Unix(1710000500, 0).UTC(),
+				},
+				RecentContinuityTransitionReceipts: []orchestrator.ContinuityTransitionReceiptSummary{
+					{
+						ReceiptID:             "ctr_shell_1",
+						TaskID:                common.TaskID(taskID),
+						TransitionKind:        transition.KindHandoffLaunch,
+						HandoffStateBefore:    orchestrator.HandoffContinuityStateAcceptedNotLaunched,
+						HandoffStateAfter:     orchestrator.HandoffContinuityStateLaunchCompletedAckSeen,
+						ReviewGapPresent:      true,
+						ReviewPosture:         transition.ReviewPostureGlobalReviewStale,
+						AcknowledgmentPresent: false,
+						Summary:               "handoff launch occurred while transcript review remained stale",
+						CreatedAt:             time.Unix(1710000500, 0).UTC(),
+					},
+					{
+						ReceiptID:             "ctr_shell_0",
+						TaskID:                common.TaskID(taskID),
+						TransitionKind:        transition.KindHandoffResolution,
+						HandoffStateBefore:    orchestrator.HandoffContinuityStateFollowThroughStalled,
+						HandoffStateAfter:     orchestrator.HandoffContinuityStateResolved,
+						ReviewGapPresent:      false,
+						ReviewPosture:         transition.ReviewPostureGlobalReviewCurrent,
+						AcknowledgmentPresent: false,
+						Summary:               "handoff resolution recorded with current retained transcript review",
+						CreatedAt:             time.Unix(1710000600, 0).UTC(),
+					},
+				},
 				RecentProofs: []orchestrator.ShellProofSummary{
 					{EventID: "evt_1", Type: proof.EventBriefCreated, Summary: "Execution brief updated"},
+				},
+				ContinuityIncidentTaskRisk: &orchestrator.ContinuityIncidentTaskRiskSummary{
+					Class:                               orchestrator.ContinuityIncidentTaskRiskRecurringWeakClosure,
+					Digest:                              "recurring continuity weakness in recent bounded evidence",
+					WindowAdvisory:                      "bounded incident window anchors=3 open=1 reopened=2 triaged-without-follow-up=0 stagnant=0",
+					Detail:                              "Recent bounded evidence suggests recurring weak closure posture across incidents.",
+					DistinctAnchors:                     3,
+					RecurringWeakClosure:                true,
+					ReopenedAfterClosureAnchors:         2,
+					RepeatedReopenLoopAnchors:           1,
+					OperationallyUnresolvedAnchorSignal: 3,
+					RecentAnchorClasses: []orchestrator.ContinuityIncidentClosureClass{
+						orchestrator.ContinuityIncidentClosureWeakReopened,
+						orchestrator.ContinuityIncidentClosureWeakLoop,
+					},
 				},
 				RecentConversation: []orchestrator.ShellConversationSummary{
 					{Role: conversation.RoleSystem, Body: "Canonical shell response"},
@@ -286,6 +354,9 @@ func TestHandleRequestShellSnapshotRoute(t *testing.T) {
 	}
 	if out.TaskID != "tsk_123" {
 		t.Fatalf("expected task id tsk_123, got %s", out.TaskID)
+	}
+	if out.CompiledIntent == nil || out.CompiledIntent.IntentID != "int_shell_1" || out.CompiledIntent.ExecutionReadiness != "EXECUTION_READY" {
+		t.Fatalf("expected compiled intent mapping in shell snapshot response, got %+v", out.CompiledIntent)
 	}
 	if out.LatestCanonicalResponse != "Canonical shell response" {
 		t.Fatalf("unexpected canonical response %q", out.LatestCanonicalResponse)
@@ -331,6 +402,18 @@ func TestHandleRequestShellSnapshotRoute(t *testing.T) {
 	}
 	if len(out.Recovery.Issues) != 1 {
 		t.Fatalf("expected one recovery issue, got %+v", out.Recovery)
+	}
+	if out.LatestContinuityTransitionReceipt == nil || out.LatestContinuityTransitionReceipt.ReceiptID != "ctr_shell_1" {
+		t.Fatalf("expected latest continuity transition receipt mapping, got %+v", out.LatestContinuityTransitionReceipt)
+	}
+	if out.LatestContinuityTransitionReceipt.TransitionKind != string(transition.KindHandoffLaunch) || out.LatestContinuityTransitionReceipt.ReviewPosture != string(transition.ReviewPostureGlobalReviewStale) {
+		t.Fatalf("expected latest transition review posture mapping, got %+v", out.LatestContinuityTransitionReceipt)
+	}
+	if len(out.RecentContinuityTransitionReceipts) != 2 {
+		t.Fatalf("expected recent continuity transition receipt history mapping, got %+v", out.RecentContinuityTransitionReceipts)
+	}
+	if out.ContinuityIncidentTaskRisk == nil || out.ContinuityIncidentTaskRisk.Class != string(orchestrator.ContinuityIncidentTaskRiskRecurringWeakClosure) {
+		t.Fatalf("expected shell incident task-risk mapping, got %+v", out.ContinuityIncidentTaskRisk)
 	}
 }
 
@@ -595,8 +678,32 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 	handler := &fakeOrchestratorService{
 		statusFn: func(_ context.Context, _ string) (orchestrator.StatusTaskResult, error) {
 			return orchestrator.StatusTaskResult{
-				TaskID:                      common.TaskID("tsk_status"),
-				Phase:                       phase.PhaseBlocked,
+				TaskID: common.TaskID("tsk_status"),
+				Phase:  phase.PhaseBlocked,
+				CompiledIntent: &orchestrator.CompiledIntentSummary{
+					IntentID:                "int_status_1",
+					Class:                   "DEBUG_FIX",
+					Posture:                 "REPAIR_RECOVERY",
+					ExecutionReadiness:      "REPAIR_RECOVERY_FOCUSED",
+					Objective:               "Repair stalled handoff continuity posture",
+					RequiresClarification:   false,
+					BoundedEvidenceMessages: 6,
+					Digest:                  "repair/recovery-focused intent posture in bounded recent evidence",
+					Advisory:                "Intent is repair/recovery-focused in bounded recent evidence.",
+				},
+				CompiledBrief: &orchestrator.CompiledBriefSummary{
+					BriefID:                "brf_status_1",
+					IntentID:               "int_status_1",
+					Posture:                brief.PostureRepairOriented,
+					Objective:              "Repair stalled handoff continuity posture",
+					NormalizedAction:       "inspect and repair stalled handoff follow-through posture",
+					ScopeSummary:           "bounded scope signals: handoff continuity and review posture",
+					Constraints:            []string{"no authority changes"},
+					DoneCriteria:           []string{"repair evidence captured conservatively"},
+					Digest:                 "repair-oriented brief posture in bounded recent evidence",
+					Advisory:               "Brief is repair-oriented in bounded recent evidence.",
+					BoundedEvidenceMessages: 6,
+				},
 				LatestCheckpointTrigger:     checkpoint.TriggerManual,
 				HandoffContinuityState:      orchestrator.HandoffContinuityStateFollowThroughStalled,
 				HandoffContinuityReason:     "launch completed and acknowledgment captured, but downstream follow-through appears stalled",
@@ -628,15 +735,63 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 					{Action: orchestrator.OperatorActionLocalMessageMutation, State: orchestrator.OperatorActionAuthorityBlocked, BlockingBranchClass: orchestrator.ActiveBranchClassHandoffClaude, BlockingBranchRef: "hnd_status", Reason: "Cannot send a local task message while launched Claude handoff hnd_status remains the active continuity branch."},
 					{Action: orchestrator.OperatorActionReviewHandoffFollowUp, State: orchestrator.OperatorActionAuthorityRequiredNext, Reason: "launch completed and acknowledgment captured, but downstream follow-through appears stalled"},
 				},
+				OperatorDecision: &orchestrator.OperatorDecisionSummary{
+					Headline:           "Claude follow-through review required",
+					RequiredNextAction: orchestrator.OperatorActionReviewHandoffFollowUp,
+					PrimaryReason:      "launch completed and acknowledgment captured, but downstream follow-through appears stalled",
+					Guidance:           "Review the stalled Claude follow-through before resuming local work. Transcript review is stale for shell session shs_review_status; newer retained evidence starts at sequence 42.",
+					IntegrityNote:      "Downstream Claude completion remains unproven. Transcript review is behind retained evidence (oldest unreviewed sequence 42).",
+				},
 				OperatorExecutionPlan: &orchestrator.OperatorExecutionPlan{
 					PrimaryStep: &orchestrator.OperatorExecutionStep{
 						Action:      orchestrator.OperatorActionReviewHandoffFollowUp,
 						Status:      orchestrator.OperatorActionAuthorityRequiredNext,
 						Domain:      orchestrator.OperatorExecutionDomainReview,
 						CommandHint: "tuku inspect --task tsk_status",
-						Reason:      "launch completed and acknowledgment captured, but downstream follow-through appears stalled",
+						Reason:      "launch completed and acknowledgment captured, but downstream follow-through appears stalled. Newer retained transcript evidence exists starting at sequence 42; review awareness is recommended while progressing.",
 					},
 					MandatoryBeforeProgress: true,
+				},
+				LatestContinuityTransitionReceipt: &orchestrator.ContinuityTransitionReceiptSummary{
+					ReceiptID:             "ctr_status_1",
+					TaskID:                common.TaskID("tsk_status"),
+					TransitionKind:        transition.KindHandoffLaunch,
+					HandoffStateBefore:    orchestrator.HandoffContinuityStateAcceptedNotLaunched,
+					HandoffStateAfter:     orchestrator.HandoffContinuityStateLaunchCompletedAckSeen,
+					ReviewGapPresent:      true,
+					ReviewPosture:         transition.ReviewPostureGlobalReviewStale,
+					AcknowledgmentPresent: false,
+					Summary:               "handoff launch was recorded while transcript review remained stale",
+					CreatedAt:             time.Unix(1710000700, 0).UTC(),
+				},
+				RecentContinuityTransitionReceipts: []orchestrator.ContinuityTransitionReceiptSummary{
+					{
+						ReceiptID:             "ctr_status_1",
+						TaskID:                common.TaskID("tsk_status"),
+						TransitionKind:        transition.KindHandoffLaunch,
+						HandoffStateBefore:    orchestrator.HandoffContinuityStateAcceptedNotLaunched,
+						HandoffStateAfter:     orchestrator.HandoffContinuityStateLaunchCompletedAckSeen,
+						ReviewGapPresent:      true,
+						ReviewPosture:         transition.ReviewPostureGlobalReviewStale,
+						AcknowledgmentPresent: false,
+						Summary:               "handoff launch was recorded while transcript review remained stale",
+						CreatedAt:             time.Unix(1710000700, 0).UTC(),
+					},
+				},
+				ContinuityIncidentTaskRisk: &orchestrator.ContinuityIncidentTaskRiskSummary{
+					Class:                               orchestrator.ContinuityIncidentTaskRiskRecurringWeakClosure,
+					Digest:                              "recurring continuity weakness in recent bounded evidence",
+					WindowAdvisory:                      "bounded incident window anchors=3 open=1 reopened=2 triaged-without-follow-up=0 stagnant=0",
+					Detail:                              "Recent bounded evidence suggests recurring weak closure posture across incidents.",
+					DistinctAnchors:                     3,
+					RecurringWeakClosure:                true,
+					ReopenedAfterClosureAnchors:         2,
+					RepeatedReopenLoopAnchors:           1,
+					OperationallyUnresolvedAnchorSignal: 3,
+					RecentAnchorClasses: []orchestrator.ContinuityIncidentClosureClass{
+						orchestrator.ContinuityIncidentClosureWeakReopened,
+						orchestrator.ContinuityIncidentClosureWeakLoop,
+					},
 				},
 				RecoveryClass:        orchestrator.RecoveryClassHandoffFollowThroughReviewRequired,
 				RecommendedAction:    orchestrator.RecoveryActionReviewHandoffFollowThrough,
@@ -645,7 +800,31 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 		},
 		inspectFn: func(_ context.Context, _ string) (orchestrator.InspectTaskResult, error) {
 			return orchestrator.InspectTaskResult{
-				TaskID:                common.TaskID("tsk_status"),
+				TaskID: common.TaskID("tsk_status"),
+				CompiledIntent: &orchestrator.CompiledIntentSummary{
+					IntentID:                "int_status_1",
+					Class:                   "DEBUG_FIX",
+					Posture:                 "REPAIR_RECOVERY",
+					ExecutionReadiness:      "REPAIR_RECOVERY_FOCUSED",
+					Objective:               "Repair stalled handoff continuity posture",
+					RequiresClarification:   false,
+					BoundedEvidenceMessages: 6,
+					Digest:                  "repair/recovery-focused intent posture in bounded recent evidence",
+					Advisory:                "Intent is repair/recovery-focused in bounded recent evidence.",
+				},
+				CompiledBrief: &orchestrator.CompiledBriefSummary{
+					BriefID:                "brf_status_1",
+					IntentID:               "int_status_1",
+					Posture:                brief.PostureRepairOriented,
+					Objective:              "Repair stalled handoff continuity posture",
+					NormalizedAction:       "inspect and repair stalled handoff follow-through posture",
+					ScopeSummary:           "bounded scope signals: handoff continuity and review posture",
+					Constraints:            []string{"no authority changes"},
+					DoneCriteria:           []string{"repair evidence captured conservatively"},
+					Digest:                 "repair-oriented brief posture in bounded recent evidence",
+					Advisory:               "Brief is repair-oriented in bounded recent evidence.",
+					BoundedEvidenceMessages: 6,
+				},
 				LatestRecoveryAction:  action,
 				RecentRecoveryActions: []recoveryaction.Record{*action},
 				Recovery: &orchestrator.RecoveryAssessment{
@@ -724,15 +903,63 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 						{Action: orchestrator.OperatorActionReviewHandoffFollowUp, State: orchestrator.OperatorActionAuthorityRequiredNext, Reason: "launch completed and acknowledgment captured, but downstream follow-through appears stalled"},
 					},
 				},
+				OperatorDecision: &orchestrator.OperatorDecisionSummary{
+					Headline:           "Claude follow-through review required",
+					RequiredNextAction: orchestrator.OperatorActionReviewHandoffFollowUp,
+					PrimaryReason:      "launch completed and acknowledgment captured, but downstream follow-through appears stalled",
+					Guidance:           "Review the stalled Claude follow-through before resuming local work. Transcript review is stale for shell session shs_review_status; newer retained evidence starts at sequence 42.",
+					IntegrityNote:      "Downstream Claude completion remains unproven. Transcript review is behind retained evidence (oldest unreviewed sequence 42).",
+				},
 				OperatorExecutionPlan: &orchestrator.OperatorExecutionPlan{
 					PrimaryStep: &orchestrator.OperatorExecutionStep{
 						Action:      orchestrator.OperatorActionReviewHandoffFollowUp,
 						Status:      orchestrator.OperatorActionAuthorityRequiredNext,
 						Domain:      orchestrator.OperatorExecutionDomainReview,
 						CommandHint: "tuku inspect --task tsk_status",
-						Reason:      "launch completed and acknowledgment captured, but downstream follow-through appears stalled",
+						Reason:      "launch completed and acknowledgment captured, but downstream follow-through appears stalled. Newer retained transcript evidence exists starting at sequence 42; review awareness is recommended while progressing.",
 					},
 					MandatoryBeforeProgress: true,
+				},
+				LatestContinuityTransitionReceipt: &orchestrator.ContinuityTransitionReceiptSummary{
+					ReceiptID:             "ctr_status_1",
+					TaskID:                common.TaskID("tsk_status"),
+					TransitionKind:        transition.KindHandoffLaunch,
+					HandoffStateBefore:    orchestrator.HandoffContinuityStateAcceptedNotLaunched,
+					HandoffStateAfter:     orchestrator.HandoffContinuityStateLaunchCompletedAckSeen,
+					ReviewGapPresent:      true,
+					ReviewPosture:         transition.ReviewPostureGlobalReviewStale,
+					AcknowledgmentPresent: false,
+					Summary:               "handoff launch was recorded while transcript review remained stale",
+					CreatedAt:             time.Unix(1710000700, 0).UTC(),
+				},
+				RecentContinuityTransitionReceipts: []orchestrator.ContinuityTransitionReceiptSummary{
+					{
+						ReceiptID:             "ctr_status_1",
+						TaskID:                common.TaskID("tsk_status"),
+						TransitionKind:        transition.KindHandoffLaunch,
+						HandoffStateBefore:    orchestrator.HandoffContinuityStateAcceptedNotLaunched,
+						HandoffStateAfter:     orchestrator.HandoffContinuityStateLaunchCompletedAckSeen,
+						ReviewGapPresent:      true,
+						ReviewPosture:         transition.ReviewPostureGlobalReviewStale,
+						AcknowledgmentPresent: false,
+						Summary:               "handoff launch was recorded while transcript review remained stale",
+						CreatedAt:             time.Unix(1710000700, 0).UTC(),
+					},
+				},
+				ContinuityIncidentTaskRisk: &orchestrator.ContinuityIncidentTaskRiskSummary{
+					Class:                               orchestrator.ContinuityIncidentTaskRiskRecurringWeakClosure,
+					Digest:                              "recurring continuity weakness in recent bounded evidence",
+					WindowAdvisory:                      "bounded incident window anchors=3 open=1 reopened=2 triaged-without-follow-up=0 stagnant=0",
+					Detail:                              "Recent bounded evidence suggests recurring weak closure posture across incidents.",
+					DistinctAnchors:                     3,
+					RecurringWeakClosure:                true,
+					ReopenedAfterClosureAnchors:         2,
+					RepeatedReopenLoopAnchors:           1,
+					OperationallyUnresolvedAnchorSignal: 3,
+					RecentAnchorClasses: []orchestrator.ContinuityIncidentClosureClass{
+						orchestrator.ContinuityIncidentClosureWeakReopened,
+						orchestrator.ContinuityIncidentClosureWeakLoop,
+					},
 				},
 			}, nil
 		},
@@ -754,6 +981,12 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 	}
 	if statusOut.LatestRecoveryAction == nil || statusOut.LatestRecoveryAction.ActionID != action.ActionID {
 		t.Fatalf("expected latest recovery action in status response, got %+v", statusOut.LatestRecoveryAction)
+	}
+	if statusOut.CompiledIntent == nil || statusOut.CompiledIntent.IntentID != "int_status_1" || statusOut.CompiledIntent.ExecutionReadiness != "REPAIR_RECOVERY_FOCUSED" {
+		t.Fatalf("expected status compiled intent mapping, got %+v", statusOut.CompiledIntent)
+	}
+	if statusOut.CompiledBrief == nil || statusOut.CompiledBrief.BriefID != "brf_status_1" || statusOut.CompiledBrief.Posture != string(brief.PostureRepairOriented) {
+		t.Fatalf("expected status compiled brief mapping, got %+v", statusOut.CompiledBrief)
 	}
 	if statusOut.HandoffContinuityState != string(orchestrator.HandoffContinuityStateFollowThroughStalled) {
 		t.Fatalf("expected handoff continuity state in status response, got %+v", statusOut)
@@ -785,6 +1018,24 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 	if statusOut.OperatorExecutionPlan.PrimaryStep.Action != string(orchestrator.OperatorActionReviewHandoffFollowUp) || statusOut.OperatorExecutionPlan.PrimaryStep.CommandHint != "tuku inspect --task tsk_status" {
 		t.Fatalf("expected status execution plan primary step mapping, got %+v", statusOut.OperatorExecutionPlan.PrimaryStep)
 	}
+	if statusOut.OperatorDecision == nil || !strings.Contains(statusOut.OperatorDecision.Guidance, "Transcript review is stale for shell session shs_review_status") {
+		t.Fatalf("expected status review-aware decision guidance mapping, got %+v", statusOut.OperatorDecision)
+	}
+	if !strings.Contains(statusOut.OperatorExecutionPlan.PrimaryStep.Reason, "starting at sequence 42") {
+		t.Fatalf("expected status review-aware plan reason mapping, got %+v", statusOut.OperatorExecutionPlan.PrimaryStep)
+	}
+	if statusOut.LatestContinuityTransitionReceipt == nil || statusOut.LatestContinuityTransitionReceipt.ReceiptID != "ctr_status_1" {
+		t.Fatalf("expected status transition receipt mapping, got %+v", statusOut.LatestContinuityTransitionReceipt)
+	}
+	if len(statusOut.RecentContinuityTransitionReceipts) != 1 || statusOut.RecentContinuityTransitionReceipts[0].ReviewPosture != string(transition.ReviewPostureGlobalReviewStale) {
+		t.Fatalf("expected status transition receipt history mapping, got %+v", statusOut.RecentContinuityTransitionReceipts)
+	}
+	if statusOut.ContinuityIncidentTaskRisk == nil || statusOut.ContinuityIncidentTaskRisk.Class != string(orchestrator.ContinuityIncidentTaskRiskRecurringWeakClosure) {
+		t.Fatalf("expected status incident task-risk mapping, got %+v", statusOut.ContinuityIncidentTaskRisk)
+	}
+	if len(statusOut.ContinuityIncidentTaskRisk.RecentAnchorClasses) != 2 {
+		t.Fatalf("expected status task-risk recent classes mapping, got %+v", statusOut.ContinuityIncidentTaskRisk)
+	}
 
 	inspectPayload, _ := json.Marshal(ipc.TaskInspectRequest{TaskID: common.TaskID("tsk_status")})
 	inspectResp := svc.handleRequest(context.Background(), ipc.Request{
@@ -801,6 +1052,12 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 	}
 	if inspectOut.LatestRecoveryAction == nil || inspectOut.LatestRecoveryAction.ActionID != action.ActionID {
 		t.Fatalf("expected latest recovery action in inspect response, got %+v", inspectOut.LatestRecoveryAction)
+	}
+	if inspectOut.CompiledIntent == nil || inspectOut.CompiledIntent.IntentID != "int_status_1" || inspectOut.CompiledIntent.Posture != "REPAIR_RECOVERY" {
+		t.Fatalf("expected inspect compiled intent mapping, got %+v", inspectOut.CompiledIntent)
+	}
+	if inspectOut.CompiledBrief == nil || inspectOut.CompiledBrief.BriefID != "brf_status_1" || inspectOut.CompiledBrief.Posture != string(brief.PostureRepairOriented) {
+		t.Fatalf("expected inspect compiled brief mapping, got %+v", inspectOut.CompiledBrief)
 	}
 	if len(inspectOut.RecentRecoveryActions) != 1 || inspectOut.RecentRecoveryActions[0].ActionID != action.ActionID {
 		t.Fatalf("expected recent recovery action in inspect response, got %+v", inspectOut.RecentRecoveryActions)
@@ -829,11 +1086,156 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 	if inspectOut.ActionAuthority == nil || inspectOut.ActionAuthority.RequiredNextAction != string(orchestrator.OperatorActionReviewHandoffFollowUp) {
 		t.Fatalf("expected inspect action authority mapping, got %+v", inspectOut.ActionAuthority)
 	}
+	if inspectOut.OperatorDecision == nil || !strings.Contains(inspectOut.OperatorDecision.Guidance, "Transcript review is stale for shell session shs_review_status") {
+		t.Fatalf("expected inspect review-aware decision guidance mapping, got %+v", inspectOut.OperatorDecision)
+	}
 	if inspectOut.OperatorExecutionPlan == nil || inspectOut.OperatorExecutionPlan.PrimaryStep == nil {
 		t.Fatalf("expected inspect execution plan mapping, got %+v", inspectOut.OperatorExecutionPlan)
 	}
 	if inspectOut.OperatorExecutionPlan.PrimaryStep.Action != string(orchestrator.OperatorActionReviewHandoffFollowUp) || inspectOut.OperatorExecutionPlan.PrimaryStep.CommandHint != "tuku inspect --task tsk_status" {
 		t.Fatalf("expected inspect execution plan primary step mapping, got %+v", inspectOut.OperatorExecutionPlan.PrimaryStep)
+	}
+	if inspectOut.LatestContinuityTransitionReceipt == nil || inspectOut.LatestContinuityTransitionReceipt.ReceiptID != "ctr_status_1" {
+		t.Fatalf("expected inspect transition receipt mapping, got %+v", inspectOut.LatestContinuityTransitionReceipt)
+	}
+	if len(inspectOut.RecentContinuityTransitionReceipts) != 1 || inspectOut.RecentContinuityTransitionReceipts[0].TransitionKind != string(transition.KindHandoffLaunch) {
+		t.Fatalf("expected inspect transition receipt history mapping, got %+v", inspectOut.RecentContinuityTransitionReceipts)
+	}
+	if inspectOut.ContinuityIncidentTaskRisk == nil || inspectOut.ContinuityIncidentTaskRisk.Class != string(orchestrator.ContinuityIncidentTaskRiskRecurringWeakClosure) {
+		t.Fatalf("expected inspect incident task-risk mapping, got %+v", inspectOut.ContinuityIncidentTaskRisk)
+	}
+}
+
+func TestHandleRequestTaskIntentRoute(t *testing.T) {
+	var captured orchestrator.ReadCompiledIntentRequest
+	handler := &fakeOrchestratorService{
+		readCompiledIntentFn: func(_ context.Context, req orchestrator.ReadCompiledIntentRequest) (orchestrator.ReadCompiledIntentResult, error) {
+			captured = req
+			return orchestrator.ReadCompiledIntentResult{
+				TaskID:          common.TaskID(req.TaskID),
+				CurrentIntentID: common.IntentID("int_123"),
+				Bounded:         true,
+				CompiledIntent: &orchestrator.CompiledIntentSummary{
+					IntentID:                common.IntentID("int_123"),
+					Class:                   "IMPLEMENT_CHANGE",
+					Posture:                 "PLANNING",
+					ExecutionReadiness:      "PLANNING_IN_PROGRESS",
+					Objective:               "Prepare intent compiler rollout",
+					ScopeSummary:            "bounded scope signals: internal/orchestrator/service.go",
+					RequiresClarification:   true,
+					ClarificationQuestions:  []string{"Which task slice should be executed first?"},
+					BoundedEvidenceMessages: 5,
+					Digest:                  "planning intent posture in bounded recent evidence",
+					Advisory:                "Intent remains planning-focused in bounded recent evidence.",
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+
+	payload, _ := json.Marshal(ipc.TaskIntentRequest{TaskID: common.TaskID("tsk_intent")})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_intent",
+		Method:    ipc.MethodTaskIntent,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_intent" {
+		t.Fatalf("unexpected read intent request: %+v", captured)
+	}
+	var out ipc.TaskIntentResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal task intent response: %v", err)
+	}
+	if out.TaskID != "tsk_intent" || out.CurrentIntentID != "int_123" || !out.Bounded {
+		t.Fatalf("unexpected task intent response envelope: %+v", out)
+	}
+	if out.CompiledIntent == nil || out.CompiledIntent.ExecutionReadiness != "PLANNING_IN_PROGRESS" || out.CompiledIntent.Digest == "" {
+		t.Fatalf("expected mapped compiled intent payload, got %+v", out.CompiledIntent)
+	}
+	if len(out.CompiledIntent.ClarificationQuestions) != 1 || !out.CompiledIntent.RequiresClarification {
+		t.Fatalf("expected clarification cues in task intent response, got %+v", out.CompiledIntent)
+	}
+}
+
+func TestHandleRequestTaskBriefRoute(t *testing.T) {
+	var captured orchestrator.ReadGeneratedBriefRequest
+	handler := &fakeOrchestratorService{
+		readGeneratedBriefFn: func(_ context.Context, req orchestrator.ReadGeneratedBriefRequest) (orchestrator.ReadGeneratedBriefResult, error) {
+			captured = req
+			return orchestrator.ReadGeneratedBriefResult{
+				TaskID:         common.TaskID(req.TaskID),
+				CurrentBriefID: common.BriefID("brf_123"),
+				Bounded:        true,
+				Brief: &brief.ExecutionBrief{
+					BriefID:               common.BriefID("brf_123"),
+					TaskID:                common.TaskID(req.TaskID),
+					IntentID:              common.IntentID("int_123"),
+					Posture:               brief.PostureClarificationNeeded,
+					Objective:             "Clarify and bound next execution step",
+					RequestedOutcome:      "Produce explicit bounded implementation brief",
+					NormalizedAction:      "prepare bounded execution brief",
+					ScopeSummary:          "scope remains underspecified in recent bounded evidence",
+					Constraints:           []string{"no authority changes"},
+					DoneCriteria:          []string{"clarification questions remain explicit"},
+					AmbiguityFlags:        []string{"scope_underspecified"},
+					ClarificationQuestions: []string{"Which module should be changed first?"},
+					RequiresClarification: true,
+					WorkerFraming:         "Clarification-focused brief: do not fabricate missing requirements; surface unresolved questions before bounded execution.",
+					BoundedEvidenceMessages: 4,
+				},
+				CompiledBrief: &orchestrator.CompiledBriefSummary{
+					BriefID:                common.BriefID("brf_123"),
+					IntentID:               common.IntentID("int_123"),
+					Posture:                brief.PostureClarificationNeeded,
+					Objective:              "Clarify and bound next execution step",
+					RequestedOutcome:       "Produce explicit bounded implementation brief",
+					NormalizedAction:       "prepare bounded execution brief",
+					ScopeSummary:           "scope remains underspecified in recent bounded evidence",
+					Constraints:            []string{"no authority changes"},
+					DoneCriteria:           []string{"clarification questions remain explicit"},
+					AmbiguityFlags:         []string{"scope_underspecified"},
+					ClarificationQuestions: []string{"Which module should be changed first?"},
+					RequiresClarification:  true,
+					WorkerFraming:          "Clarification-focused brief: do not fabricate missing requirements; surface unresolved questions before bounded execution.",
+					BoundedEvidenceMessages: 4,
+					Digest:                 "clarification-needed brief posture in bounded recent evidence",
+					Advisory:               "Brief remains clarification-needed in bounded recent evidence; unresolved clarification questions remain explicit.",
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+
+	payload, _ := json.Marshal(ipc.TaskBriefRequest{TaskID: common.TaskID("tsk_brief")})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_brief",
+		Method:    ipc.MethodTaskBrief,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_brief" {
+		t.Fatalf("unexpected task brief request: %+v", captured)
+	}
+	var out ipc.TaskBriefResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal task brief response: %v", err)
+	}
+	if out.TaskID != "tsk_brief" || out.CurrentBriefID != "brf_123" || !out.Bounded {
+		t.Fatalf("unexpected task brief envelope: %+v", out)
+	}
+	if out.CompiledBrief == nil || out.CompiledBrief.Posture != string(brief.PostureClarificationNeeded) {
+		t.Fatalf("expected compiled brief mapping, got %+v", out.CompiledBrief)
+	}
+	if out.CompiledBrief.Digest != "clarification-needed brief posture in bounded recent evidence" {
+		t.Fatalf("unexpected compiled brief digest mapping: %+v", out.CompiledBrief)
+	}
+	if out.Brief == nil || !out.Brief.RequiresClarification || len(out.Brief.ClarificationQuestions) != 1 {
+		t.Fatalf("expected brief clarification cues, got %+v", out.Brief)
 	}
 }
 
@@ -1025,18 +1427,21 @@ func TestHandleRequestShellSessionReportRoute(t *testing.T) {
 			return orchestrator.ReportShellSessionResult{
 				TaskID: common.TaskID(req.TaskID),
 				Session: orchestrator.ShellSessionView{
-					TaskID:           common.TaskID(req.TaskID),
-					SessionID:        req.SessionID,
-					WorkerPreference: req.WorkerPreference,
-					ResolvedWorker:   req.ResolvedWorker,
-					WorkerSessionID:  req.WorkerSessionID,
-					AttachCapability: req.AttachCapability,
-					HostMode:         req.HostMode,
-					HostState:        req.HostState,
-					StartedAt:        req.StartedAt,
-					Active:           req.Active,
-					Note:             req.Note,
-					SessionClass:     orchestrator.ShellSessionClassAttachable,
+					TaskID:                common.TaskID(req.TaskID),
+					SessionID:             req.SessionID,
+					WorkerPreference:      req.WorkerPreference,
+					ResolvedWorker:        req.ResolvedWorker,
+					WorkerSessionID:       req.WorkerSessionID,
+					WorkerSessionIDSource: req.WorkerSessionIDSource,
+					AttachCapability:      req.AttachCapability,
+					HostMode:              req.HostMode,
+					HostState:             req.HostState,
+					StartedAt:             req.StartedAt,
+					Active:                req.Active,
+					Note:                  req.Note,
+					SessionClass:          orchestrator.ShellSessionClassAttachable,
+					SessionClassReason:    "active PTY session with authoritative worker session id and attach capability",
+					ReattachGuidance:      "reattach with `tuku shell --task tsk_shell --reattach shs_456`",
 				},
 			}, nil
 		},
@@ -1044,16 +1449,17 @@ func TestHandleRequestShellSessionReportRoute(t *testing.T) {
 	svc := NewService("/tmp/unused.sock", handler)
 
 	payload, _ := json.Marshal(ipc.TaskShellSessionReportRequest{
-		TaskID:           common.TaskID("tsk_shell"),
-		SessionID:        "shs_456",
-		WorkerPreference: "auto",
-		ResolvedWorker:   "claude",
-		WorkerSessionID:  "wks_456",
-		AttachCapability: "attachable",
-		HostMode:         "claude-pty",
-		HostState:        "starting",
-		Active:           true,
-		Note:             "shell session registered",
+		TaskID:                common.TaskID("tsk_shell"),
+		SessionID:             "shs_456",
+		WorkerPreference:      "auto",
+		ResolvedWorker:        "claude",
+		WorkerSessionID:       "wks_456",
+		WorkerSessionIDSource: "authoritative",
+		AttachCapability:      "attachable",
+		HostMode:              "claude-pty",
+		HostState:             "starting",
+		Active:                true,
+		Note:                  "shell session registered",
 	})
 	resp := svc.handleRequest(context.Background(), ipc.Request{
 		RequestID: "req_5",
@@ -1066,12 +1472,1175 @@ func TestHandleRequestShellSessionReportRoute(t *testing.T) {
 	if captured.SessionID != "shs_456" || captured.ResolvedWorker != "claude" {
 		t.Fatalf("unexpected shell session report request: %+v", captured)
 	}
+	if captured.WorkerSessionIDSource != "authoritative" {
+		t.Fatalf("expected authoritative session-id source, got %+v", captured)
+	}
 	var out ipc.TaskShellSessionReportResponse
 	if err := json.Unmarshal(resp.Payload, &out); err != nil {
 		t.Fatalf("unmarshal shell session report response: %v", err)
 	}
 	if out.Session.SessionClass != "attachable" || out.Session.WorkerSessionID != "wks_456" || out.Session.AttachCapability != "attachable" {
 		t.Fatalf("expected active session class, got %+v", out.Session)
+	}
+	if out.Session.WorkerSessionIDSource != "authoritative" {
+		t.Fatalf("expected authoritative session-id source in response, got %+v", out.Session)
+	}
+}
+
+func TestHandleRequestShellTranscriptAppendRoute(t *testing.T) {
+	var captured orchestrator.RecordShellTranscriptRequest
+	handler := &fakeOrchestratorService{
+		recordShellTranscriptFn: func(_ context.Context, req orchestrator.RecordShellTranscriptRequest) (orchestrator.RecordShellTranscriptResult, error) {
+			captured = req
+			return orchestrator.RecordShellTranscriptResult{
+				TaskID:    common.TaskID(req.TaskID),
+				SessionID: req.SessionID,
+				Summary: shellsession.TranscriptSummary{
+					TaskID:         common.TaskID(req.TaskID),
+					SessionID:      req.SessionID,
+					RetainedChunks: 3,
+					DroppedChunks:  1,
+					RetentionLimit: 200,
+					LastSequenceNo: 42,
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskShellTranscriptAppendRequest{
+		TaskID:    common.TaskID("tsk_shell"),
+		SessionID: "shs_1",
+		Chunks: []ipc.TaskShellTranscriptChunkAppend{
+			{Source: "worker_output", Content: "line 1"},
+			{Source: "worker_output", Content: "line 2"},
+		},
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_transcript_append",
+		Method:    ipc.MethodTaskShellTranscriptAppend,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_shell" || captured.SessionID != "shs_1" || len(captured.Chunks) != 2 {
+		t.Fatalf("unexpected transcript append request: %+v", captured)
+	}
+	var out ipc.TaskShellTranscriptAppendResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal transcript append response: %v", err)
+	}
+	if out.RetainedChunks != 3 || out.DroppedChunks != 1 || out.RetentionLimit != 200 || out.LastSequenceNo != 42 {
+		t.Fatalf("unexpected transcript append response payload: %+v", out)
+	}
+}
+
+func TestHandleRequestShellTranscriptReadRoute(t *testing.T) {
+	var captured orchestrator.ReadShellTranscriptRequest
+	handler := &fakeOrchestratorService{
+		readShellTranscriptFn: func(_ context.Context, req orchestrator.ReadShellTranscriptRequest) (orchestrator.ReadShellTranscriptResult, error) {
+			captured = req
+			next := int64(81)
+			before := int64(121)
+			return orchestrator.ReadShellTranscriptResult{
+				TaskID:                  common.TaskID(req.TaskID),
+				SessionID:               req.SessionID,
+				TranscriptState:         shellsession.TranscriptStateTranscriptOnlyPartial,
+				TranscriptOnly:          true,
+				Bounded:                 true,
+				Partial:                 true,
+				RetentionLimit:          200,
+				RetainedChunkCount:      200,
+				DroppedChunkCount:       57,
+				LastSequence:            280,
+				OldestRetainedSequence:  81,
+				NewestRetainedSequence:  280,
+				RequestedLimit:          40,
+				RequestedBeforeSequence: &before,
+				RequestedSource:         shellsession.TranscriptSourceWorkerOutput,
+				PageOldestSequence:      81,
+				PageNewestSequence:      120,
+				PageChunkCount:          40,
+				HasMoreOlder:            true,
+				NextBeforeSequence:      &next,
+				LatestReview: &orchestrator.ShellTranscriptReviewSummary{
+					ReviewID:               "srev_123",
+					SourceFilter:           shellsession.TranscriptSourceWorkerOutput,
+					ReviewedUpToSequence:   110,
+					Summary:                "reviewed bounded worker output",
+					CreatedAt:              time.Unix(1710000060, 0).UTC(),
+					TranscriptState:        shellsession.TranscriptStateTranscriptOnlyPartial,
+					RetentionLimit:         200,
+					RetainedChunks:         200,
+					DroppedChunks:          57,
+					OldestRetainedSequence: 81,
+					NewestRetainedSequence: 280,
+					StaleBehindLatest:      true,
+					NewerRetainedCount:     170,
+				},
+				HasUnreadNewerEvidence: true,
+				PageFullyReviewed:      false,
+				PageCrossesReview:      true,
+				PageHasUnreviewed:      true,
+				Closure: orchestrator.ShellTranscriptReviewClosure{
+					State:                    shellsession.TranscriptReviewClosureSourceScopedStale,
+					Scope:                    shellsession.TranscriptSourceWorkerOutput,
+					HasReview:                true,
+					HasUnreadNewerEvidence:   true,
+					ReviewedUpToSequence:     110,
+					OldestUnreviewedSequence: 111,
+					NewestRetainedSequence:   280,
+					UnreviewedRetainedCount:  170,
+					RetentionLimit:           200,
+					RetainedChunkCount:       200,
+					DroppedChunkCount:        57,
+				},
+				SourceSummary: []orchestrator.ShellTranscriptSourceSummary{
+					{Source: shellsession.TranscriptSourceFallback, Chunks: 12},
+					{Source: shellsession.TranscriptSourceWorkerOutput, Chunks: 188},
+				},
+				Chunks: []shellsession.TranscriptChunk{
+					{ChunkID: "sst_81", TaskID: common.TaskID(req.TaskID), SessionID: req.SessionID, SequenceNo: 81, Source: shellsession.TranscriptSourceWorkerOutput, Content: "line 81", CreatedAt: time.Unix(1710000000, 0).UTC()},
+					{ChunkID: "sst_120", TaskID: common.TaskID(req.TaskID), SessionID: req.SessionID, SequenceNo: 120, Source: shellsession.TranscriptSourceWorkerOutput, Content: "line 120", CreatedAt: time.Unix(1710000040, 0).UTC()},
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskShellTranscriptReadRequest{
+		TaskID:         common.TaskID("tsk_shell"),
+		SessionID:      "shs_1",
+		Limit:          40,
+		BeforeSequence: 121,
+		Source:         "worker_output",
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_transcript_read",
+		Method:    ipc.MethodTaskShellTranscriptRead,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_shell" || captured.SessionID != "shs_1" || captured.Limit != 40 || captured.BeforeSequence != 121 || captured.Source != "worker_output" {
+		t.Fatalf("unexpected transcript read request: %+v", captured)
+	}
+	var out ipc.TaskShellTranscriptReadResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal transcript read response: %v", err)
+	}
+	if out.TranscriptState != "transcript_only_bounded_partial" || !out.Partial || !out.Bounded || !out.TranscriptOnly {
+		t.Fatalf("unexpected transcript state payload: %+v", out)
+	}
+	if out.RetainedChunkCount != 200 || out.DroppedChunkCount != 57 || out.PageChunkCount != 40 || !out.HasMoreOlder || out.NextBeforeSequence != 81 {
+		t.Fatalf("unexpected transcript pagination payload: %+v", out)
+	}
+	if out.LatestReview == nil || out.LatestReview.ReviewID != "srev_123" || !out.HasUnreadNewerEvidence || !out.PageCrossesReview {
+		t.Fatalf("expected transcript review metadata in read payload, got %+v", out)
+	}
+	if out.Closure.State != string(shellsession.TranscriptReviewClosureSourceScopedStale) || out.Closure.OldestUnreviewedSequence != 111 || out.Closure.UnreviewedRetainedCount != 170 {
+		t.Fatalf("expected closure metadata in read payload, got %+v", out.Closure)
+	}
+	if len(out.SourceSummary) != 2 || len(out.Chunks) != 2 {
+		t.Fatalf("expected source summary and chunk payload, got %+v", out)
+	}
+}
+
+func TestHandleRequestShellTranscriptReviewRoute(t *testing.T) {
+	var captured orchestrator.RecordShellTranscriptReviewRequest
+	handler := &fakeOrchestratorService{
+		recordShellTranscriptReviewFn: func(_ context.Context, req orchestrator.RecordShellTranscriptReviewRequest) (orchestrator.RecordShellTranscriptReviewResult, error) {
+			captured = req
+			return orchestrator.RecordShellTranscriptReviewResult{
+				TaskID:                 common.TaskID(req.TaskID),
+				SessionID:              req.SessionID,
+				TranscriptState:        shellsession.TranscriptStateTranscriptOnlyPartial,
+				RetentionLimit:         200,
+				RetainedChunkCount:     200,
+				DroppedChunkCount:      57,
+				OldestRetainedSequence: 81,
+				NewestRetainedSequence: 280,
+				LatestReview: orchestrator.ShellTranscriptReviewSummary{
+					ReviewID:                 "srev_123",
+					SourceFilter:             shellsession.TranscriptSourceWorkerOutput,
+					ReviewedUpToSequence:     req.ReviewedUpToSeq,
+					Summary:                  req.Summary,
+					CreatedAt:                time.Unix(1710000100, 0).UTC(),
+					TranscriptState:          shellsession.TranscriptStateTranscriptOnlyPartial,
+					RetentionLimit:           200,
+					RetainedChunks:           200,
+					DroppedChunks:            57,
+					OldestRetainedSequence:   81,
+					NewestRetainedSequence:   280,
+					StaleBehindLatest:        true,
+					NewerRetainedCount:       100,
+					OldestUnreviewedSequence: 181,
+					ClosureState:             shellsession.TranscriptReviewClosureSourceScopedStale,
+				},
+				HasUnreadNewerEvidence: true,
+				Closure: orchestrator.ShellTranscriptReviewClosure{
+					State:                    shellsession.TranscriptReviewClosureSourceScopedStale,
+					Scope:                    shellsession.TranscriptSourceWorkerOutput,
+					HasReview:                true,
+					HasUnreadNewerEvidence:   true,
+					ReviewedUpToSequence:     req.ReviewedUpToSeq,
+					OldestUnreviewedSequence: 181,
+					NewestRetainedSequence:   280,
+					UnreviewedRetainedCount:  100,
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskShellTranscriptReviewRequest{
+		TaskID:          common.TaskID("tsk_shell"),
+		SessionID:       "shs_1",
+		ReviewedUpToSeq: 180,
+		Source:          "worker_output",
+		Summary:         "reviewed up to sequence 180",
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_transcript_review",
+		Method:    ipc.MethodTaskShellTranscriptReview,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_shell" || captured.SessionID != "shs_1" || captured.ReviewedUpToSeq != 180 || captured.Source != "worker_output" {
+		t.Fatalf("unexpected transcript review request: %+v", captured)
+	}
+	var out ipc.TaskShellTranscriptReviewResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal transcript review response: %v", err)
+	}
+	if out.LatestReview.ReviewID != "srev_123" || out.LatestReview.ReviewedUpToSequence != 180 || !out.HasUnreadNewerEvidence {
+		t.Fatalf("unexpected transcript review payload: %+v", out)
+	}
+	if out.Closure.State != string(shellsession.TranscriptReviewClosureSourceScopedStale) || out.Closure.UnreviewedRetainedCount != 100 {
+		t.Fatalf("unexpected transcript review closure payload: %+v", out.Closure)
+	}
+}
+
+func TestHandleRequestShellTranscriptHistoryRoute(t *testing.T) {
+	var captured orchestrator.ReadShellTranscriptReviewHistoryRequest
+	handler := &fakeOrchestratorService{
+		readShellTranscriptReviewHistoryFn: func(_ context.Context, req orchestrator.ReadShellTranscriptReviewHistoryRequest) (orchestrator.ReadShellTranscriptReviewHistoryResult, error) {
+			captured = req
+			latest := orchestrator.ShellTranscriptReviewSummary{
+				ReviewID:                 "srev_200",
+				SourceFilter:             shellsession.TranscriptSourceWorkerOutput,
+				ReviewedUpToSequence:     210,
+				Summary:                  "reviewed worker output boundary",
+				CreatedAt:                time.Unix(1710000200, 0).UTC(),
+				StaleBehindLatest:        true,
+				NewerRetainedCount:       15,
+				OldestUnreviewedSequence: 211,
+				ClosureState:             shellsession.TranscriptReviewClosureSourceScopedStale,
+			}
+			return orchestrator.ReadShellTranscriptReviewHistoryResult{
+				TaskID:                 common.TaskID(req.TaskID),
+				SessionID:              req.SessionID,
+				TranscriptState:        shellsession.TranscriptStateTranscriptOnlyPartial,
+				TranscriptOnly:         true,
+				Bounded:                true,
+				Partial:                true,
+				RetentionLimit:         200,
+				RetainedChunkCount:     200,
+				DroppedChunkCount:      20,
+				OldestRetainedSequence: 26,
+				NewestRetainedSequence: 225,
+				RequestedLimit:         5,
+				RequestedSource:        shellsession.TranscriptSourceWorkerOutput,
+				Closure: orchestrator.ShellTranscriptReviewClosure{
+					State:                    shellsession.TranscriptReviewClosureSourceScopedStale,
+					Scope:                    shellsession.TranscriptSourceWorkerOutput,
+					HasReview:                true,
+					HasUnreadNewerEvidence:   true,
+					ReviewedUpToSequence:     210,
+					OldestUnreviewedSequence: 211,
+					NewestRetainedSequence:   225,
+					UnreviewedRetainedCount:  15,
+				},
+				LatestReview: &latest,
+				Reviews: []orchestrator.ShellTranscriptReviewSummary{
+					latest,
+					{
+						ReviewID:             "srev_199",
+						SourceFilter:         "",
+						ReviewedUpToSequence: 190,
+						Summary:              "global retained review",
+						CreatedAt:            time.Unix(1710000100, 0).UTC(),
+						StaleBehindLatest:    true,
+						NewerRetainedCount:   35,
+						ClosureState:         shellsession.TranscriptReviewClosureGlobalStale,
+					},
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskShellTranscriptHistoryRequest{
+		TaskID:    common.TaskID("tsk_shell"),
+		SessionID: "shs_1",
+		Source:    "worker_output",
+		Limit:     5,
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_transcript_history",
+		Method:    ipc.MethodTaskShellTranscriptHistory,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_shell" || captured.SessionID != "shs_1" || captured.Source != "worker_output" || captured.Limit != 5 {
+		t.Fatalf("unexpected transcript history request: %+v", captured)
+	}
+	var out ipc.TaskShellTranscriptHistoryResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal transcript history response: %v", err)
+	}
+	if out.Closure.State != string(shellsession.TranscriptReviewClosureSourceScopedStale) || out.Closure.OldestUnreviewedSequence != 211 {
+		t.Fatalf("unexpected transcript history closure payload: %+v", out.Closure)
+	}
+	if out.LatestReview == nil || out.LatestReview.ReviewID != "srev_200" || len(out.Reviews) != 2 {
+		t.Fatalf("unexpected transcript history payload: %+v", out)
+	}
+}
+
+func TestHandleRequestContinuityTransitionHistoryRoute(t *testing.T) {
+	var captured orchestrator.ReadContinuityTransitionHistoryRequest
+	handler := &fakeOrchestratorService{
+		readContinuityTransitionHistoryFn: func(_ context.Context, req orchestrator.ReadContinuityTransitionHistoryRequest) (orchestrator.ReadContinuityTransitionHistoryResult, error) {
+			captured = req
+			latest := orchestrator.ContinuityTransitionReceiptSummary{
+				ReceiptID:             "ctr_300",
+				TaskID:                common.TaskID(req.TaskID),
+				TransitionKind:        transition.KindHandoffLaunch,
+				HandoffID:             "hnd_1",
+				HandoffStateBefore:    orchestrator.HandoffContinuityStateAcceptedNotLaunched,
+				HandoffStateAfter:     orchestrator.HandoffContinuityStateLaunchCompletedAckSeen,
+				ReviewGapPresent:      true,
+				ReviewPosture:         transition.ReviewPostureGlobalReviewStale,
+				AcknowledgmentPresent: true,
+				Summary:               "handoff launch transition recorded under explicit review-gap acknowledgment",
+				CreatedAt:             time.Unix(1710001200, 0).UTC(),
+			}
+			return orchestrator.ReadContinuityTransitionHistoryResult{
+				TaskID:                   common.TaskID(req.TaskID),
+				Bounded:                  true,
+				RequestedLimit:           5,
+				RequestedBeforeReceiptID: "ctr_250",
+				RequestedTransitionKind:  transition.KindHandoffLaunch,
+				RequestedHandoffID:       "hnd_1",
+				HasMoreOlder:             true,
+				NextBeforeReceiptID:      "ctr_280",
+				Latest:                   &latest,
+				Receipts: []orchestrator.ContinuityTransitionReceiptSummary{
+					latest,
+					{
+						ReceiptID:             "ctr_280",
+						TaskID:                common.TaskID(req.TaskID),
+						TransitionKind:        transition.KindHandoffLaunch,
+						HandoffID:             "hnd_1",
+						HandoffStateBefore:    orchestrator.HandoffContinuityStateAcceptedNotLaunched,
+						HandoffStateAfter:     orchestrator.HandoffContinuityStateLaunchCompletedAckSeen,
+						ReviewGapPresent:      true,
+						ReviewPosture:         transition.ReviewPostureGlobalReviewStale,
+						AcknowledgmentPresent: false,
+						CreatedAt:             time.Unix(1710001100, 0).UTC(),
+					},
+				},
+				RiskSummary: orchestrator.ContinuityTransitionRiskSummary{
+					WindowSize:                           2,
+					ReviewGapTransitions:                 2,
+					AcknowledgedReviewGapTransitions:     1,
+					UnacknowledgedReviewGapTransitions:   1,
+					StaleReviewPostureTransitions:        2,
+					SourceScopedReviewPostureTransitions: 0,
+					IntoClaudeOwnershipTransitions:       1,
+					BackToLocalOwnershipTransitions:      0,
+					OperationallyNotable:                 true,
+					Summary:                              "2 transition(s) recorded with unacknowledged transcript review gaps",
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskTransitionHistoryRequest{
+		TaskID:          common.TaskID("tsk_transitions"),
+		Limit:           5,
+		BeforeReceiptID: "ctr_250",
+		TransitionKind:  "HANDOFF_LAUNCH",
+		HandoffID:       "hnd_1",
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_transition_history",
+		Method:    ipc.MethodTaskTransitionHistory,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_transitions" || captured.Limit != 5 || captured.BeforeReceiptID != "ctr_250" || captured.TransitionKind != "HANDOFF_LAUNCH" || captured.HandoffID != "hnd_1" {
+		t.Fatalf("unexpected transition history request: %+v", captured)
+	}
+	var out ipc.TaskTransitionHistoryResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal transition history response: %v", err)
+	}
+	if out.RequestedTransitionKind != "HANDOFF_LAUNCH" || out.NextBeforeReceiptID != "ctr_280" || !out.HasMoreOlder {
+		t.Fatalf("unexpected transition history response metadata: %+v", out)
+	}
+	if out.Latest == nil || out.Latest.ReceiptID != "ctr_300" || len(out.Receipts) != 2 {
+		t.Fatalf("unexpected transition history response receipts: %+v", out)
+	}
+	if out.RiskSummary.UnacknowledgedReviewGapTransitions != 1 || !out.RiskSummary.OperationallyNotable {
+		t.Fatalf("unexpected transition history risk summary mapping: %+v", out.RiskSummary)
+	}
+}
+
+func TestHandleRequestContinuityIncidentSliceRoute(t *testing.T) {
+	var captured orchestrator.ReadContinuityIncidentSliceRequest
+	handler := &fakeOrchestratorService{
+		readContinuityIncidentSliceFn: func(_ context.Context, req orchestrator.ReadContinuityIncidentSliceRequest) (orchestrator.ReadContinuityIncidentSliceResult, error) {
+			captured = req
+			anchor := orchestrator.ContinuityTransitionReceiptSummary{
+				ReceiptID:             "ctr_anchor",
+				TaskID:                common.TaskID(req.TaskID),
+				TransitionKind:        transition.KindHandoffLaunch,
+				HandoffStateBefore:    orchestrator.HandoffContinuityStateAcceptedNotLaunched,
+				HandoffStateAfter:     orchestrator.HandoffContinuityStateLaunchCompletedAckSeen,
+				ReviewGapPresent:      true,
+				ReviewPosture:         transition.ReviewPostureGlobalReviewStale,
+				AcknowledgmentPresent: true,
+				CreatedAt:             time.Unix(1711000000, 0).UTC(),
+			}
+			latestReview := orchestrator.ShellTranscriptReviewSummary{
+				ReviewID:             "srev_300",
+				ReviewedUpToSequence: 220,
+				ClosureState:         shellsession.TranscriptReviewClosureGlobalStale,
+				CreatedAt:            time.Unix(1711000020, 0).UTC(),
+			}
+			latestAck := orchestrator.TranscriptReviewGapAcknowledgmentSummary{
+				AcknowledgmentID: "sack_300",
+				TaskID:           common.TaskID(req.TaskID),
+				SessionID:        "shs_incident",
+				Class:            shellsession.TranscriptReviewGapAckStaleReview,
+				ReviewState:      "global_review_stale",
+				CreatedAt:        time.Unix(1711000030, 0).UTC(),
+			}
+			return orchestrator.ReadContinuityIncidentSliceResult{
+				TaskID:                             common.TaskID(req.TaskID),
+				Bounded:                            true,
+				AnchorMode:                         orchestrator.ContinuityIncidentAnchorTransitionID,
+				RequestedAnchorTransitionReceiptID: "ctr_anchor",
+				Anchor:                             anchor,
+				TransitionNeighborLimit:            2,
+				RunLimit:                           3,
+				RecoveryLimit:                      3,
+				ProofLimit:                         6,
+				AckLimit:                           2,
+				HasOlderTransitionsOutsideWindow:   true,
+				HasNewerTransitionsOutsideWindow:   false,
+				WindowStartAt:                      time.Unix(1710999980, 0).UTC(),
+				WindowEndAt:                        time.Unix(1711000060, 0).UTC(),
+				Transitions: []orchestrator.ContinuityTransitionReceiptSummary{
+					anchor,
+				},
+				Runs: []orchestrator.ContinuityIncidentRunSummary{
+					{
+						RunID:      common.RunID("run_300"),
+						WorkerKind: run.WorkerKindCodex,
+						Status:     run.StatusFailed,
+						OccurredAt: time.Unix(1711000010, 0).UTC(),
+						StartedAt:  time.Unix(1711000000, 0).UTC(),
+						Summary:    "run failed with validation issues",
+					},
+				},
+				RecoveryActions: []orchestrator.ContinuityIncidentRecoveryActionSummary{
+					{
+						ActionID:  "ract_300",
+						Kind:      recoveryaction.KindFailedRunReviewed,
+						Summary:   "reviewed failed run evidence",
+						CreatedAt: time.Unix(1711000040, 0).UTC(),
+					},
+				},
+				ProofEvents: []orchestrator.ContinuityIncidentProofSummary{
+					{
+						EventID:    "evt_300",
+						Type:       proof.EventBranchHandoffTransitionRecorded,
+						ActorType:  proof.ActorSystem,
+						ActorID:    "tuku-daemon",
+						Timestamp:  time.Unix(1711000005, 0).UTC(),
+						Summary:    "Branch/handoff transition receipt recorded",
+						SequenceNo: 300,
+					},
+				},
+				LatestTranscriptReview:        &latestReview,
+				LatestTranscriptReviewGapAck:  &latestAck,
+				RecentTranscriptReviewGapAcks: []orchestrator.TranscriptReviewGapAcknowledgmentSummary{latestAck},
+				RiskSummary: orchestrator.ContinuityIncidentRiskSummary{
+					ReviewGapPresent:                true,
+					AcknowledgmentPresent:           true,
+					StaleOrUnreviewedReviewPosture:  true,
+					SourceScopedReviewPosture:       false,
+					IntoClaudeOwnershipTransition:   true,
+					BackToLocalOwnershipTransition:  false,
+					UnresolvedContinuityAmbiguity:   true,
+					NearbyFailedOrInterruptedRuns:   1,
+					NearbyRecoveryActions:           1,
+					RecentFailureOrRecoveryActivity: true,
+					OperationallyNotable:            true,
+					Summary:                         "anchor transition carried stale retained transcript posture with nearby failed run evidence",
+				},
+				Caveat: "bounded incident slice caveat",
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskContinuityIncidentSliceRequest{
+		TaskID:                    common.TaskID("tsk_incident"),
+		AnchorTransitionReceiptID: "ctr_anchor",
+		TransitionNeighborLimit:   2,
+		RunLimit:                  3,
+		RecoveryLimit:             3,
+		ProofLimit:                6,
+		AckLimit:                  2,
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_incident_slice",
+		Method:    ipc.MethodTaskContinuityIncidentSlice,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_incident" || captured.AnchorTransitionReceiptID != "ctr_anchor" || captured.TransitionNeighborLimit != 2 || captured.RunLimit != 3 || captured.RecoveryLimit != 3 || captured.ProofLimit != 6 || captured.AckLimit != 2 {
+		t.Fatalf("unexpected incident slice request: %+v", captured)
+	}
+	var out ipc.TaskContinuityIncidentSliceResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal incident slice response: %v", err)
+	}
+	if out.Anchor.ReceiptID != "ctr_anchor" || out.AnchorMode != string(orchestrator.ContinuityIncidentAnchorTransitionID) {
+		t.Fatalf("unexpected incident anchor payload: %+v", out)
+	}
+	if len(out.Transitions) != 1 || len(out.Runs) != 1 || len(out.RecoveryActions) != 1 || len(out.ProofEvents) != 1 {
+		t.Fatalf("unexpected incident evidence payload counts: %+v", out)
+	}
+	if out.RiskSummary.NearbyFailedOrInterruptedRuns != 1 || !out.RiskSummary.OperationallyNotable {
+		t.Fatalf("unexpected incident risk summary payload: %+v", out.RiskSummary)
+	}
+	if out.LatestTranscriptReviewGapAck == nil || out.LatestTranscriptReviewGapAck.AcknowledgmentID != "sack_300" {
+		t.Fatalf("unexpected latest transcript review-gap acknowledgment payload: %+v", out.LatestTranscriptReviewGapAck)
+	}
+}
+
+func TestHandleRequestContinuityIncidentTriageRoute(t *testing.T) {
+	var captured orchestrator.RecordContinuityIncidentTriageRequest
+	handler := &fakeOrchestratorService{
+		recordContinuityIncidentTriageFn: func(_ context.Context, req orchestrator.RecordContinuityIncidentTriageRequest) (orchestrator.RecordContinuityIncidentTriageResult, error) {
+			captured = req
+			latestTransition := orchestrator.ContinuityTransitionReceiptSummary{
+				ReceiptID:      "ctr_triage_anchor",
+				TaskID:         common.TaskID(req.TaskID),
+				TransitionKind: transition.KindHandoffLaunch,
+				CreatedAt:      time.Unix(1711000200, 0).UTC(),
+			}
+			receipt := orchestrator.ContinuityIncidentTriageReceiptSummary{
+				ReceiptID:                 "citr_500",
+				TaskID:                    common.TaskID(req.TaskID),
+				AnchorMode:                "LATEST_TRANSITION",
+				AnchorTransitionReceiptID: "ctr_triage_anchor",
+				AnchorTransitionKind:      transition.KindHandoffLaunch,
+				Posture:                   "NEEDS_FOLLOW_UP",
+				FollowUpPosture:           "ADVISORY_OPEN",
+				Summary:                   "triaged incident with follow-up advisory open",
+				RiskSummary: orchestrator.ContinuityIncidentRiskSummary{
+					ReviewGapPresent:               true,
+					StaleOrUnreviewedReviewPosture: true,
+					OperationallyNotable:           true,
+					Summary:                        "anchor transition carried stale retained transcript posture",
+				},
+				CreatedAt: time.Unix(1711000210, 0).UTC(),
+			}
+			followUp := orchestrator.ContinuityIncidentFollowUpSummary{
+				State:                     orchestrator.ContinuityIncidentFollowUpNeedsFollowUp,
+				Advisory:                  "Latest continuity incident triage is marked NEEDS_FOLLOW_UP; operator follow-up is still advised.",
+				FollowUpAdvised:           true,
+				NeedsFollowUp:             true,
+				LatestTransitionReceiptID: latestTransition.ReceiptID,
+				LatestTriageReceiptID:     receipt.ReceiptID,
+				TriageAnchorReceiptID:     receipt.AnchorTransitionReceiptID,
+				TriagePosture:             receipt.Posture,
+			}
+			return orchestrator.RecordContinuityIncidentTriageResult{
+				TaskID:                          common.TaskID(req.TaskID),
+				AnchorMode:                      "LATEST_TRANSITION",
+				AnchorTransitionReceiptID:       "ctr_triage_anchor",
+				Posture:                         "NEEDS_FOLLOW_UP",
+				Reused:                          false,
+				Receipt:                         receipt,
+				LatestContinuityTransition:      &latestTransition,
+				RecentContinuityIncidentTriages: []orchestrator.ContinuityIncidentTriageReceiptSummary{receipt},
+				FollowUp:                        &followUp,
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskContinuityIncidentTriageRequest{
+		TaskID:                    common.TaskID("tsk_triage"),
+		AnchorMode:                "latest",
+		AnchorTransitionReceiptID: "",
+		Posture:                   "NEEDS_FOLLOW_UP",
+		Summary:                   "triaged incident with follow-up advisory open",
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_incident_triage",
+		Method:    ipc.MethodTaskContinuityIncidentTriage,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_triage" || captured.AnchorMode != "latest" || captured.Posture != "NEEDS_FOLLOW_UP" {
+		t.Fatalf("unexpected incident triage request payload mapping: %+v", captured)
+	}
+	var out ipc.TaskContinuityIncidentTriageResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal continuity incident triage response: %v", err)
+	}
+	if out.Receipt.ReceiptID != "citr_500" || out.AnchorTransitionReceiptID != "ctr_triage_anchor" {
+		t.Fatalf("unexpected continuity incident triage response receipt mapping: %+v", out)
+	}
+	if out.ContinuityIncidentFollowUp == nil || out.ContinuityIncidentFollowUp.State != string(orchestrator.ContinuityIncidentFollowUpNeedsFollowUp) {
+		t.Fatalf("unexpected continuity incident follow-up mapping: %+v", out.ContinuityIncidentFollowUp)
+	}
+	if len(out.RecentContinuityIncidentTriages) != 1 {
+		t.Fatalf("expected bounded recent triage history in response, got %+v", out.RecentContinuityIncidentTriages)
+	}
+}
+
+func TestHandleRequestContinuityIncidentTriageHistoryRoute(t *testing.T) {
+	var captured orchestrator.ReadContinuityIncidentTriageHistoryRequest
+	handler := &fakeOrchestratorService{
+		readContinuityIncidentTriageHistoryFn: func(_ context.Context, req orchestrator.ReadContinuityIncidentTriageHistoryRequest) (orchestrator.ReadContinuityIncidentTriageHistoryResult, error) {
+			captured = req
+			latest := orchestrator.ContinuityIncidentTriageReceiptSummary{
+				ReceiptID:                 "citr_610",
+				TaskID:                    common.TaskID(req.TaskID),
+				AnchorMode:                "LATEST_TRANSITION",
+				AnchorTransitionReceiptID: "ctr_600",
+				AnchorTransitionKind:      transition.KindHandoffLaunch,
+				Posture:                   "NEEDS_FOLLOW_UP",
+				FollowUpPosture:           "ADVISORY_OPEN",
+				Summary:                   "follow-up remains open for anchor ctr_600",
+				CreatedAt:                 time.Unix(1711000600, 0).UTC(),
+			}
+			return orchestrator.ReadContinuityIncidentTriageHistoryResult{
+				TaskID:                             common.TaskID(req.TaskID),
+				Bounded:                            true,
+				RequestedLimit:                     4,
+				RequestedBeforeReceiptID:           "citr_590",
+				RequestedAnchorTransitionReceiptID: "ctr_600",
+				RequestedPosture:                   "NEEDS_FOLLOW_UP",
+				HasMoreOlder:                       true,
+				NextBeforeReceiptID:                "citr_605",
+				LatestTransitionReceiptID:          "ctr_620",
+				Latest:                             &latest,
+				Receipts: []orchestrator.ContinuityIncidentTriageReceiptSummary{
+					latest,
+					{
+						ReceiptID:                 "citr_605",
+						TaskID:                    common.TaskID(req.TaskID),
+						AnchorMode:                "TRANSITION_RECEIPT_ID",
+						AnchorTransitionReceiptID: "ctr_600",
+						AnchorTransitionKind:      transition.KindHandoffLaunch,
+						Posture:                   "NEEDS_FOLLOW_UP",
+						FollowUpPosture:           "ADVISORY_OPEN",
+						CreatedAt:                 time.Unix(1711000500, 0).UTC(),
+					},
+				},
+				Rollup: orchestrator.ContinuityIncidentTriageHistoryRollupSummary{
+					WindowSize:                        2,
+					BoundedWindow:                     true,
+					DistinctAnchors:                   1,
+					AnchorsNeedsFollowUp:              1,
+					AnchorsWithOpenFollowUp:           1,
+					AnchorsBehindLatestTransition:     1,
+					AnchorsRepeatedWithoutProgression: 1,
+					ReviewRiskReceipts:                1,
+					OperationallyNotable:              true,
+					Summary:                           "1 anchor(s) remain in open follow-up posture",
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskContinuityIncidentTriageHistoryRequest{
+		TaskID:                    common.TaskID("tsk_triage_history"),
+		Limit:                     4,
+		BeforeReceiptID:           "citr_590",
+		AnchorTransitionReceiptID: "ctr_600",
+		Posture:                   "NEEDS_FOLLOW_UP",
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_incident_triage_history",
+		Method:    ipc.MethodTaskContinuityIncidentTriageHistory,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_triage_history" || captured.Limit != 4 || captured.BeforeReceiptID != "citr_590" || captured.AnchorTransitionReceiptID != "ctr_600" || captured.Posture != "NEEDS_FOLLOW_UP" {
+		t.Fatalf("unexpected incident triage history request payload mapping: %+v", captured)
+	}
+	var out ipc.TaskContinuityIncidentTriageHistoryResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal continuity incident triage history response: %v", err)
+	}
+	if out.RequestedPosture != "NEEDS_FOLLOW_UP" || out.NextBeforeReceiptID != "citr_605" || !out.HasMoreOlder {
+		t.Fatalf("unexpected continuity incident triage history metadata mapping: %+v", out)
+	}
+	if out.Latest == nil || out.Latest.ReceiptID != "citr_610" || len(out.Receipts) != 2 {
+		t.Fatalf("unexpected continuity incident triage history receipt mapping: %+v", out)
+	}
+	if out.Rollup.AnchorsWithOpenFollowUp != 1 || !out.Rollup.OperationallyNotable {
+		t.Fatalf("unexpected continuity incident triage history rollup mapping: %+v", out.Rollup)
+	}
+}
+
+func TestHandleRequestContinuityIncidentFollowUpRoute(t *testing.T) {
+	var captured orchestrator.RecordContinuityIncidentFollowUpRequest
+	handler := &fakeOrchestratorService{
+		recordContinuityIncidentFollowUpFn: func(_ context.Context, req orchestrator.RecordContinuityIncidentFollowUpRequest) (orchestrator.RecordContinuityIncidentFollowUpResult, error) {
+			captured = req
+			latestTransition := orchestrator.ContinuityTransitionReceiptSummary{
+				ReceiptID:      "ctr_followup_anchor",
+				TaskID:         common.TaskID(req.TaskID),
+				TransitionKind: transition.KindHandoffLaunch,
+				CreatedAt:      time.Unix(1712000200, 0).UTC(),
+			}
+			latestTriage := orchestrator.ContinuityIncidentTriageReceiptSummary{
+				ReceiptID:                 "citr_followup_anchor",
+				TaskID:                    common.TaskID(req.TaskID),
+				AnchorMode:                incidenttriage.AnchorModeLatestTransition,
+				AnchorTransitionReceiptID: "ctr_followup_anchor",
+				AnchorTransitionKind:      transition.KindHandoffLaunch,
+				Posture:                   incidenttriage.PostureNeedsFollowUp,
+				FollowUpPosture:           incidenttriage.FollowUpPostureAdvisory,
+				CreatedAt:                 time.Unix(1712000210, 0).UTC(),
+			}
+			receipt := orchestrator.ContinuityIncidentFollowUpReceiptSummary{
+				ReceiptID:                 "cifr_700",
+				TaskID:                    common.TaskID(req.TaskID),
+				AnchorMode:                incidenttriage.AnchorModeLatestTransition,
+				AnchorTransitionReceiptID: "ctr_followup_anchor",
+				AnchorTransitionKind:      transition.KindHandoffLaunch,
+				TriageReceiptID:           "citr_followup_anchor",
+				TriagePosture:             incidenttriage.PostureNeedsFollowUp,
+				TriageFollowUpState:       incidenttriage.FollowUpPostureAdvisory,
+				ActionKind:                incidenttriage.FollowUpActionProgressed,
+				Summary:                   "validated downstream handoff context and advanced follow-up",
+				ReviewGapPresent:          true,
+				ReviewPosture:             transition.ReviewPostureGlobalReviewStale,
+				AcknowledgmentPresent:     true,
+				TriagedUnderReviewRisk:    true,
+				CreatedAt:                 time.Unix(1712000220, 0).UTC(),
+			}
+			followUp := orchestrator.ContinuityIncidentFollowUpSummary{
+				State:                     orchestrator.ContinuityIncidentFollowUpProgressed,
+				Digest:                    "follow-up open",
+				WindowAdvisory:            "bounded window open=1",
+				Advisory:                  "Latest incident follow-up receipt is PROGRESSED; explicit closure remains open.",
+				FollowUpAdvised:           true,
+				NeedsFollowUp:             true,
+				TriagedUnderReviewRisk:    true,
+				LatestTransitionReceiptID: latestTransition.ReceiptID,
+				LatestTriageReceiptID:     latestTriage.ReceiptID,
+				TriageAnchorReceiptID:     latestTriage.AnchorTransitionReceiptID,
+				TriagePosture:             latestTriage.Posture,
+				LatestFollowUpReceiptID:   receipt.ReceiptID,
+				LatestFollowUpActionKind:  receipt.ActionKind,
+				LatestFollowUpSummary:     receipt.Summary,
+				LatestFollowUpAt:          receipt.CreatedAt,
+				FollowUpReceiptPresent:    true,
+				FollowUpOpen:              true,
+				FollowUpProgressed:        true,
+			}
+			rollup := orchestrator.ContinuityIncidentFollowUpHistoryRollupSummary{
+				WindowSize:              1,
+				BoundedWindow:           true,
+				DistinctAnchors:         1,
+				ReceiptsProgressed:      1,
+				AnchorsWithOpenFollowUp: 1,
+				OperationallyNotable:    true,
+				Summary:                 "1 anchor(s) have open follow-up receipts",
+			}
+			return orchestrator.RecordContinuityIncidentFollowUpResult{
+				TaskID:                                  common.TaskID(req.TaskID),
+				AnchorMode:                              incidenttriage.AnchorModeLatestTransition,
+				AnchorTransitionReceiptID:               "ctr_followup_anchor",
+				TriageReceiptID:                         "citr_followup_anchor",
+				ActionKind:                              incidenttriage.FollowUpActionProgressed,
+				Receipt:                                 receipt,
+				LatestContinuityTransition:              &latestTransition,
+				LatestContinuityIncidentTriage:          &latestTriage,
+				RecentContinuityIncidentTriages:         []orchestrator.ContinuityIncidentTriageReceiptSummary{latestTriage},
+				LatestContinuityIncidentFollowUp:        &receipt,
+				RecentContinuityIncidentFollowUps:       []orchestrator.ContinuityIncidentFollowUpReceiptSummary{receipt},
+				ContinuityIncidentFollowUpHistoryRollup: &rollup,
+				FollowUp:                                &followUp,
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskContinuityIncidentFollowUpRequest{
+		TaskID:                    common.TaskID("tsk_followup"),
+		AnchorMode:                "latest",
+		TriageReceiptID:           "citr_followup_anchor",
+		ActionKind:                "PROGRESSED",
+		Summary:                   "validated downstream handoff context and advanced follow-up",
+		AnchorTransitionReceiptID: "",
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_incident_followup",
+		Method:    ipc.MethodTaskContinuityIncidentFollowUp,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_followup" || captured.AnchorMode != "latest" || captured.TriageReceiptID != "citr_followup_anchor" || captured.ActionKind != "PROGRESSED" {
+		t.Fatalf("unexpected incident follow-up request mapping: %+v", captured)
+	}
+	var out ipc.TaskContinuityIncidentFollowUpResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal continuity incident follow-up response: %v", err)
+	}
+	if out.Receipt.ReceiptID != "cifr_700" || out.ActionKind != "PROGRESSED" || out.AnchorTransitionReceiptID != "ctr_followup_anchor" {
+		t.Fatalf("unexpected continuity incident follow-up response receipt mapping: %+v", out)
+	}
+	if out.ContinuityIncidentFollowUp == nil || !out.ContinuityIncidentFollowUp.FollowUpProgressed || out.ContinuityIncidentFollowUp.LatestFollowUpReceiptID != "cifr_700" {
+		t.Fatalf("unexpected continuity incident follow-up summary mapping: %+v", out.ContinuityIncidentFollowUp)
+	}
+	if out.ContinuityIncidentFollowUp.Digest != "follow-up open" || out.ContinuityIncidentFollowUp.WindowAdvisory != "bounded window open=1" {
+		t.Fatalf("expected follow-up digest/window mapping, got %+v", out.ContinuityIncidentFollowUp)
+	}
+	if out.ContinuityIncidentFollowUpHistoryRollup == nil || out.ContinuityIncidentFollowUpHistoryRollup.ReceiptsProgressed != 1 {
+		t.Fatalf("unexpected continuity incident follow-up rollup mapping: %+v", out.ContinuityIncidentFollowUpHistoryRollup)
+	}
+}
+
+func TestHandleRequestContinuityIncidentFollowUpHistoryRoute(t *testing.T) {
+	var captured orchestrator.ReadContinuityIncidentFollowUpHistoryRequest
+	handler := &fakeOrchestratorService{
+		readContinuityIncidentFollowUpHistoryFn: func(_ context.Context, req orchestrator.ReadContinuityIncidentFollowUpHistoryRequest) (orchestrator.ReadContinuityIncidentFollowUpHistoryResult, error) {
+			captured = req
+			latest := orchestrator.ContinuityIncidentFollowUpReceiptSummary{
+				ReceiptID:                 "cifr_810",
+				TaskID:                    common.TaskID(req.TaskID),
+				AnchorMode:                incidenttriage.AnchorModeLatestTransition,
+				AnchorTransitionReceiptID: "ctr_800",
+				AnchorTransitionKind:      transition.KindHandoffResolution,
+				TriageReceiptID:           "citr_805",
+				TriagePosture:             incidenttriage.PostureNeedsFollowUp,
+				TriageFollowUpState:       incidenttriage.FollowUpPostureAdvisory,
+				ActionKind:                incidenttriage.FollowUpActionClosed,
+				Summary:                   "closure recorded after explicit operator review",
+				AcknowledgmentPresent:     true,
+				CreatedAt:                 time.Unix(1712000800, 0).UTC(),
+			}
+			return orchestrator.ReadContinuityIncidentFollowUpHistoryResult{
+				TaskID:                             common.TaskID(req.TaskID),
+				Bounded:                            true,
+				RequestedLimit:                     3,
+				RequestedBeforeReceiptID:           "cifr_790",
+				RequestedAnchorTransitionReceiptID: "ctr_800",
+				RequestedTriageReceiptID:           "citr_805",
+				RequestedActionKind:                incidenttriage.FollowUpActionClosed,
+				HasMoreOlder:                       true,
+				NextBeforeReceiptID:                "cifr_805",
+				LatestTransitionReceiptID:          "ctr_820",
+				Latest:                             &latest,
+				Receipts: []orchestrator.ContinuityIncidentFollowUpReceiptSummary{
+					latest,
+					{
+						ReceiptID:                 "cifr_805",
+						TaskID:                    common.TaskID(req.TaskID),
+						AnchorMode:                incidenttriage.AnchorModeTransitionID,
+						AnchorTransitionReceiptID: "ctr_800",
+						AnchorTransitionKind:      transition.KindHandoffResolution,
+						TriageReceiptID:           "citr_805",
+						ActionKind:                incidenttriage.FollowUpActionProgressed,
+						CreatedAt:                 time.Unix(1712000700, 0).UTC(),
+					},
+				},
+				Rollup: orchestrator.ContinuityIncidentFollowUpHistoryRollupSummary{
+					WindowSize:                        2,
+					BoundedWindow:                     true,
+					DistinctAnchors:                   1,
+					ReceiptsProgressed:                1,
+					ReceiptsClosed:                    1,
+					AnchorsClosed:                     1,
+					OpenAnchorsBehindLatestTransition: 1,
+					OperationallyNotable:              true,
+					Summary:                           "1 open anchor(s) are behind the latest transition anchor",
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskContinuityIncidentFollowUpHistoryRequest{
+		TaskID:                    common.TaskID("tsk_followup_history"),
+		Limit:                     3,
+		BeforeReceiptID:           "cifr_790",
+		AnchorTransitionReceiptID: "ctr_800",
+		TriageReceiptID:           "citr_805",
+		ActionKind:                "CLOSED",
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_incident_followup_history",
+		Method:    ipc.MethodTaskContinuityIncidentFollowUpHistory,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_followup_history" || captured.Limit != 3 || captured.BeforeReceiptID != "cifr_790" || captured.AnchorTransitionReceiptID != "ctr_800" || captured.TriageReceiptID != "citr_805" || captured.ActionKind != "CLOSED" {
+		t.Fatalf("unexpected incident follow-up history request payload mapping: %+v", captured)
+	}
+	var out ipc.TaskContinuityIncidentFollowUpHistoryResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal continuity incident follow-up history response: %v", err)
+	}
+	if out.RequestedActionKind != "CLOSED" || out.NextBeforeReceiptID != "cifr_805" || !out.HasMoreOlder {
+		t.Fatalf("unexpected continuity incident follow-up history metadata mapping: %+v", out)
+	}
+	if out.Latest == nil || out.Latest.ReceiptID != "cifr_810" || len(out.Receipts) != 2 {
+		t.Fatalf("unexpected continuity incident follow-up history receipt mapping: %+v", out)
+	}
+	if out.Rollup.ReceiptsClosed != 1 || !out.Rollup.OperationallyNotable {
+		t.Fatalf("unexpected continuity incident follow-up history rollup mapping: %+v", out.Rollup)
+	}
+}
+
+func TestHandleRequestContinuityIncidentClosureRoute(t *testing.T) {
+	var captured orchestrator.ReadContinuityIncidentClosureRequest
+	handler := &fakeOrchestratorService{
+		readContinuityIncidentClosureFn: func(_ context.Context, req orchestrator.ReadContinuityIncidentClosureRequest) (orchestrator.ReadContinuityIncidentClosureResult, error) {
+			captured = req
+			latest := orchestrator.ContinuityIncidentFollowUpReceiptSummary{
+				ReceiptID:                 "cifr_910",
+				TaskID:                    common.TaskID(req.TaskID),
+				AnchorMode:                incidenttriage.AnchorModeLatestTransition,
+				AnchorTransitionReceiptID: "ctr_900",
+				ActionKind:                incidenttriage.FollowUpActionReopened,
+				CreatedAt:                 time.Unix(1713000910, 0).UTC(),
+			}
+			return orchestrator.ReadContinuityIncidentClosureResult{
+				TaskID:                    common.TaskID(req.TaskID),
+				Bounded:                   true,
+				RequestedLimit:            5,
+				RequestedBeforeReceiptID:  "cifr_880",
+				HasMoreOlder:              true,
+				NextBeforeReceiptID:       "cifr_905",
+				LatestTransitionReceiptID: "ctr_920",
+				Latest:                    &latest,
+				Receipts:                  []orchestrator.ContinuityIncidentFollowUpReceiptSummary{latest},
+				Rollup: orchestrator.ContinuityIncidentFollowUpHistoryRollupSummary{
+					WindowSize:              1,
+					BoundedWindow:           true,
+					DistinctAnchors:         1,
+					ReceiptsReopened:        1,
+					AnchorsReopened:         1,
+					AnchorsWithOpenFollowUp: 1,
+					OperationallyNotable:    true,
+					Summary:                 "bounded evidence includes reopened follow-up posture",
+				},
+				FollowUp: &orchestrator.ContinuityIncidentFollowUpSummary{
+					State:          orchestrator.ContinuityIncidentFollowUpReopened,
+					Digest:         "follow-up reopened",
+					WindowAdvisory: "bounded window open=1 reopened=1",
+					Advisory:       "Latest incident follow-up receipt is REOPENED; follow-up remains explicitly open.",
+					FollowUpOpen:   true,
+					ClosureIntelligence: &orchestrator.ContinuityIncidentClosureSummary{
+						Class:                   orchestrator.ContinuityIncidentClosureWeakReopened,
+						Digest:                  "closure reopened after close",
+						WindowAdvisory:          "bounded window anchors=1 open=1 closed=0 reopened=1 triaged-without-follow-up=0 repeated=0 behind-latest=0",
+						Detail:                  "Recent bounded evidence suggests incident closure remains operationally unresolved.",
+						BoundedWindow:           true,
+						WindowSize:              1,
+						DistinctAnchors:         1,
+						OperationallyUnresolved: true,
+						ClosureAppearsWeak:      true,
+						ReopenedAfterClosure:    true,
+						RecentAnchors: []orchestrator.ContinuityIncidentClosureAnchorItem{
+							{
+								AnchorTransitionReceiptID: "ctr_900",
+								Class:                     orchestrator.ContinuityIncidentClosureWeakReopened,
+								Digest:                    "closure reopened after close",
+								Explanation:               "reopened after closure in recent bounded evidence",
+								LatestFollowUpReceiptID:   "cifr_910",
+								LatestFollowUpActionKind:  incidenttriage.FollowUpActionReopened,
+								LatestFollowUpAt:          time.Unix(1713000910, 0).UTC(),
+							},
+						},
+					},
+				},
+				Closure: &orchestrator.ContinuityIncidentClosureSummary{
+					Class:                   orchestrator.ContinuityIncidentClosureWeakReopened,
+					Digest:                  "closure reopened after close",
+					WindowAdvisory:          "bounded window anchors=1 open=1 closed=0 reopened=1 triaged-without-follow-up=0 repeated=0 behind-latest=0",
+					Detail:                  "Recent bounded evidence suggests incident closure remains operationally unresolved.",
+					BoundedWindow:           true,
+					WindowSize:              1,
+					DistinctAnchors:         1,
+					OperationallyUnresolved: true,
+					ClosureAppearsWeak:      true,
+					ReopenedAfterClosure:    true,
+					RecentAnchors: []orchestrator.ContinuityIncidentClosureAnchorItem{
+						{
+							AnchorTransitionReceiptID: "ctr_900",
+							Class:                     orchestrator.ContinuityIncidentClosureWeakReopened,
+							Digest:                    "closure reopened after close",
+							Explanation:               "reopened after closure in recent bounded evidence",
+							LatestFollowUpReceiptID:   "cifr_910",
+							LatestFollowUpActionKind:  incidenttriage.FollowUpActionReopened,
+							LatestFollowUpAt:          time.Unix(1713000910, 0).UTC(),
+						},
+					},
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskContinuityIncidentClosureRequest{
+		TaskID:          common.TaskID("tsk_closure"),
+		Limit:           5,
+		BeforeReceiptID: "cifr_880",
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_incident_closure",
+		Method:    ipc.MethodTaskContinuityIncidentClosure,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_closure" || captured.Limit != 5 || captured.BeforeReceiptID != "cifr_880" {
+		t.Fatalf("unexpected continuity incident closure request mapping: %+v", captured)
+	}
+	var out ipc.TaskContinuityIncidentClosureResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal continuity incident closure response: %v", err)
+	}
+	if out.RequestedLimit != 5 || out.NextBeforeReceiptID != "cifr_905" || !out.HasMoreOlder {
+		t.Fatalf("unexpected continuity incident closure metadata mapping: %+v", out)
+	}
+	if out.Closure == nil || out.Closure.Class != string(orchestrator.ContinuityIncidentClosureWeakReopened) || !out.Closure.OperationallyUnresolved {
+		t.Fatalf("unexpected continuity incident closure summary mapping: %+v", out.Closure)
+	}
+	if len(out.Closure.RecentAnchors) != 1 || out.Closure.RecentAnchors[0].Class != string(orchestrator.ContinuityIncidentClosureWeakReopened) {
+		t.Fatalf("expected closure recent-anchor timeline mapping, got %+v", out.Closure.RecentAnchors)
+	}
+	if out.FollowUp == nil || out.FollowUp.ClosureIntelligence == nil || out.FollowUp.ClosureIntelligence.Class != string(orchestrator.ContinuityIncidentClosureWeakReopened) {
+		t.Fatalf("expected follow-up nested closure intelligence mapping, got %+v", out.FollowUp)
+	}
+	if len(out.FollowUp.ClosureIntelligence.RecentAnchors) != 1 || out.FollowUp.ClosureIntelligence.RecentAnchors[0].LatestFollowUpActionKind != "REOPENED" {
+		t.Fatalf("expected nested follow-up closure anchor mapping, got %+v", out.FollowUp.ClosureIntelligence.RecentAnchors)
+	}
+	if out.Latest == nil || out.Latest.ReceiptID != "cifr_910" || len(out.Receipts) != 1 {
+		t.Fatalf("unexpected continuity incident closure receipts mapping: %+v", out)
+	}
+}
+
+func TestHandleRequestContinuityIncidentTaskRiskRoute(t *testing.T) {
+	var captured orchestrator.ReadContinuityIncidentTaskRiskRequest
+	handler := &fakeOrchestratorService{
+		readContinuityIncidentTaskRiskFn: func(_ context.Context, req orchestrator.ReadContinuityIncidentTaskRiskRequest) (orchestrator.ReadContinuityIncidentTaskRiskResult, error) {
+			captured = req
+			return orchestrator.ReadContinuityIncidentTaskRiskResult{
+				TaskID:                   common.TaskID(req.TaskID),
+				Bounded:                  true,
+				RequestedLimit:           7,
+				RequestedBeforeReceiptID: "cifr_700",
+				HasMoreOlder:             true,
+				NextBeforeReceiptID:      "cifr_690",
+				Summary: &orchestrator.ContinuityIncidentTaskRiskSummary{
+					Class:                               orchestrator.ContinuityIncidentTaskRiskRecurringWeakClosure,
+					Digest:                              "recurring continuity weakness in recent bounded evidence",
+					WindowAdvisory:                      "bounded incident window anchors=4 open=2 reopened=2 triaged-without-follow-up=1 stagnant=1",
+					Detail:                              "Recent bounded evidence suggests recurring weak closure posture across incidents.",
+					BoundedWindow:                       true,
+					WindowSize:                          7,
+					DistinctAnchors:                     4,
+					RecurringWeakClosure:                true,
+					RecurringUnresolved:                 true,
+					RecurringStagnantFollowUp:           true,
+					RecurringTriagedWithoutFollowUp:     true,
+					ReopenedAfterClosureAnchors:         2,
+					RepeatedReopenLoopAnchors:           1,
+					StagnantProgressionAnchors:          2,
+					AnchorsTriagedWithoutFollowUp:       1,
+					AnchorsWithOpenFollowUp:             2,
+					AnchorsReopened:                     2,
+					OperationallyUnresolvedAnchorSignal: 5,
+					RecentAnchorClasses: []orchestrator.ContinuityIncidentClosureClass{
+						orchestrator.ContinuityIncidentClosureWeakReopened,
+						orchestrator.ContinuityIncidentClosureWeakLoop,
+						orchestrator.ContinuityIncidentClosureWeakStagnant,
+					},
+				},
+				Closure: &orchestrator.ContinuityIncidentClosureSummary{
+					Class:                   orchestrator.ContinuityIncidentClosureWeakLoop,
+					Digest:                  "closure loop signals",
+					WindowAdvisory:          "bounded window anchors=4 open=2 closed=2 reopened=2 triaged-without-follow-up=1 repeated=2 behind-latest=1",
+					Detail:                  "Recent bounded evidence suggests incident closure remains operationally unresolved.",
+					BoundedWindow:           true,
+					WindowSize:              7,
+					DistinctAnchors:         4,
+					OperationallyUnresolved: true,
+					ClosureAppearsWeak:      true,
+					RepeatedReopenLoop:      true,
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskContinuityIncidentTaskRiskRequest{
+		TaskID:          common.TaskID("tsk_risk"),
+		Limit:           7,
+		BeforeReceiptID: "cifr_700",
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_incident_task_risk",
+		Method:    ipc.MethodTaskContinuityIncidentRisk,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_risk" || captured.Limit != 7 || captured.BeforeReceiptID != "cifr_700" {
+		t.Fatalf("unexpected continuity incident task-risk request mapping: %+v", captured)
+	}
+	var out ipc.TaskContinuityIncidentTaskRiskResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal continuity incident task-risk response: %v", err)
+	}
+	if out.Summary == nil || out.Summary.Class != string(orchestrator.ContinuityIncidentTaskRiskRecurringWeakClosure) {
+		t.Fatalf("unexpected task-risk summary mapping: %+v", out.Summary)
+	}
+	if len(out.Summary.RecentAnchorClasses) != 3 || out.Summary.RecentAnchorClasses[0] != string(orchestrator.ContinuityIncidentClosureWeakReopened) {
+		t.Fatalf("unexpected task-risk recent class mapping: %+v", out.Summary)
+	}
+	if out.Closure == nil || out.Closure.Class != string(orchestrator.ContinuityIncidentClosureWeakLoop) {
+		t.Fatalf("unexpected nested closure mapping: %+v", out.Closure)
+	}
+	if out.NextBeforeReceiptID != "cifr_690" || !out.HasMoreOlder {
+		t.Fatalf("unexpected task-risk paging mapping: %+v", out)
 	}
 }
 
@@ -1082,16 +2651,19 @@ func TestHandleRequestShellSessionsRoute(t *testing.T) {
 				TaskID: common.TaskID(taskID),
 				Sessions: []orchestrator.ShellSessionView{
 					{
-						TaskID:           common.TaskID(taskID),
-						SessionID:        "shs_1",
-						WorkerPreference: "auto",
-						ResolvedWorker:   "codex",
-						WorkerSessionID:  "wks_1",
-						AttachCapability: shellsession.AttachCapabilityNone,
-						HostMode:         "codex-pty",
-						HostState:        "live",
-						Active:           true,
-						SessionClass:     orchestrator.ShellSessionClassStale,
+						TaskID:             common.TaskID(taskID),
+						SessionID:          "shs_1",
+						WorkerPreference:   "auto",
+						ResolvedWorker:     "codex",
+						WorkerSessionID:    "wks_1",
+						AttachCapability:   shellsession.AttachCapabilityNone,
+						HostMode:           "codex-pty",
+						HostState:          "live",
+						Active:             true,
+						SessionClass:       orchestrator.ShellSessionClassStale,
+						SessionClassReason: "session is stale; last update is older than 1m0s",
+						ReattachGuidance:   "open a new shell session; stale sessions are not trusted as attach targets",
+						OperatorSummary:    "stale session; live continuity is unproven",
 					},
 				},
 			}, nil
@@ -1117,6 +2689,9 @@ func TestHandleRequestShellSessionsRoute(t *testing.T) {
 	}
 	if out.Sessions[0].SessionClass != "stale" || out.Sessions[0].WorkerSessionID != "wks_1" || out.Sessions[0].AttachCapability != "none" {
 		t.Fatalf("expected stale session class, got %+v", out.Sessions[0])
+	}
+	if out.Sessions[0].SessionClassReason == "" || out.Sessions[0].ReattachGuidance == "" {
+		t.Fatalf("expected reattach reason/guidance mapping, got %+v", out.Sessions[0])
 	}
 }
 
@@ -1147,16 +2722,17 @@ func TestHandleRequestShellSessionsRouteReadsDurableRecordsAfterCoordinatorRecre
 		t.Fatalf("message task: %v", err)
 	}
 	if _, err := coord.ReportShellSession(context.Background(), orchestrator.ReportShellSessionRequest{
-		TaskID:           string(start.TaskID),
-		SessionID:        "shs_durable",
-		WorkerPreference: "auto",
-		ResolvedWorker:   "codex",
-		WorkerSessionID:  "wks_durable",
-		AttachCapability: shellsession.AttachCapabilityAttachable,
-		HostMode:         "codex-pty",
-		HostState:        "live",
-		StartedAt:        time.Unix(1710000000, 0).UTC(),
-		Active:           true,
+		TaskID:                string(start.TaskID),
+		SessionID:             "shs_durable",
+		WorkerPreference:      "auto",
+		ResolvedWorker:        "codex",
+		WorkerSessionID:       "wks_durable",
+		WorkerSessionIDSource: shellsession.WorkerSessionIDSourceAuthoritative,
+		AttachCapability:      shellsession.AttachCapabilityAttachable,
+		HostMode:              "codex-pty",
+		HostState:             "live",
+		StartedAt:             time.Unix(1710000000, 0).UTC(),
+		Active:                true,
 	}); err != nil {
 		t.Fatalf("report shell session: %v", err)
 	}
@@ -1204,22 +2780,37 @@ func TestHandleRequestShellSessionsRouteReadsDurableRecordsAfterCoordinatorRecre
 }
 
 type fakeOrchestratorService struct {
-	resolveShellTaskForRepoFn    func(context.Context, string, string) (orchestrator.ResolveShellTaskResult, error)
-	createHandoffFn              func(context.Context, orchestrator.CreateHandoffRequest) (orchestrator.CreateHandoffResult, error)
-	acceptHandoffFn              func(context.Context, orchestrator.AcceptHandoffRequest) (orchestrator.AcceptHandoffResult, error)
-	recordHandoffFollowThroughFn func(context.Context, orchestrator.RecordHandoffFollowThroughRequest) (orchestrator.RecordHandoffFollowThroughResult, error)
-	recordHandoffResolutionFn    func(context.Context, orchestrator.RecordHandoffResolutionRequest) (orchestrator.RecordHandoffResolutionResult, error)
-	recordRecoveryActionFn       func(context.Context, orchestrator.RecordRecoveryActionRequest) (orchestrator.RecordRecoveryActionResult, error)
-	executeRebriefFn             func(context.Context, orchestrator.ExecuteRebriefRequest) (orchestrator.ExecuteRebriefResult, error)
-	executeInterruptedResumeFn   func(context.Context, orchestrator.ExecuteInterruptedResumeRequest) (orchestrator.ExecuteInterruptedResumeResult, error)
-	executeContinueRecoveryFn    func(context.Context, orchestrator.ExecuteContinueRecoveryRequest) (orchestrator.ExecuteContinueRecoveryResult, error)
-	executePrimaryOperatorStepFn func(context.Context, orchestrator.ExecutePrimaryOperatorStepRequest) (orchestrator.ExecutePrimaryOperatorStepResult, error)
-	statusFn                     func(context.Context, string) (orchestrator.StatusTaskResult, error)
-	inspectFn                    func(context.Context, string) (orchestrator.InspectTaskResult, error)
-	shellSnapshotFn              func(context.Context, string) (orchestrator.ShellSnapshotResult, error)
-	recordShellLifecycleFn       func(context.Context, orchestrator.RecordShellLifecycleRequest) (orchestrator.RecordShellLifecycleResult, error)
-	reportShellSessionFn         func(context.Context, orchestrator.ReportShellSessionRequest) (orchestrator.ReportShellSessionResult, error)
-	listShellSessionsFn          func(context.Context, string) (orchestrator.ListShellSessionsResult, error)
+	resolveShellTaskForRepoFn               func(context.Context, string, string) (orchestrator.ResolveShellTaskResult, error)
+	createHandoffFn                         func(context.Context, orchestrator.CreateHandoffRequest) (orchestrator.CreateHandoffResult, error)
+	acceptHandoffFn                         func(context.Context, orchestrator.AcceptHandoffRequest) (orchestrator.AcceptHandoffResult, error)
+	recordHandoffFollowThroughFn            func(context.Context, orchestrator.RecordHandoffFollowThroughRequest) (orchestrator.RecordHandoffFollowThroughResult, error)
+	recordHandoffResolutionFn               func(context.Context, orchestrator.RecordHandoffResolutionRequest) (orchestrator.RecordHandoffResolutionResult, error)
+	recordRecoveryActionFn                  func(context.Context, orchestrator.RecordRecoveryActionRequest) (orchestrator.RecordRecoveryActionResult, error)
+	executeRebriefFn                        func(context.Context, orchestrator.ExecuteRebriefRequest) (orchestrator.ExecuteRebriefResult, error)
+	executeInterruptedResumeFn              func(context.Context, orchestrator.ExecuteInterruptedResumeRequest) (orchestrator.ExecuteInterruptedResumeResult, error)
+	executeContinueRecoveryFn               func(context.Context, orchestrator.ExecuteContinueRecoveryRequest) (orchestrator.ExecuteContinueRecoveryResult, error)
+	executePrimaryOperatorStepFn            func(context.Context, orchestrator.ExecutePrimaryOperatorStepRequest) (orchestrator.ExecutePrimaryOperatorStepResult, error)
+	recordOperatorReviewGapAckFn            func(context.Context, orchestrator.RecordOperatorReviewGapAcknowledgmentRequest) (orchestrator.RecordOperatorReviewGapAcknowledgmentResult, error)
+	recordContinuityIncidentTriageFn        func(context.Context, orchestrator.RecordContinuityIncidentTriageRequest) (orchestrator.RecordContinuityIncidentTriageResult, error)
+	recordContinuityIncidentFollowUpFn      func(context.Context, orchestrator.RecordContinuityIncidentFollowUpRequest) (orchestrator.RecordContinuityIncidentFollowUpResult, error)
+	readCompiledIntentFn                    func(context.Context, orchestrator.ReadCompiledIntentRequest) (orchestrator.ReadCompiledIntentResult, error)
+	readGeneratedBriefFn                    func(context.Context, orchestrator.ReadGeneratedBriefRequest) (orchestrator.ReadGeneratedBriefResult, error)
+	statusFn                                func(context.Context, string) (orchestrator.StatusTaskResult, error)
+	inspectFn                               func(context.Context, string) (orchestrator.InspectTaskResult, error)
+	shellSnapshotFn                         func(context.Context, string) (orchestrator.ShellSnapshotResult, error)
+	recordShellLifecycleFn                  func(context.Context, orchestrator.RecordShellLifecycleRequest) (orchestrator.RecordShellLifecycleResult, error)
+	recordShellTranscriptFn                 func(context.Context, orchestrator.RecordShellTranscriptRequest) (orchestrator.RecordShellTranscriptResult, error)
+	readShellTranscriptFn                   func(context.Context, orchestrator.ReadShellTranscriptRequest) (orchestrator.ReadShellTranscriptResult, error)
+	recordShellTranscriptReviewFn           func(context.Context, orchestrator.RecordShellTranscriptReviewRequest) (orchestrator.RecordShellTranscriptReviewResult, error)
+	readShellTranscriptReviewHistoryFn      func(context.Context, orchestrator.ReadShellTranscriptReviewHistoryRequest) (orchestrator.ReadShellTranscriptReviewHistoryResult, error)
+	readContinuityTransitionHistoryFn       func(context.Context, orchestrator.ReadContinuityTransitionHistoryRequest) (orchestrator.ReadContinuityTransitionHistoryResult, error)
+	readContinuityIncidentSliceFn           func(context.Context, orchestrator.ReadContinuityIncidentSliceRequest) (orchestrator.ReadContinuityIncidentSliceResult, error)
+	readContinuityIncidentTriageHistoryFn   func(context.Context, orchestrator.ReadContinuityIncidentTriageHistoryRequest) (orchestrator.ReadContinuityIncidentTriageHistoryResult, error)
+	readContinuityIncidentFollowUpHistoryFn func(context.Context, orchestrator.ReadContinuityIncidentFollowUpHistoryRequest) (orchestrator.ReadContinuityIncidentFollowUpHistoryResult, error)
+	readContinuityIncidentClosureFn         func(context.Context, orchestrator.ReadContinuityIncidentClosureRequest) (orchestrator.ReadContinuityIncidentClosureResult, error)
+	readContinuityIncidentTaskRiskFn        func(context.Context, orchestrator.ReadContinuityIncidentTaskRiskRequest) (orchestrator.ReadContinuityIncidentTaskRiskResult, error)
+	reportShellSessionFn                    func(context.Context, orchestrator.ReportShellSessionRequest) (orchestrator.ReportShellSessionResult, error)
+	listShellSessionsFn                     func(context.Context, string) (orchestrator.ListShellSessionsResult, error)
 }
 
 func (f *fakeOrchestratorService) ResolveShellTaskForRepo(ctx context.Context, repoRoot string, defaultGoal string) (orchestrator.ResolveShellTaskResult, error) {
@@ -1278,6 +2869,41 @@ func (f *fakeOrchestratorService) ExecutePrimaryOperatorStep(ctx context.Context
 		return f.executePrimaryOperatorStepFn(ctx, req)
 	}
 	return orchestrator.ExecutePrimaryOperatorStepResult{}, nil
+}
+
+func (f *fakeOrchestratorService) RecordOperatorReviewGapAcknowledgment(ctx context.Context, req orchestrator.RecordOperatorReviewGapAcknowledgmentRequest) (orchestrator.RecordOperatorReviewGapAcknowledgmentResult, error) {
+	if f.recordOperatorReviewGapAckFn != nil {
+		return f.recordOperatorReviewGapAckFn(ctx, req)
+	}
+	return orchestrator.RecordOperatorReviewGapAcknowledgmentResult{}, nil
+}
+
+func (f *fakeOrchestratorService) RecordContinuityIncidentTriage(ctx context.Context, req orchestrator.RecordContinuityIncidentTriageRequest) (orchestrator.RecordContinuityIncidentTriageResult, error) {
+	if f.recordContinuityIncidentTriageFn != nil {
+		return f.recordContinuityIncidentTriageFn(ctx, req)
+	}
+	return orchestrator.RecordContinuityIncidentTriageResult{}, nil
+}
+
+func (f *fakeOrchestratorService) RecordContinuityIncidentFollowUp(ctx context.Context, req orchestrator.RecordContinuityIncidentFollowUpRequest) (orchestrator.RecordContinuityIncidentFollowUpResult, error) {
+	if f.recordContinuityIncidentFollowUpFn != nil {
+		return f.recordContinuityIncidentFollowUpFn(ctx, req)
+	}
+	return orchestrator.RecordContinuityIncidentFollowUpResult{}, nil
+}
+
+func (f *fakeOrchestratorService) ReadCompiledIntent(ctx context.Context, req orchestrator.ReadCompiledIntentRequest) (orchestrator.ReadCompiledIntentResult, error) {
+	if f.readCompiledIntentFn != nil {
+		return f.readCompiledIntentFn(ctx, req)
+	}
+	return orchestrator.ReadCompiledIntentResult{}, nil
+}
+
+func (f *fakeOrchestratorService) ReadGeneratedBrief(ctx context.Context, req orchestrator.ReadGeneratedBriefRequest) (orchestrator.ReadGeneratedBriefResult, error) {
+	if f.readGeneratedBriefFn != nil {
+		return f.readGeneratedBriefFn(ctx, req)
+	}
+	return orchestrator.ReadGeneratedBriefResult{}, nil
 }
 
 func (f *fakeOrchestratorService) CreateCheckpoint(_ context.Context, _ string) (orchestrator.CreateCheckpointResult, error) {
@@ -1347,6 +2973,76 @@ func (f *fakeOrchestratorService) RecordShellLifecycle(ctx context.Context, req 
 	return orchestrator.RecordShellLifecycleResult{}, nil
 }
 
+func (f *fakeOrchestratorService) RecordShellTranscript(ctx context.Context, req orchestrator.RecordShellTranscriptRequest) (orchestrator.RecordShellTranscriptResult, error) {
+	if f.recordShellTranscriptFn != nil {
+		return f.recordShellTranscriptFn(ctx, req)
+	}
+	return orchestrator.RecordShellTranscriptResult{}, nil
+}
+
+func (f *fakeOrchestratorService) ReadShellTranscript(ctx context.Context, req orchestrator.ReadShellTranscriptRequest) (orchestrator.ReadShellTranscriptResult, error) {
+	if f.readShellTranscriptFn != nil {
+		return f.readShellTranscriptFn(ctx, req)
+	}
+	return orchestrator.ReadShellTranscriptResult{}, nil
+}
+
+func (f *fakeOrchestratorService) RecordShellTranscriptReview(ctx context.Context, req orchestrator.RecordShellTranscriptReviewRequest) (orchestrator.RecordShellTranscriptReviewResult, error) {
+	if f.recordShellTranscriptReviewFn != nil {
+		return f.recordShellTranscriptReviewFn(ctx, req)
+	}
+	return orchestrator.RecordShellTranscriptReviewResult{}, nil
+}
+
+func (f *fakeOrchestratorService) ReadShellTranscriptReviewHistory(ctx context.Context, req orchestrator.ReadShellTranscriptReviewHistoryRequest) (orchestrator.ReadShellTranscriptReviewHistoryResult, error) {
+	if f.readShellTranscriptReviewHistoryFn != nil {
+		return f.readShellTranscriptReviewHistoryFn(ctx, req)
+	}
+	return orchestrator.ReadShellTranscriptReviewHistoryResult{}, nil
+}
+
+func (f *fakeOrchestratorService) ReadContinuityTransitionHistory(ctx context.Context, req orchestrator.ReadContinuityTransitionHistoryRequest) (orchestrator.ReadContinuityTransitionHistoryResult, error) {
+	if f.readContinuityTransitionHistoryFn != nil {
+		return f.readContinuityTransitionHistoryFn(ctx, req)
+	}
+	return orchestrator.ReadContinuityTransitionHistoryResult{}, nil
+}
+
+func (f *fakeOrchestratorService) ReadContinuityIncidentSlice(ctx context.Context, req orchestrator.ReadContinuityIncidentSliceRequest) (orchestrator.ReadContinuityIncidentSliceResult, error) {
+	if f.readContinuityIncidentSliceFn != nil {
+		return f.readContinuityIncidentSliceFn(ctx, req)
+	}
+	return orchestrator.ReadContinuityIncidentSliceResult{}, nil
+}
+
+func (f *fakeOrchestratorService) ReadContinuityIncidentTriageHistory(ctx context.Context, req orchestrator.ReadContinuityIncidentTriageHistoryRequest) (orchestrator.ReadContinuityIncidentTriageHistoryResult, error) {
+	if f.readContinuityIncidentTriageHistoryFn != nil {
+		return f.readContinuityIncidentTriageHistoryFn(ctx, req)
+	}
+	return orchestrator.ReadContinuityIncidentTriageHistoryResult{}, nil
+}
+
+func (f *fakeOrchestratorService) ReadContinuityIncidentFollowUpHistory(ctx context.Context, req orchestrator.ReadContinuityIncidentFollowUpHistoryRequest) (orchestrator.ReadContinuityIncidentFollowUpHistoryResult, error) {
+	if f.readContinuityIncidentFollowUpHistoryFn != nil {
+		return f.readContinuityIncidentFollowUpHistoryFn(ctx, req)
+	}
+	return orchestrator.ReadContinuityIncidentFollowUpHistoryResult{}, nil
+}
+
+func (f *fakeOrchestratorService) ReadContinuityIncidentClosure(ctx context.Context, req orchestrator.ReadContinuityIncidentClosureRequest) (orchestrator.ReadContinuityIncidentClosureResult, error) {
+	if f.readContinuityIncidentClosureFn != nil {
+		return f.readContinuityIncidentClosureFn(ctx, req)
+	}
+	return orchestrator.ReadContinuityIncidentClosureResult{}, nil
+}
+
+func (f *fakeOrchestratorService) ReadContinuityIncidentTaskRisk(ctx context.Context, req orchestrator.ReadContinuityIncidentTaskRiskRequest) (orchestrator.ReadContinuityIncidentTaskRiskResult, error) {
+	if f.readContinuityIncidentTaskRiskFn != nil {
+		return f.readContinuityIncidentTaskRiskFn(ctx, req)
+	}
+	return orchestrator.ReadContinuityIncidentTaskRiskResult{}, nil
+}
+
 func (f *fakeOrchestratorService) ReportShellSession(ctx context.Context, req orchestrator.ReportShellSessionRequest) (orchestrator.ReportShellSessionResult, error) {
 	if f.reportShellSessionFn != nil {
 		return f.reportShellSessionFn(ctx, req)
@@ -1369,27 +3065,61 @@ func TestHandleRequestExecutePrimaryOperatorStepRoute(t *testing.T) {
 			return orchestrator.ExecutePrimaryOperatorStepResult{
 				TaskID: common.TaskID(req.TaskID),
 				Receipt: operatorstep.Receipt{
-					ReceiptID:    "orec_123",
-					TaskID:       common.TaskID(req.TaskID),
-					ActionHandle: string(orchestrator.OperatorActionLaunchAcceptedHandoff),
-					ResultClass:  operatorstep.ResultSucceeded,
-					Summary:      "launched accepted handoff hnd_123",
-					CreatedAt:    time.Unix(1710000000, 0).UTC(),
+					ReceiptID:           "orec_123",
+					TaskID:              common.TaskID(req.TaskID),
+					ActionHandle:        string(orchestrator.OperatorActionLaunchAcceptedHandoff),
+					ResultClass:         operatorstep.ResultSucceeded,
+					TransitionReceiptID: "ctr_step_1",
+					TransitionKind:      string(transition.KindHandoffLaunch),
+					Summary:             "launched accepted handoff hnd_123",
+					CreatedAt:           time.Unix(1710000000, 0).UTC(),
 				},
 				ActiveBranch:               orchestrator.ActiveBranchProvenance{TaskID: common.TaskID(req.TaskID), Class: orchestrator.ActiveBranchClassHandoffClaude, BranchRef: "hnd_123"},
 				OperatorDecision:           orchestrator.OperatorDecisionSummary{Headline: "Active Claude handoff pending", RequiredNextAction: orchestrator.OperatorActionResolveActiveHandoff},
 				OperatorExecutionPlan:      orchestrator.OperatorExecutionPlan{PrimaryStep: &orchestrator.OperatorExecutionStep{Action: orchestrator.OperatorActionResolveActiveHandoff, Status: orchestrator.OperatorActionAuthorityAllowed}},
 				RecentOperatorStepReceipts: []operatorstep.Receipt{{ReceiptID: "orec_123", TaskID: common.TaskID(req.TaskID), ActionHandle: string(orchestrator.OperatorActionLaunchAcceptedHandoff), ResultClass: operatorstep.ResultSucceeded, Summary: "launched accepted handoff hnd_123", CreatedAt: time.Unix(1710000000, 0).UTC()}},
+				LatestContinuityTransitionReceipt: &orchestrator.ContinuityTransitionReceiptSummary{
+					ReceiptID:             "ctr_step_1",
+					TaskID:                common.TaskID(req.TaskID),
+					TransitionKind:        transition.KindHandoffLaunch,
+					HandoffStateBefore:    orchestrator.HandoffContinuityStateAcceptedNotLaunched,
+					HandoffStateAfter:     orchestrator.HandoffContinuityStateLaunchCompletedAckSeen,
+					ReviewGapPresent:      true,
+					ReviewPosture:         transition.ReviewPostureGlobalReviewStale,
+					AcknowledgmentPresent: true,
+					Summary:               "handoff launch transition recorded under explicit review-gap acknowledgment",
+					CreatedAt:             time.Unix(1710000001, 0).UTC(),
+				},
+				RecentContinuityTransitionReceipts: []orchestrator.ContinuityTransitionReceiptSummary{
+					{
+						ReceiptID:             "ctr_step_1",
+						TaskID:                common.TaskID(req.TaskID),
+						TransitionKind:        transition.KindHandoffLaunch,
+						HandoffStateBefore:    orchestrator.HandoffContinuityStateAcceptedNotLaunched,
+						HandoffStateAfter:     orchestrator.HandoffContinuityStateLaunchCompletedAckSeen,
+						ReviewGapPresent:      true,
+						ReviewPosture:         transition.ReviewPostureGlobalReviewStale,
+						AcknowledgmentPresent: true,
+						Summary:               "handoff launch transition recorded under explicit review-gap acknowledgment",
+						CreatedAt:             time.Unix(1710000001, 0).UTC(),
+					},
+				},
 			}, nil
 		},
 	}
 	svc := NewService("/tmp/unused.sock", handler)
-	payload, _ := json.Marshal(ipc.TaskExecutePrimaryOperatorStepRequest{TaskID: common.TaskID("tsk_123")})
+	payload, _ := json.Marshal(ipc.TaskExecutePrimaryOperatorStepRequest{
+		TaskID:                      common.TaskID("tsk_123"),
+		AcknowledgeReviewGap:        true,
+		ReviewGapSessionID:          "shs_123",
+		ReviewGapAcknowledgmentKind: "stale_review",
+		ReviewGapSummary:            "proceed with explicit awareness of stale transcript evidence",
+	})
 	resp := svc.handleRequest(context.Background(), ipc.Request{RequestID: "req_next", Method: ipc.MethodExecutePrimaryOperatorStep, Payload: payload})
 	if !resp.OK {
 		t.Fatalf("expected OK response, got error: %+v", resp.Error)
 	}
-	if captured.TaskID != "tsk_123" {
+	if captured.TaskID != "tsk_123" || !captured.AcknowledgeReviewGap || captured.ReviewGapSessionID != "shs_123" || captured.ReviewGapAcknowledgmentKind != "stale_review" {
 		t.Fatalf("unexpected execute-primary request: %+v", captured)
 	}
 	var out ipc.TaskExecutePrimaryOperatorStepResponse
@@ -1399,8 +3129,75 @@ func TestHandleRequestExecutePrimaryOperatorStepRoute(t *testing.T) {
 	if out.Receipt.ReceiptID != "orec_123" || out.Receipt.ActionHandle != string(orchestrator.OperatorActionLaunchAcceptedHandoff) {
 		t.Fatalf("unexpected operator-next response: %+v", out)
 	}
+	if out.Receipt.TransitionReceiptID != "ctr_step_1" || out.Receipt.TransitionKind != string(transition.KindHandoffLaunch) {
+		t.Fatalf("expected transition linkage on operator receipt mapping, got %+v", out.Receipt)
+	}
 	if len(out.RecentOperatorStepReceipts) != 1 || out.RecentOperatorStepReceipts[0].ReceiptID != "orec_123" {
 		t.Fatalf("expected recent receipt history in response, got %+v", out.RecentOperatorStepReceipts)
+	}
+	if out.LatestContinuityTransitionReceipt == nil || out.LatestContinuityTransitionReceipt.ReceiptID != "ctr_step_1" {
+		t.Fatalf("expected latest continuity transition receipt mapping, got %+v", out.LatestContinuityTransitionReceipt)
+	}
+	if len(out.RecentContinuityTransitionReceipts) != 1 || out.RecentContinuityTransitionReceipts[0].TransitionKind != string(transition.KindHandoffLaunch) {
+		t.Fatalf("expected continuity transition receipt history mapping, got %+v", out.RecentContinuityTransitionReceipts)
+	}
+}
+
+func TestHandleRequestOperatorAcknowledgeReviewGapRoute(t *testing.T) {
+	var captured orchestrator.RecordOperatorReviewGapAcknowledgmentRequest
+	handler := &fakeOrchestratorService{
+		recordOperatorReviewGapAckFn: func(_ context.Context, req orchestrator.RecordOperatorReviewGapAcknowledgmentRequest) (orchestrator.RecordOperatorReviewGapAcknowledgmentResult, error) {
+			captured = req
+			return orchestrator.RecordOperatorReviewGapAcknowledgmentResult{
+				TaskID:    common.TaskID(req.TaskID),
+				SessionID: "shs_123",
+				Acknowledgment: orchestrator.TranscriptReviewGapAcknowledgmentSummary{
+					AcknowledgmentID:         "sack_123",
+					TaskID:                   common.TaskID(req.TaskID),
+					SessionID:                "shs_123",
+					Class:                    shellsession.TranscriptReviewGapAckStaleReview,
+					ReviewState:              "global_review_stale",
+					ReviewedUpToSequence:     120,
+					OldestUnreviewedSequence: 121,
+					NewestRetainedSequence:   160,
+					UnreviewedRetainedCount:  40,
+					Summary:                  "proceed with explicit awareness",
+					CreatedAt:                time.Unix(1710001000, 0).UTC(),
+				},
+				ReviewGapState:         "global_review_stale",
+				ReviewGapClass:         shellsession.TranscriptReviewGapAckStaleReview,
+				ReviewedUpToSequence:   120,
+				OldestUnreviewedSeq:    121,
+				NewestRetainedSequence: 160,
+				UnreviewedRetained:     40,
+				Advisory:               "review awareness recommended while progressing",
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+	payload, _ := json.Marshal(ipc.TaskOperatorAcknowledgeReviewGapRequest{
+		TaskID:    common.TaskID("tsk_123"),
+		SessionID: "shs_123",
+		Kind:      "stale_review",
+		Summary:   "proceed with explicit awareness",
+	})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_ack_gap",
+		Method:    ipc.MethodOperatorAcknowledgeReviewGap,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_123" || captured.SessionID != "shs_123" || captured.Kind != "stale_review" {
+		t.Fatalf("unexpected operator review-gap acknowledgment request: %+v", captured)
+	}
+	var out ipc.TaskOperatorAcknowledgeReviewGapResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out.Acknowledgment.AcknowledgmentID != "sack_123" || out.ReviewGapClass != "stale_review" {
+		t.Fatalf("unexpected operator review-gap acknowledgment response: %+v", out)
 	}
 }
 

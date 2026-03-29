@@ -93,6 +93,19 @@ func TestCodexPTYHostAppendOutputTracksLastOutputTime(t *testing.T) {
 	}
 }
 
+func TestCodexPTYHostDetectsHeuristicWorkerSessionIDSource(t *testing.T) {
+	host := NewDefaultCodexPTYHost()
+	host.appendOutput([]byte("Session ID: wks_123456\n"))
+
+	status := host.Status()
+	if status.WorkerSessionID != "wks_123456" {
+		t.Fatalf("expected detected worker session id, got %q", status.WorkerSessionID)
+	}
+	if status.WorkerSessionIDSource != WorkerSessionIDSourceHeuristic {
+		t.Fatalf("expected heuristic source, got %s", status.WorkerSessionIDSource)
+	}
+}
+
 func TestCodexPTYHostStartingStateUsesConciseBodyCopy(t *testing.T) {
 	host := NewDefaultCodexPTYHost()
 

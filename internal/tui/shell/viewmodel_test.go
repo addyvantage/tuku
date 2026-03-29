@@ -268,6 +268,59 @@ func TestBuildViewModelSurfacesContinueExecutionRequiredState(t *testing.T) {
 	}
 }
 
+func TestBuildViewModelSurfacesCompiledIntentDigestAcrossStatusAndInspector(t *testing.T) {
+	vm := BuildViewModel(Snapshot{
+		TaskID: "tsk_intent_overlay",
+		Phase:  "INTERPRETING",
+		Status: "ACTIVE",
+		CompiledIntent: &CompiledIntentSummary{
+			Class:                   "IMPLEMENT_CHANGE",
+			Posture:                 "PLANNING",
+			ExecutionReadiness:      "PLANNING_IN_PROGRESS",
+			Objective:               "Prepare bounded intent rollout",
+			RequiresClarification:   true,
+			BoundedEvidenceMessages: 5,
+			Digest:                  "planning intent posture in bounded recent evidence",
+			Advisory:                "Intent remains planning-focused in bounded recent evidence.",
+			ClarificationQuestions:  []string{"Which task slice should be executed first?"},
+		},
+	}, UIState{ShowStatus: true, ShowInspector: true}, NewTranscriptHost(), 120, 32)
+
+	if vm.Overlay == nil {
+		t.Fatal("expected status overlay")
+	}
+	status := strings.Join(vm.Overlay.Lines, "\n")
+	if !strings.Contains(status, "intent planning intent posture in bounded recent evidence") {
+		t.Fatalf("expected intent digest in status overlay, got %q", status)
+	}
+	if !strings.Contains(status, "intent readiness clarification needed") {
+		t.Fatalf("expected intent readiness in status overlay, got %q", status)
+	}
+	if vm.Inspector == nil {
+		t.Fatal("expected inspector view")
+	}
+	foundIntentSection := false
+	for _, section := range vm.Inspector.Sections {
+		if section.Title != "intent" {
+			continue
+		}
+		foundIntentSection = true
+		joined := strings.Join(section.Lines, "\n")
+		if !strings.Contains(joined, "planning intent posture in bounded recent evidence") {
+			t.Fatalf("expected intent digest in inspector section, got %q", joined)
+		}
+		if !strings.Contains(joined, "posture planning | readiness planning in progress") {
+			t.Fatalf("expected posture/readiness in inspector section, got %q", joined)
+		}
+		if !strings.Contains(joined, "clarification Which task slice should be executed first?") {
+			t.Fatalf("expected clarification cue in inspector section, got %q", joined)
+		}
+	}
+	if !foundIntentSection {
+		t.Fatal("expected inspector intent section")
+	}
+}
+
 func TestBuildViewModelSurfacesBlockedLocalMutationAuthorityUnderClaudeOwnership(t *testing.T) {
 	vm := BuildViewModel(Snapshot{
 		TaskID: "tsk_handoff_block",
@@ -713,6 +766,32 @@ func TestSnapshotFromIPCMapsShellState(t *testing.T) {
 				{Code: "RUN_BRIEF_MISSING", Message: "run references missing brief"},
 			},
 		},
+		ContinuityIncidentFollowUp: &ipc.TaskContinuityIncidentFollowUpSummary{
+			State:          "FOLLOW_UP_REOPENED",
+			Digest:         "follow-up reopened",
+			WindowAdvisory: "bounded window open=1 reopened=1",
+			Advisory:       "Latest incident follow-up receipt is REOPENED; follow-up remains explicitly open.",
+			ClosureIntelligence: &ipc.TaskContinuityIncidentClosureSummary{
+				Class:                   "WEAK_CLOSURE_REOPENED",
+				Digest:                  "closure reopened after close",
+				WindowAdvisory:          "bounded window anchors=1 open=1 closed=0 reopened=1 triaged-without-follow-up=0 repeated=0 behind-latest=0",
+				Detail:                  "Recent bounded evidence suggests incident closure remains operationally unresolved.",
+				OperationallyUnresolved: true,
+				ClosureAppearsWeak:      true,
+				ReopenedAfterClosure:    true,
+				RecentAnchors: []ipc.TaskContinuityIncidentClosureAnchorItem{
+					{
+						AnchorTransitionReceiptID: "ctr_1",
+						Class:                     "WEAK_CLOSURE_REOPENED",
+						Digest:                    "closure reopened after close",
+						Explanation:               "reopened after closure in recent bounded evidence",
+						LatestFollowUpReceiptID:   "cifr_1",
+						LatestFollowUpActionKind:  "REOPENED",
+						LatestFollowUpAt:          now.Add(3 * time.Second),
+					},
+				},
+			},
+		},
 		RecentProofs: []ipc.TaskShellProof{
 			{EventID: "evt_1", Type: "CHECKPOINT_CREATED", Summary: "Checkpoint created", Timestamp: now},
 		},
@@ -740,6 +819,12 @@ func TestSnapshotFromIPCMapsShellState(t *testing.T) {
 	}
 	if snapshot.Recovery == nil || snapshot.Recovery.Class != "FAILED_RUN_REVIEW_REQUIRED" {
 		t.Fatalf("expected recovery mapping, got %+v", snapshot.Recovery)
+	}
+	if snapshot.ContinuityIncidentFollowUp == nil || snapshot.ContinuityIncidentFollowUp.ClosureIntelligence == nil {
+		t.Fatalf("expected continuity incident closure intelligence mapping, got %+v", snapshot.ContinuityIncidentFollowUp)
+	}
+	if len(snapshot.ContinuityIncidentFollowUp.ClosureIntelligence.RecentAnchors) != 1 || snapshot.ContinuityIncidentFollowUp.ClosureIntelligence.RecentAnchors[0].Class != "WEAK_CLOSURE_REOPENED" {
+		t.Fatalf("expected closure anchor timeline mapping, got %+v", snapshot.ContinuityIncidentFollowUp.ClosureIntelligence.RecentAnchors)
 	}
 	if len(snapshot.RecentProofs) != 1 || snapshot.RecentProofs[0].Summary != "Checkpoint created" {
 		t.Fatal("expected proof mapping")
@@ -941,6 +1026,145 @@ func TestBuildViewModelAddsFallbackWorkerPaneSummary(t *testing.T) {
 	}
 	if !strings.Contains(vm.WorkerPane.Lines[0], "launch pending | next wait for launch outcome | transcript fallback | historical transcript below | fallback active") {
 		t.Fatalf("expected fallback summary line, got %#v", vm.WorkerPane.Lines)
+	}
+}
+
+func TestBuildViewModelSurfacesTranscriptReviewBoundaryTruth(t *testing.T) {
+	now := time.Unix(1710000000, 0).UTC()
+	host := &stubHost{
+		status: HostStatus{
+			Mode:      HostModeTranscript,
+			State:     HostStateTranscriptOnly,
+			Label:     "transcript",
+			InputLive: false,
+		},
+	}
+	snapshot := Snapshot{
+		TaskID: "tsk_review_truth",
+		Phase:  "EXECUTING",
+		Status: "ACTIVE",
+		ShellSessions: []KnownShellSession{
+			{
+				SessionID:                        "shs_review_truth",
+				TaskID:                           "tsk_review_truth",
+				TranscriptState:                  "transcript_only_bounded_partial",
+				TranscriptRetainedChunks:         200,
+				TranscriptDroppedChunks:          57,
+				TranscriptRetentionLimit:         200,
+				TranscriptReviewedUpTo:           184,
+				TranscriptReviewSource:           "worker_output",
+				TranscriptReviewSummary:          "reviewed most recent worker output window",
+				TranscriptReviewAt:               now.Add(-10 * time.Second),
+				TranscriptReviewStale:            true,
+				TranscriptReviewNewer:            37,
+				TranscriptReviewClosureState:     "source_scoped_review_stale_within_retained",
+				TranscriptReviewOldestUnreviewed: 185,
+				TranscriptNewestSequence:         221,
+				TranscriptRecentReviews: []TranscriptReviewMarker{
+					{ReviewID: "srev_184", SourceFilter: "worker_output", ReviewedUpToSequence: 184, StaleBehindLatest: true},
+					{ReviewID: "srev_150", SourceFilter: "", ReviewedUpToSequence: 150, StaleBehindLatest: true},
+				},
+				LastUpdatedAt: now,
+				Active:        true,
+			},
+		},
+	}
+	vm := BuildViewModel(snapshot, UIState{
+		ShowInspector: true,
+		ShowStatus:    true,
+		Session: SessionState{
+			SessionID: "shs_review_truth",
+			KnownSessions: []KnownShellSession{
+				snapshot.ShellSessions[0],
+			},
+		},
+	}, host, 120, 32)
+
+	if vm.Inspector == nil {
+		t.Fatal("expected inspector view")
+	}
+	foundReviewBoundary := false
+	foundNewerEvidence := false
+	foundUnreviewedRange := false
+	foundRecentHistory := false
+	for _, section := range vm.Inspector.Sections {
+		if section.Title != "worker session" {
+			continue
+		}
+		joined := strings.Join(section.Lines, "\n")
+		if strings.Contains(joined, "review up to seq 184 (worker_output)") {
+			foundReviewBoundary = true
+		}
+		if strings.Contains(joined, "newer retained evidence exists (+37 seq)") {
+			foundNewerEvidence = true
+		}
+		if strings.Contains(joined, "unreviewed retained range 185-221") {
+			foundUnreviewedRange = true
+		}
+		if strings.Contains(joined, "recent review markers:") {
+			foundRecentHistory = true
+		}
+	}
+	if !foundReviewBoundary || !foundNewerEvidence || !foundUnreviewedRange || !foundRecentHistory {
+		t.Fatalf("expected transcript review truth in inspector, got %#v", vm.Inspector.Sections)
+	}
+	if vm.Overlay == nil {
+		t.Fatal("expected status overlay")
+	}
+	overlay := strings.Join(vm.Overlay.Lines, "\n")
+	if !strings.Contains(overlay, "transcript review seq 184 (worker_output), unreviewed retained range 185-221 (+37)") {
+		t.Fatalf("expected transcript review status line in overlay, got %q", overlay)
+	}
+	if strings.Contains(strings.ToLower(overlay), "verified") || strings.Contains(strings.ToLower(overlay), "resume from") {
+		t.Fatalf("overlay must stay conservative, got %q", overlay)
+	}
+}
+
+func TestBuildViewModelSurfacesReviewAwareOperatorGuidance(t *testing.T) {
+	now := time.Unix(1710005000, 0).UTC()
+	vm := BuildViewModel(Snapshot{
+		TaskID: "tsk_review_gate",
+		Phase:  "BRIEF_READY",
+		Status: "ACTIVE",
+		Recovery: &RecoverySummary{
+			Class:                 "READY_NEXT_RUN",
+			Action:                "START_NEXT_RUN",
+			ReadyForNextRun:       true,
+			ReadyForHandoffLaunch: false,
+		},
+		OperatorDecision: &OperatorDecisionSummary{
+			Headline:           "Local fresh run ready",
+			RequiredNextAction: "START_LOCAL_RUN",
+			Guidance:           "Start the next bounded local run. Transcript review is stale for shell session shs_review_gate; newer retained evidence starts at sequence 42.",
+			IntegrityNote:      "Transcript review is behind retained evidence (oldest unreviewed sequence 42).",
+		},
+		OperatorExecutionPlan: &OperatorExecutionPlan{
+			PrimaryStep: &OperatorExecutionStep{
+				Action:      "START_LOCAL_RUN",
+				Status:      "REQUIRED_NEXT",
+				CommandHint: "tuku run --task tsk_review_gate --action start",
+				Reason:      "Newer retained transcript evidence exists starting at sequence 42; review awareness is recommended while progressing.",
+			},
+		},
+		RecentConversation: []ConversationItem{
+			{Role: "system", Body: "Canonical response.", CreatedAt: now},
+		},
+	}, UIState{
+		ShowStatus: true,
+		Session: SessionState{
+			SessionID: "shs_review_gate",
+		},
+	}, NewTranscriptHost(), 120, 32)
+
+	if vm.Overlay == nil {
+		t.Fatal("expected status overlay")
+	}
+	overlay := strings.Join(vm.Overlay.Lines, "\n")
+	if !strings.Contains(overlay, "guidance Start the next bounded local run. Transcript review is stale for shell session shs_review_gate") {
+		t.Fatalf("expected review-aware guidance in overlay, got %q", overlay)
+	}
+	if !strings.Contains(overlay, "caution Transcript review is behind retained evidence (oldest unreviewed sequence 42).") {
+		t.Fatalf("expected review-aware integrity note in overlay, got %q", overlay)
 	}
 }
 
@@ -1502,7 +1726,7 @@ func TestBuildViewModelShowsAnotherKnownSession(t *testing.T) {
 	}
 	foundRegistryLine := false
 	for _, line := range vm.Overlay.Lines {
-		if strings.Contains(line, "another attachable shell session is known") {
+		if strings.Contains(line, "attachable session known") {
 			foundRegistryLine = true
 		}
 	}
@@ -1540,7 +1764,7 @@ func TestBuildViewModelShowsStaleKnownSession(t *testing.T) {
 	}
 	foundRegistryLine := false
 	for _, line := range vm.Overlay.Lines {
-		if strings.Contains(line, "stale shell session is known") {
+		if strings.Contains(line, "stale session known") {
 			foundRegistryLine = true
 		}
 	}
@@ -1578,7 +1802,7 @@ func TestBuildViewModelShowsActiveUnattachableKnownSession(t *testing.T) {
 	}
 	foundRegistryLine := false
 	for _, line := range vm.Overlay.Lines {
-		if strings.Contains(line, "another active but non-attachable shell session is known") {
+		if strings.Contains(line, "active non-attachable session known") {
 			foundRegistryLine = true
 		}
 	}
@@ -1911,5 +2135,338 @@ func TestBuildViewModelSurfacesDurableOperatorReceiptHistory(t *testing.T) {
 	joinedActivity := strings.Join(vm.ProofStrip.Lines, "\n")
 	if !strings.Contains(joinedActivity, "operator succeeded finalized continue recovery") || !strings.Contains(joinedActivity, "operator succeeded resumed interrupted lineage") {
 		t.Fatalf("expected operator receipt history in activity strip, got %q", joinedActivity)
+	}
+}
+
+func TestBuildViewModelSurfacesTranscriptReviewGapAcknowledgmentTruth(t *testing.T) {
+	host := &stubHost{status: HostStatus{Mode: HostModeTranscript, State: HostStateFallback, Label: "transcript", InputLive: false}}
+	vm := BuildViewModel(Snapshot{
+		TaskID: "tsk_ack_vm",
+		Phase:  "BRIEF_READY",
+		Status: "ACTIVE",
+		LatestOperatorStepReceipt: &OperatorStepReceiptSummary{
+			ReceiptID:             "orec_ack",
+			ActionHandle:          "START_LOCAL_RUN",
+			ResultClass:           "SUCCEEDED",
+			Summary:               "started local run run_123",
+			ReviewGapPresent:      true,
+			ReviewGapAcknowledged: true,
+			CreatedAt:             time.Unix(1710000200, 0).UTC(),
+		},
+		LatestTranscriptReviewGapAcknowledgment: &TranscriptReviewGapAcknowledgment{
+			AcknowledgmentID:         "sack_123",
+			SessionID:                "shs_123",
+			Class:                    "stale_review",
+			OldestUnreviewedSequence: 121,
+			NewestRetainedSequence:   160,
+			NewerRetainedCount:       6,
+			StaleBehindCurrent:       true,
+			Summary:                  "proceed with explicit awareness",
+			CreatedAt:                time.Unix(1710000210, 0).UTC(),
+		},
+	}, UIState{ShowInspector: true, ShowProof: true, Session: SessionState{SessionID: "shs_ack_vm"}}, host, 120, 32)
+
+	if vm.Inspector == nil {
+		t.Fatalf("expected inspector view to be present")
+	}
+	foundAck := false
+	for _, section := range vm.Inspector.Sections {
+		if section.Title != "operator" {
+			continue
+		}
+		joined := strings.Join(section.Lines, "\n")
+		if strings.Contains(joined, "review ack stale_review") && strings.Contains(joined, "newer +6") {
+			foundAck = true
+		}
+	}
+	if !foundAck {
+		t.Fatalf("expected operator inspector to surface review-gap acknowledgment truth, got %#v", vm.Inspector.Sections)
+	}
+}
+
+func TestBuildViewModelSurfacesContinuityTransitionAuditTruth(t *testing.T) {
+	host := &stubHost{status: HostStatus{Mode: HostModeTranscript, State: HostStateFallback, Label: "transcript", InputLive: false}}
+	vm := BuildViewModel(Snapshot{
+		TaskID: "tsk_transition_vm",
+		Phase:  "BRIEF_READY",
+		Status: "ACTIVE",
+		LatestOperatorStepReceipt: &OperatorStepReceiptSummary{
+			ReceiptID:             "orec_transition",
+			ActionHandle:          "LAUNCH_ACCEPTED_HANDOFF",
+			ResultClass:           "SUCCEEDED",
+			Summary:               "launched accepted handoff hnd_123",
+			TransitionReceiptID:   "ctr_latest",
+			TransitionKind:        "HANDOFF_LAUNCH",
+			ReviewGapPresent:      true,
+			ReviewGapAcknowledged: false,
+			CreatedAt:             time.Unix(1710000310, 0).UTC(),
+		},
+		LatestContinuityTransitionReceipt: &ContinuityTransitionReceiptSummary{
+			ReceiptID:             "ctr_latest",
+			TransitionKind:        "HANDOFF_LAUNCH",
+			HandoffStateBefore:    "ACCEPTED_NOT_LAUNCHED",
+			HandoffStateAfter:     "LAUNCH_COMPLETED_ACK_CAPTURED",
+			ReviewGapPresent:      true,
+			AcknowledgmentPresent: false,
+			Summary:               "handoff launch recorded while retained transcript review was stale",
+			CreatedAt:             time.Unix(1710000320, 0).UTC(),
+		},
+		RecentContinuityTransitionReceipts: []ContinuityTransitionReceiptSummary{
+			{
+				ReceiptID:             "ctr_latest",
+				TransitionKind:        "HANDOFF_LAUNCH",
+				HandoffStateBefore:    "ACCEPTED_NOT_LAUNCHED",
+				HandoffStateAfter:     "LAUNCH_COMPLETED_ACK_CAPTURED",
+				ReviewGapPresent:      true,
+				AcknowledgmentPresent: false,
+				Summary:               "handoff launch recorded while retained transcript review was stale",
+				CreatedAt:             time.Unix(1710000320, 0).UTC(),
+			},
+			{
+				ReceiptID:             "ctr_prev",
+				TransitionKind:        "HANDOFF_RESOLUTION",
+				HandoffStateBefore:    "FOLLOW_THROUGH_STALLED",
+				HandoffStateAfter:     "RESOLVED",
+				ReviewGapPresent:      true,
+				AcknowledgmentPresent: true,
+				Summary:               "handoff resolution recorded after explicit review-gap acknowledgment",
+				CreatedAt:             time.Unix(1710000300, 0).UTC(),
+			},
+		},
+		ContinuityIncidentSummary: &ContinuityIncidentRiskSummary{
+			ReviewGapPresent:                true,
+			AcknowledgmentPresent:           false,
+			StaleOrUnreviewedReviewPosture:  true,
+			UnresolvedContinuityAmbiguity:   true,
+			NearbyFailedOrInterruptedRuns:   1,
+			NearbyRecoveryActions:           1,
+			RecentFailureOrRecoveryActivity: true,
+			OperationallyNotable:            true,
+			Summary:                         "anchor transition carried stale retained transcript posture with nearby failed run evidence",
+		},
+		ContinuityIncidentTriageHistoryRollup: &ContinuityIncidentTriageHistoryRollupSummary{
+			WindowSize:                        2,
+			BoundedWindow:                     true,
+			DistinctAnchors:                   1,
+			AnchorsNeedsFollowUp:              1,
+			AnchorsWithOpenFollowUp:           1,
+			AnchorsBehindLatestTransition:     1,
+			AnchorsRepeatedWithoutProgression: 1,
+			ReviewRiskReceipts:                2,
+			AcknowledgedReviewGapReceipts:     1,
+			OperationallyNotable:              true,
+			Summary:                           "1 anchor(s) remain in open follow-up posture",
+		},
+	}, UIState{ShowInspector: true, ShowProof: true, Session: SessionState{SessionID: "shs_transition_vm"}}, host, 120, 32)
+
+	if vm.Inspector == nil || vm.ProofStrip == nil {
+		t.Fatalf("expected inspector and activity strip, got %+v %+v", vm.Inspector, vm.ProofStrip)
+	}
+	foundTransition := false
+	for _, section := range vm.Inspector.Sections {
+		if section.Title != "operator" {
+			continue
+		}
+		joined := strings.Join(section.Lines, "\n")
+		if strings.Contains(joined, "transition handoff launch") {
+			foundTransition = true
+		}
+		if !strings.Contains(joined, "incident anchor transition carried stale retained transcript posture") {
+			t.Fatalf("expected operator inspector to include continuity incident summary, got %q", joined)
+		}
+		if !strings.Contains(joined, "incident triage history 1 anchor(s) remain in open follow-up posture") {
+			t.Fatalf("expected operator inspector to include continuity incident triage-history summary, got %q", joined)
+		}
+		if strings.Contains(joined, "verified") || strings.Contains(joined, "resumable") {
+			t.Fatalf("transition audit wording must remain conservative, got %q", joined)
+		}
+	}
+	if !foundTransition {
+		t.Fatalf("expected operator inspector to show continuity transition audit truth, got %#v", vm.Inspector.Sections)
+	}
+	joinedActivity := strings.Join(vm.ProofStrip.Lines, "\n")
+	if !strings.Contains(joinedActivity, "handoff launch ACCEPTED_NOT_LAUNCHED -> LAUNCH_COMPLETED_ACK_CAPTURED (review-gap unacknowledged)") {
+		t.Fatalf("expected activity strip to include unacknowledged transition history line, got %q", joinedActivity)
+	}
+	if !strings.Contains(joinedActivity, "handoff resolution FOLLOW_THROUGH_STALLED -> RESOLVED (review-gap acknowledged)") {
+		t.Fatalf("expected activity strip to include acknowledged transition history line, got %q", joinedActivity)
+	}
+	if !strings.Contains(joinedActivity, "risk    incident review-gap=true stale=true unresolved=true failed=1 recovery=1") {
+		t.Fatalf("expected activity strip to include continuity incident risk line, got %q", joinedActivity)
+	}
+	if !strings.Contains(joinedActivity, "risk    triage-history window=2 anchors=1 open=1 behind-latest=1 repeated=1") {
+		t.Fatalf("expected activity strip to include continuity incident triage-history line, got %q", joinedActivity)
+	}
+}
+
+func TestLatestTranscriptTimestampUsesDurableTranscriptEvidence(t *testing.T) {
+	conversationAt := time.Unix(1710000000, 0).UTC()
+	transcriptAt := conversationAt.Add(2 * time.Minute)
+	got := latestTranscriptTimestamp(Snapshot{
+		RecentConversation: []ConversationItem{
+			{Role: "worker", Body: "older conversation entry", CreatedAt: conversationAt},
+		},
+		RecentShellTranscript: []ShellTranscriptChunkSummary{
+			{Source: "worker_output", Content: "new durable transcript chunk", CreatedAt: transcriptAt},
+		},
+	})
+	if !got.Equal(transcriptAt) {
+		t.Fatalf("expected latest transcript timestamp %v from durable transcript evidence, got %v", transcriptAt, got)
+	}
+}
+
+func TestBuildViewModelSurfacesTriagedWithoutFollowUpCue(t *testing.T) {
+	host := &stubHost{status: HostStatus{Mode: HostModeTranscript, State: HostStateFallback, Label: "transcript", InputLive: false}}
+	vm := BuildViewModel(Snapshot{
+		TaskID: "tsk_followup_cue",
+		Phase:  "BRIEF_READY",
+		Status: "ACTIVE",
+		ContinuityIncidentFollowUp: &ContinuityIncidentFollowUpSummary{
+			State:                     "TRIAGED_CURRENT",
+			Digest:                    "triaged without follow-up",
+			Advisory:                  "Latest continuity incident anchor is triaged, but no follow-up receipt is recorded yet.",
+			FollowUpAdvised:           true,
+			LatestTransitionReceiptID: "ctr_cue_latest",
+			LatestTriageReceiptID:     "citr_cue_latest",
+			TriageAnchorReceiptID:     "ctr_cue_latest",
+			FollowUpReceiptPresent:    false,
+		},
+	}, UIState{ShowInspector: true}, host, 120, 30)
+
+	if vm.Inspector == nil {
+		t.Fatalf("expected inspector section for follow-up cue test")
+	}
+	found := false
+	for _, section := range vm.Inspector.Sections {
+		if section.Title != "operator" {
+			continue
+		}
+		joined := strings.Join(section.Lines, "\n")
+		if strings.Contains(joined, "triaged without follow-up") {
+			found = true
+		}
+		if strings.Contains(strings.ToLower(joined), "problem solved") || strings.Contains(strings.ToLower(joined), "incident resolved") {
+			t.Fatalf("follow-up cue wording must stay conservative, got %q", joined)
+		}
+	}
+	if !found {
+		t.Fatalf("expected operator inspector to include triaged-without-follow-up cue, got %#v", vm.Inspector.Sections)
+	}
+}
+
+func TestBuildViewModelSurfacesClosureAnchorTimelineCues(t *testing.T) {
+	host := &stubHost{status: HostStatus{Mode: HostModeTranscript, State: HostStateFallback, Label: "transcript", InputLive: false}}
+	vm := BuildViewModel(Snapshot{
+		TaskID: "tsk_closure_timeline",
+		Phase:  "BRIEF_READY",
+		Status: "ACTIVE",
+		ContinuityIncidentFollowUp: &ContinuityIncidentFollowUpSummary{
+			State:          "FOLLOW_UP_REOPENED",
+			Digest:         "follow-up reopened",
+			WindowAdvisory: "bounded window open=1 reopened=1",
+			Advisory:       "Latest incident follow-up receipt is REOPENED; follow-up remains explicitly open.",
+			ClosureIntelligence: &ContinuityIncidentClosureSummary{
+				Class:                   "WEAK_CLOSURE_REOPENED",
+				Digest:                  "closure reopened after close",
+				WindowAdvisory:          "bounded window anchors=2 open=1 closed=1 reopened=1 triaged-without-follow-up=0 repeated=0 behind-latest=0",
+				Detail:                  "Recent bounded evidence suggests incident closure remains operationally unresolved.",
+				OperationallyUnresolved: true,
+				ClosureAppearsWeak:      true,
+				ReopenedAfterClosure:    true,
+				RecentAnchors: []ContinuityIncidentClosureAnchorItem{
+					{
+						AnchorTransitionReceiptID: "ctr_close_reopen",
+						Class:                     "WEAK_CLOSURE_REOPENED",
+						Digest:                    "closure reopened after close",
+						Explanation:               "reopened after closure in recent bounded evidence",
+						LatestFollowUpReceiptID:   "cifr_close_reopen",
+						LatestFollowUpActionKind:  "REOPENED",
+						LatestFollowUpAt:          time.Unix(1713000910, 0).UTC(),
+					},
+					{
+						AnchorTransitionReceiptID: "ctr_stable",
+						Class:                     "STABLE_BOUNDED",
+						Digest:                    "stable within bounded evidence",
+						Explanation:               "stable bounded closure progression",
+						LatestFollowUpReceiptID:   "cifr_stable",
+						LatestFollowUpActionKind:  "CLOSED",
+						LatestFollowUpAt:          time.Unix(1713000810, 0).UTC(),
+					},
+				},
+			},
+		},
+	}, UIState{ShowInspector: true, ShowProof: true}, host, 120, 30)
+
+	if vm.Inspector == nil || vm.ProofStrip == nil {
+		t.Fatalf("expected inspector and activity strip, got %+v %+v", vm.Inspector, vm.ProofStrip)
+	}
+	joinedInspector := ""
+	for _, section := range vm.Inspector.Sections {
+		if section.Title == "operator" {
+			joinedInspector = strings.Join(section.Lines, "\n")
+			break
+		}
+	}
+	if !strings.Contains(joinedInspector, "incident closure closure reopened after close") {
+		t.Fatalf("expected closure digest line in inspector, got %q", joinedInspector)
+	}
+	joinedActivity := strings.Join(vm.ProofStrip.Lines, "\n")
+	if !strings.Contains(joinedActivity, "risk    incident-closure closure reopened after close") {
+		t.Fatalf("expected closure risk activity line, got %q", joinedActivity)
+	}
+	if !strings.Contains(joinedActivity, "closure weak closure reopened anchor=ctr_close_") {
+		t.Fatalf("expected bounded closure anchor timeline line, got %q", joinedActivity)
+	}
+	if !strings.Contains(joinedActivity, "reopened after closure in recent bounded evidence") {
+		t.Fatalf("expected conservative bounded explanation line, got %q", joinedActivity)
+	}
+	if strings.Contains(strings.ToLower(joinedActivity), "root cause solved") || strings.Contains(strings.ToLower(joinedActivity), "safe to continue") {
+		t.Fatalf("closure timeline wording must stay conservative, got %q", joinedActivity)
+	}
+}
+
+func TestBuildViewModelSurfacesTaskIncidentRiskCues(t *testing.T) {
+	host := &stubHost{status: HostStatus{Mode: HostModeTranscript, State: HostStateFallback, Label: "transcript", InputLive: false}}
+	vm := BuildViewModel(Snapshot{
+		TaskID: "tsk_task_risk",
+		Phase:  "BRIEF_READY",
+		Status: "ACTIVE",
+		ContinuityIncidentTaskRisk: &ContinuityIncidentTaskRiskSummary{
+			Class:                               "RECURRING_WEAK_CLOSURE",
+			Digest:                              "recurring continuity weakness in recent bounded evidence",
+			WindowAdvisory:                      "bounded incident window anchors=3 open=1 reopened=2 triaged-without-follow-up=0 stagnant=0",
+			Detail:                              "Recent bounded evidence suggests recurring weak closure posture across incidents.",
+			DistinctAnchors:                     3,
+			RecurringWeakClosure:                true,
+			RecurringUnresolved:                 true,
+			ReopenedAfterClosureAnchors:         2,
+			RepeatedReopenLoopAnchors:           1,
+			OperationallyUnresolvedAnchorSignal: 3,
+			RecentAnchorClasses: []string{
+				"WEAK_CLOSURE_REOPENED",
+				"WEAK_CLOSURE_LOOP",
+			},
+		},
+	}, UIState{ShowInspector: true, ShowProof: true}, host, 120, 30)
+
+	if vm.Inspector == nil || vm.ProofStrip == nil {
+		t.Fatalf("expected inspector and activity strip, got %+v %+v", vm.Inspector, vm.ProofStrip)
+	}
+	joinedInspector := ""
+	for _, section := range vm.Inspector.Sections {
+		if section.Title == "operator" {
+			joinedInspector = strings.Join(section.Lines, "\n")
+			break
+		}
+	}
+	if !strings.Contains(joinedInspector, "incident task risk recurring continuity weakness in recent bounded evidence") {
+		t.Fatalf("expected task-level risk digest in inspector, got %q", joinedInspector)
+	}
+	joinedActivity := strings.Join(vm.ProofStrip.Lines, "\n")
+	if !strings.Contains(joinedActivity, "risk    task-incident recurring continuity weakness in recent bounded evidence | weak=true unresolved=true stagnant=false triaged-without-follow-up=false anchors=3") {
+		t.Fatalf("expected task-level risk activity line, got %q", joinedActivity)
+	}
+	if strings.Contains(strings.ToLower(joinedActivity), "root cause solved") || strings.Contains(strings.ToLower(joinedActivity), "safe to continue") {
+		t.Fatalf("task-level risk wording must stay conservative, got %q", joinedActivity)
 	}
 }

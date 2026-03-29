@@ -6,36 +6,54 @@ import (
 )
 
 type Snapshot struct {
-	TaskID                     string
-	Goal                       string
-	Phase                      string
-	Status                     string
-	Repo                       RepoAnchor
-	LocalScratch               *LocalScratchContext
-	IntentClass                string
-	IntentSummary              string
-	Brief                      *BriefSummary
-	Run                        *RunSummary
-	Checkpoint                 *CheckpointSummary
-	Handoff                    *HandoffSummary
-	Launch                     *LaunchSummary
-	LaunchControl              *LaunchControlSummary
-	Acknowledgment             *AcknowledgmentSummary
-	FollowThrough              *FollowThroughSummary
-	Resolution                 *ResolutionSummary
-	ActiveBranch               *ActiveBranchSummary
-	LocalRunFinalization       *LocalRunFinalizationSummary
-	LocalResume                *LocalResumeAuthoritySummary
-	ActionAuthority            *OperatorActionAuthoritySet
-	OperatorDecision           *OperatorDecisionSummary
-	OperatorExecutionPlan      *OperatorExecutionPlan
-	LatestOperatorStepReceipt  *OperatorStepReceiptSummary
-	RecentOperatorStepReceipts []OperatorStepReceiptSummary
-	HandoffContinuity          *HandoffContinuitySummary
-	Recovery                   *RecoverySummary
-	RecentProofs               []ProofItem
-	RecentConversation         []ConversationItem
-	LatestCanonicalResponse    string
+	TaskID                                   string
+	Goal                                     string
+	Phase                                    string
+	Status                                   string
+	Repo                                     RepoAnchor
+	LocalScratch                             *LocalScratchContext
+	IntentClass                              string
+	IntentSummary                            string
+	CompiledIntent                           *CompiledIntentSummary
+	Brief                                    *BriefSummary
+	Run                                      *RunSummary
+	Checkpoint                               *CheckpointSummary
+	Handoff                                  *HandoffSummary
+	Launch                                   *LaunchSummary
+	LaunchControl                            *LaunchControlSummary
+	Acknowledgment                           *AcknowledgmentSummary
+	FollowThrough                            *FollowThroughSummary
+	Resolution                               *ResolutionSummary
+	ActiveBranch                             *ActiveBranchSummary
+	LocalRunFinalization                     *LocalRunFinalizationSummary
+	LocalResume                              *LocalResumeAuthoritySummary
+	ActionAuthority                          *OperatorActionAuthoritySet
+	OperatorDecision                         *OperatorDecisionSummary
+	OperatorExecutionPlan                    *OperatorExecutionPlan
+	LatestOperatorStepReceipt                *OperatorStepReceiptSummary
+	RecentOperatorStepReceipts               []OperatorStepReceiptSummary
+	LatestContinuityTransitionReceipt        *ContinuityTransitionReceiptSummary
+	RecentContinuityTransitionReceipts       []ContinuityTransitionReceiptSummary
+	ContinuityTransitionRiskSummary          *ContinuityTransitionRiskSummary
+	ContinuityIncidentSummary                *ContinuityIncidentRiskSummary
+	LatestContinuityIncidentTriageReceipt    *ContinuityIncidentTriageReceiptSummary
+	RecentContinuityIncidentTriageReceipts   []ContinuityIncidentTriageReceiptSummary
+	ContinuityIncidentTriageHistoryRollup    *ContinuityIncidentTriageHistoryRollupSummary
+	LatestContinuityIncidentFollowUpReceipt  *ContinuityIncidentFollowUpReceiptSummary
+	RecentContinuityIncidentFollowUpReceipts []ContinuityIncidentFollowUpReceiptSummary
+	ContinuityIncidentFollowUpHistoryRollup  *ContinuityIncidentFollowUpHistoryRollupSummary
+	ContinuityIncidentFollowUp               *ContinuityIncidentFollowUpSummary
+	ContinuityIncidentTaskRisk               *ContinuityIncidentTaskRiskSummary
+	LatestTranscriptReviewGapAcknowledgment  *TranscriptReviewGapAcknowledgment
+	RecentTranscriptReviewGapAcknowledgments []TranscriptReviewGapAcknowledgment
+	HandoffContinuity                        *HandoffContinuitySummary
+	Recovery                                 *RecoverySummary
+	ShellSessions                            []KnownShellSession
+	RecentShellEvents                        []ShellSessionEventSummary
+	RecentShellTranscript                    []ShellTranscriptChunkSummary
+	RecentProofs                             []ProofItem
+	RecentConversation                       []ConversationItem
+	LatestCanonicalResponse                  string
 }
 
 type RepoAnchor struct {
@@ -51,18 +69,59 @@ type LocalScratchContext struct {
 	Notes    []ConversationItem
 }
 
+type CompiledIntentSummary struct {
+	IntentID                string
+	Class                   string
+	Posture                 string
+	ExecutionReadiness      string
+	Objective               string
+	RequestedOutcome        string
+	NormalizedAction        string
+	ScopeSummary            string
+	ExplicitConstraints     []string
+	DoneCriteria            []string
+	AmbiguityFlags          []string
+	ClarificationQuestions  []string
+	RequiresClarification   bool
+	BoundedEvidenceMessages int
+	ReadinessReason         string
+	CompilationNotes        string
+	Digest                  string
+	Advisory                string
+	CreatedAt               time.Time
+}
+
 type BriefSummary struct {
-	ID               string
-	Objective        string
-	NormalizedAction string
-	Constraints      []string
-	DoneCriteria     []string
+	ID                     string
+	Posture                string
+	Objective              string
+	RequestedOutcome       string
+	NormalizedAction       string
+	ScopeSummary           string
+	Constraints            []string
+	DoneCriteria           []string
+	AmbiguityFlags         []string
+	ClarificationQuestions []string
+	RequiresClarification  bool
+	WorkerFraming          string
+	BoundedEvidenceMessages int
 }
 
 type RunSummary struct {
 	ID                 string
 	WorkerKind         string
 	Status             string
+	WorkerRunID        string
+	ShellSessionID     string
+	Command            string
+	Args               []string
+	ExitCode           *int
+	Stdout             string
+	Stderr             string
+	ChangedFiles       []string
+	ValidationSignals  []string
+	OutputArtifactRef  string
+	StructuredSummary  string
 	LastKnownSummary   string
 	StartedAt          time.Time
 	EndedAt            *time.Time
@@ -211,23 +270,296 @@ type OperatorExecutionPlan struct {
 }
 
 type OperatorStepReceiptSummary struct {
-	ReceiptID          string
-	TaskID             string
-	ActionHandle       string
-	ExecutionDomain    string
-	CommandSurfaceKind string
-	ExecutionAttempted bool
-	ResultClass        string
-	Summary            string
-	Reason             string
-	RunID              string
-	CheckpointID       string
-	BriefID            string
-	HandoffID          string
-	LaunchAttemptID    string
-	LaunchID           string
-	CreatedAt          time.Time
-	CompletedAt        time.Time
+	ReceiptID                        string
+	TaskID                           string
+	ActionHandle                     string
+	ExecutionDomain                  string
+	CommandSurfaceKind               string
+	ExecutionAttempted               bool
+	ResultClass                      string
+	Summary                          string
+	Reason                           string
+	RunID                            string
+	CheckpointID                     string
+	BriefID                          string
+	HandoffID                        string
+	LaunchAttemptID                  string
+	LaunchID                         string
+	ReviewGapState                   string
+	ReviewGapSessionID               string
+	ReviewGapClass                   string
+	ReviewGapPresent                 bool
+	ReviewGapReviewedUpTo            int64
+	ReviewGapOldestUnreviewed        int64
+	ReviewGapNewestRetained          int64
+	ReviewGapUnreviewedRetainedCount int
+	ReviewGapAcknowledged            bool
+	ReviewGapAcknowledgmentID        string
+	ReviewGapAcknowledgmentClass     string
+	TransitionReceiptID              string
+	TransitionKind                   string
+	CreatedAt                        time.Time
+	CompletedAt                      time.Time
+}
+
+type ContinuityTransitionReceiptSummary struct {
+	ReceiptID                string
+	TaskID                   string
+	ShellSessionID           string
+	TransitionKind           string
+	TransitionHandle         string
+	TriggerAction            string
+	TriggerSource            string
+	HandoffID                string
+	LaunchAttemptID          string
+	LaunchID                 string
+	ResolutionID             string
+	BranchClassBefore        string
+	BranchRefBefore          string
+	BranchClassAfter         string
+	BranchRefAfter           string
+	HandoffStateBefore       string
+	HandoffStateAfter        string
+	LaunchControlBefore      string
+	LaunchControlAfter       string
+	ReviewGapPresent         bool
+	ReviewPosture            string
+	ReviewState              string
+	ReviewScope              string
+	ReviewedUpToSequence     int64
+	OldestUnreviewedSequence int64
+	NewestRetainedSequence   int64
+	UnreviewedRetainedCount  int
+	LatestReviewID           string
+	LatestReviewGapAckID     string
+	AcknowledgmentPresent    bool
+	AcknowledgmentClass      string
+	Summary                  string
+	CreatedAt                time.Time
+}
+
+type ContinuityTransitionRiskSummary struct {
+	WindowSize                           int
+	ReviewGapTransitions                 int
+	AcknowledgedReviewGapTransitions     int
+	UnacknowledgedReviewGapTransitions   int
+	StaleReviewPostureTransitions        int
+	SourceScopedReviewPostureTransitions int
+	IntoClaudeOwnershipTransitions       int
+	BackToLocalOwnershipTransitions      int
+	OperationallyNotable                 bool
+	Summary                              string
+}
+
+type ContinuityIncidentRiskSummary struct {
+	ReviewGapPresent                bool
+	AcknowledgmentPresent           bool
+	StaleOrUnreviewedReviewPosture  bool
+	SourceScopedReviewPosture       bool
+	IntoClaudeOwnershipTransition   bool
+	BackToLocalOwnershipTransition  bool
+	UnresolvedContinuityAmbiguity   bool
+	NearbyFailedOrInterruptedRuns   int
+	NearbyRecoveryActions           int
+	RecentFailureOrRecoveryActivity bool
+	OperationallyNotable            bool
+	Summary                         string
+}
+
+type ContinuityIncidentTriageReceiptSummary struct {
+	ReceiptID                 string
+	TaskID                    string
+	AnchorMode                string
+	AnchorTransitionReceiptID string
+	AnchorTransitionKind      string
+	AnchorHandoffID           string
+	AnchorShellSessionID      string
+	Posture                   string
+	FollowUpPosture           string
+	Summary                   string
+	ReviewGapPresent          bool
+	ReviewPosture             string
+	ReviewState               string
+	ReviewScope               string
+	ReviewedUpToSequence      int64
+	OldestUnreviewedSequence  int64
+	NewestRetainedSequence    int64
+	UnreviewedRetainedCount   int
+	LatestReviewID            string
+	LatestReviewGapAckID      string
+	AcknowledgmentPresent     bool
+	AcknowledgmentClass       string
+	RiskSummary               ContinuityIncidentRiskSummary
+	CreatedAt                 time.Time
+}
+
+type ContinuityIncidentFollowUpSummary struct {
+	State                     string
+	Digest                    string
+	WindowAdvisory            string
+	Advisory                  string
+	ClosureIntelligence       *ContinuityIncidentClosureSummary
+	FollowUpAdvised           bool
+	NeedsFollowUp             bool
+	Deferred                  bool
+	TriageBehindLatest        bool
+	TriagedUnderReviewRisk    bool
+	LatestTransitionReceiptID string
+	LatestTriageReceiptID     string
+	TriageAnchorReceiptID     string
+	TriagePosture             string
+	LatestFollowUpReceiptID   string
+	LatestFollowUpActionKind  string
+	LatestFollowUpSummary     string
+	LatestFollowUpAt          time.Time
+	FollowUpReceiptPresent    bool
+	FollowUpOpen              bool
+	FollowUpClosed            bool
+	FollowUpReopened          bool
+	FollowUpProgressed        bool
+}
+
+type ContinuityIncidentClosureSummary struct {
+	Class                             string
+	Digest                            string
+	WindowAdvisory                    string
+	Detail                            string
+	BoundedWindow                     bool
+	WindowSize                        int
+	DistinctAnchors                   int
+	OperationallyUnresolved           bool
+	ClosureAppearsWeak                bool
+	ReopenedAfterClosure              bool
+	RepeatedReopenLoop                bool
+	StagnantProgression               bool
+	TriagedWithoutFollowUp            bool
+	AnchorsWithOpenFollowUp           int
+	AnchorsClosed                     int
+	AnchorsReopened                   int
+	AnchorsBehindLatestTransition     int
+	AnchorsRepeatedWithoutProgression int
+	AnchorsTriagedWithoutFollowUp     int
+	ReopenedAfterClosureAnchors       int
+	RepeatedReopenLoopAnchors         int
+	StagnantProgressionAnchors        int
+	RecentAnchors                     []ContinuityIncidentClosureAnchorItem
+}
+
+type ContinuityIncidentTaskRiskSummary struct {
+	Class                               string
+	Digest                              string
+	WindowAdvisory                      string
+	Detail                              string
+	BoundedWindow                       bool
+	WindowSize                          int
+	DistinctAnchors                     int
+	RecurringWeakClosure                bool
+	RecurringUnresolved                 bool
+	RecurringStagnantFollowUp           bool
+	RecurringTriagedWithoutFollowUp     bool
+	ReopenedAfterClosureAnchors         int
+	RepeatedReopenLoopAnchors           int
+	StagnantProgressionAnchors          int
+	AnchorsTriagedWithoutFollowUp       int
+	AnchorsWithOpenFollowUp             int
+	AnchorsReopened                     int
+	OperationallyUnresolvedAnchorSignal int
+	RecentAnchorClasses                 []string
+}
+
+type ContinuityIncidentClosureAnchorItem struct {
+	AnchorTransitionReceiptID string
+	Class                     string
+	Digest                    string
+	Explanation               string
+	LatestFollowUpReceiptID   string
+	LatestFollowUpActionKind  string
+	LatestFollowUpAt          time.Time
+}
+
+type ContinuityIncidentTriageHistoryRollupSummary struct {
+	WindowSize                        int
+	BoundedWindow                     bool
+	DistinctAnchors                   int
+	AnchorsTriagedCurrent             int
+	AnchorsNeedsFollowUp              int
+	AnchorsDeferred                   int
+	AnchorsBehindLatestTransition     int
+	AnchorsWithOpenFollowUp           int
+	AnchorsRepeatedWithoutProgression int
+	ReviewRiskReceipts                int
+	AcknowledgedReviewGapReceipts     int
+	OperationallyNotable              bool
+	Summary                           string
+}
+
+type ContinuityIncidentFollowUpReceiptSummary struct {
+	ReceiptID                 string
+	TaskID                    string
+	AnchorMode                string
+	AnchorTransitionReceiptID string
+	AnchorTransitionKind      string
+	AnchorHandoffID           string
+	AnchorShellSessionID      string
+	TriageReceiptID           string
+	TriagePosture             string
+	TriageFollowUpPosture     string
+	ActionKind                string
+	Summary                   string
+	ReviewGapPresent          bool
+	ReviewPosture             string
+	ReviewState               string
+	ReviewScope               string
+	ReviewedUpToSequence      int64
+	OldestUnreviewedSequence  int64
+	NewestRetainedSequence    int64
+	UnreviewedRetainedCount   int
+	LatestReviewID            string
+	LatestReviewGapAckID      string
+	AcknowledgmentPresent     bool
+	AcknowledgmentClass       string
+	TriagedUnderReviewRisk    bool
+	CreatedAt                 time.Time
+}
+
+type ContinuityIncidentFollowUpHistoryRollupSummary struct {
+	WindowSize                        int
+	BoundedWindow                     bool
+	DistinctAnchors                   int
+	ReceiptsRecordedPending           int
+	ReceiptsProgressed                int
+	ReceiptsClosed                    int
+	ReceiptsReopened                  int
+	AnchorsWithOpenFollowUp           int
+	AnchorsClosed                     int
+	AnchorsReopened                   int
+	OpenAnchorsBehindLatestTransition int
+	AnchorsRepeatedWithoutProgression int
+	AnchorsTriagedWithoutFollowUp     int
+	OperationallyNotable              bool
+	Summary                           string
+}
+
+type TranscriptReviewGapAcknowledgment struct {
+	AcknowledgmentID         string
+	TaskID                   string
+	SessionID                string
+	Class                    string
+	ReviewState              string
+	ReviewScope              string
+	ReviewedUpToSequence     int64
+	OldestUnreviewedSequence int64
+	NewestRetainedSequence   int64
+	UnreviewedRetainedCount  int
+	TranscriptState          string
+	RetentionLimit           int
+	RetainedChunks           int
+	DroppedChunks            int
+	ActionContext            string
+	Summary                  string
+	CreatedAt                time.Time
+	StaleBehindCurrent       bool
+	NewerRetainedCount       int
 }
 
 type HandoffContinuitySummary struct {
@@ -304,16 +636,18 @@ const (
 )
 
 type HostStatus struct {
-	Mode           HostMode
-	State          HostState
-	Label          string
-	Note           string
-	InputLive      bool
-	ExitCode       *int
-	Width          int
-	Height         int
-	LastOutputAt   time.Time
-	StateChangedAt time.Time
+	Mode                  HostMode
+	State                 HostState
+	Label                 string
+	Note                  string
+	WorkerSessionID       string
+	WorkerSessionIDSource WorkerSessionIDSource
+	InputLive             bool
+	ExitCode              *int
+	Width                 int
+	Height                int
+	LastOutputAt          time.Time
+	StateChangedAt        time.Time
 }
 
 type SessionEventType string
@@ -351,6 +685,7 @@ type SessionState struct {
 	WorkerPreference      WorkerPreference
 	ResolvedWorker        WorkerPreference
 	WorkerSessionID       string
+	WorkerSessionIDSource WorkerSessionIDSource
 	AttachCapability      WorkerAttachCapability
 	Journal               []SessionEvent
 	KnownSessions         []KnownShellSession
@@ -364,6 +699,15 @@ const (
 	WorkerAttachCapabilityAttachable WorkerAttachCapability = "attachable"
 )
 
+type WorkerSessionIDSource string
+
+const (
+	WorkerSessionIDSourceNone          WorkerSessionIDSource = "none"
+	WorkerSessionIDSourceAuthoritative WorkerSessionIDSource = "authoritative"
+	WorkerSessionIDSourceHeuristic     WorkerSessionIDSource = "heuristic"
+	WorkerSessionIDSourceUnknown       WorkerSessionIDSource = "unknown"
+)
+
 type KnownShellSessionClass string
 
 const (
@@ -374,19 +718,91 @@ const (
 )
 
 type KnownShellSession struct {
-	SessionID        string
-	TaskID           string
-	WorkerPreference WorkerPreference
-	ResolvedWorker   WorkerPreference
-	WorkerSessionID  string
-	AttachCapability WorkerAttachCapability
-	HostMode         HostMode
-	HostState        HostState
-	SessionClass     KnownShellSessionClass
-	StartedAt        time.Time
-	LastUpdatedAt    time.Time
-	Active           bool
-	Note             string
+	SessionID                        string
+	TaskID                           string
+	WorkerPreference                 WorkerPreference
+	ResolvedWorker                   WorkerPreference
+	WorkerSessionID                  string
+	WorkerSessionIDSource            WorkerSessionIDSource
+	AttachCapability                 WorkerAttachCapability
+	HostMode                         HostMode
+	HostState                        HostState
+	SessionClass                     KnownShellSessionClass
+	SessionClassReason               string
+	ReattachGuidance                 string
+	OperatorSummary                  string
+	TranscriptState                  string
+	TranscriptRetainedChunks         int
+	TranscriptDroppedChunks          int
+	TranscriptRetentionLimit         int
+	TranscriptOldestSequence         int64
+	TranscriptNewestSequence         int64
+	TranscriptLastChunkAt            time.Time
+	TranscriptReviewID               string
+	TranscriptReviewSource           string
+	TranscriptReviewedUpTo           int64
+	TranscriptReviewSummary          string
+	TranscriptReviewAt               time.Time
+	TranscriptReviewStale            bool
+	TranscriptReviewNewer            int
+	TranscriptReviewClosureState     string
+	TranscriptReviewOldestUnreviewed int64
+	TranscriptRecentReviews          []TranscriptReviewMarker
+	StartedAt                        time.Time
+	LastUpdatedAt                    time.Time
+	Active                           bool
+	Note                             string
+	LatestEventID                    string
+	LatestEventKind                  string
+	LatestEventAt                    time.Time
+	LatestEventNote                  string
+}
+
+type TranscriptReviewMarker struct {
+	ReviewID                 string
+	SourceFilter             string
+	ReviewedUpToSequence     int64
+	Summary                  string
+	CreatedAt                time.Time
+	TranscriptState          string
+	RetentionLimit           int
+	RetainedChunks           int
+	DroppedChunks            int
+	OldestRetainedSequence   int64
+	NewestRetainedSequence   int64
+	StaleBehindLatest        bool
+	NewerRetainedCount       int
+	OldestUnreviewedSequence int64
+	ClosureState             string
+}
+
+type ShellSessionEventSummary struct {
+	EventID               string
+	TaskID                string
+	SessionID             string
+	Kind                  string
+	HostMode              string
+	HostState             string
+	WorkerSessionID       string
+	WorkerSessionIDSource string
+	AttachCapability      string
+	Active                bool
+	InputLive             bool
+	ExitCode              *int
+	PaneWidth             int
+	PaneHeight            int
+	Note                  string
+	CreatedAt             time.Time
+}
+
+type ShellTranscriptChunkSummary struct {
+	ChunkID    string
+	TaskID     string
+	SessionID  string
+	SequenceNo int64
+	Source     string
+	Content    string
+	CreatedAt  time.Time
 }
 
 type FocusPane int

@@ -15,13 +15,15 @@ import (
 )
 
 type ClaudePTYHost struct {
-	binPath   string
-	extraArgs []string
+	binPath         string
+	extraArgs       []string
+	resumeSessionID string
 
 	mu       sync.Mutex
 	snapshot Snapshot
 	lines    []string
 	activity []string
+	transcriptPending []TranscriptEvidenceChunk
 	partial  string
 	status   HostStatus
 
@@ -42,12 +44,13 @@ func NewDefaultClaudePTYHost() *ClaudePTYHost {
 		binPath:   binPath,
 		extraArgs: strings.Fields(args),
 		status: HostStatus{
-			Mode:           HostModeClaudePTY,
-			State:          HostStateStarting,
-			Label:          "claude starting",
-			Width:          120,
-			Height:         24,
-			StateChangedAt: time.Now().UTC(),
+			Mode:                  HostModeClaudePTY,
+			State:                 HostStateStarting,
+			Label:                 "claude starting",
+			WorkerSessionIDSource: WorkerSessionIDSourceNone,
+			Width:                 120,
+			Height:                24,
+			StateChangedAt:        time.Now().UTC(),
 		},
 	}
 }
@@ -73,7 +76,12 @@ func (h *ClaudePTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 	h.setStatus(HostStateStarting, "starting claude PTY host", nil, false)
 	h.recordActivity("worker host starting: claude PTY session")
 
-	cmd := exec.CommandContext(ctx, claudeBin, h.extraArgs...)
+	args := make([]string, 0, len(h.extraArgs)+3)
+	if sessionID := strings.TrimSpace(h.resumeSessionID); sessionID != "" {
+		args = append(args, "--resume", "--session-id", sessionID)
+	}
+	args = append(args, h.extraArgs...)
+	cmd := exec.CommandContext(ctx, claudeBin, args...)
 	cmd.Dir = snapshot.Repo.RepoRoot
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
@@ -91,6 +99,7 @@ func (h *ClaudePTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 	h.mu.Lock()
 	h.lines = nil
 	h.activity = nil
+	h.transcriptPending = nil
 	h.partial = ""
 	h.cmd = cmd
 	h.ptyFile = ptmx
@@ -98,6 +107,12 @@ func (h *ClaudePTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 	h.status.State = HostStateLive
 	h.status.Label = "claude live"
 	h.status.Note = ""
+	h.status.WorkerSessionID = strings.TrimSpace(h.resumeSessionID)
+	if h.status.WorkerSessionID != "" {
+		h.status.WorkerSessionIDSource = WorkerSessionIDSourceAuthoritative
+	} else {
+		h.status.WorkerSessionIDSource = WorkerSessionIDSourceNone
+	}
 	h.status.InputLive = true
 	h.status.ExitCode = nil
 	h.status.LastOutputAt = time.Time{}
@@ -134,6 +149,12 @@ func (h *ClaudePTYHost) UpdateSnapshot(snapshot Snapshot) {
 	h.mu.Lock()
 	h.snapshot = snapshot
 	h.mu.Unlock()
+}
+
+func (h *ClaudePTYHost) SetResumeSessionID(sessionID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.resumeSessionID = strings.TrimSpace(sessionID)
 }
 
 func (h *ClaudePTYHost) Resize(width int, height int) bool {
@@ -266,6 +287,22 @@ func (h *ClaudePTYHost) ActivityLines(limit int) []string {
 	return append([]string{}, h.activity[len(h.activity)-limit:]...)
 }
 
+func (h *ClaudePTYHost) DrainTranscriptEvidence(limit int) []TranscriptEvidenceChunk {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.transcriptPending) == 0 {
+		return nil
+	}
+	if limit <= 0 || limit >= len(h.transcriptPending) {
+		out := append([]TranscriptEvidenceChunk{}, h.transcriptPending...)
+		h.transcriptPending = nil
+		return out
+	}
+	out := append([]TranscriptEvidenceChunk{}, h.transcriptPending[:limit]...)
+	h.transcriptPending = append([]TranscriptEvidenceChunk{}, h.transcriptPending[limit:]...)
+	return out
+}
+
 func (h *ClaudePTYHost) readStream(file *os.File) {
 	reader := bufio.NewReader(file)
 	buf := make([]byte, 4096)
@@ -332,7 +369,15 @@ func (h *ClaudePTYHost) appendOutput(chunk []byte) {
 		h.status.LastOutputAt = time.Now().UTC()
 	}
 	for _, line := range result.lines {
+		if detected, source := detectWorkerSessionIDWithSource(line); detected != "" && strings.TrimSpace(h.status.WorkerSessionID) == "" {
+			h.status.WorkerSessionID = detected
+			h.status.WorkerSessionIDSource = source
+		}
 		h.appendLineLocked(line)
+	}
+	if detected, source := detectWorkerSessionIDWithSource(result.partial); detected != "" && strings.TrimSpace(h.status.WorkerSessionID) == "" {
+		h.status.WorkerSessionID = detected
+		h.status.WorkerSessionIDSource = source
 	}
 	h.mu.Unlock()
 }
@@ -340,8 +385,18 @@ func (h *ClaudePTYHost) appendOutput(chunk []byte) {
 func (h *ClaudePTYHost) appendLineLocked(line string) {
 	line = strings.TrimRight(line, " ")
 	h.lines = append(h.lines, line)
+	if strings.TrimSpace(line) != "" {
+		h.transcriptPending = append(h.transcriptPending, TranscriptEvidenceChunk{
+			Source:    "worker_output",
+			Content:   line,
+			CreatedAt: time.Now().UTC(),
+		})
+	}
 	if len(h.lines) > hostMaxLines {
 		h.lines = h.lines[len(h.lines)-hostMaxLines:]
+	}
+	if len(h.transcriptPending) > hostMaxLines {
+		h.transcriptPending = h.transcriptPending[len(h.transcriptPending)-hostMaxLines:]
 	}
 }
 

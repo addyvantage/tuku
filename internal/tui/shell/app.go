@@ -13,19 +13,21 @@ import (
 )
 
 type App struct {
-	TaskID           string
-	Source           SnapshotSource
-	MessageSender    TaskMessageSender
-	ActionExecutor   PrimaryActionExecutor
-	LifecycleSink    LifecycleSink
-	RegistrySink     SessionRegistrySink
-	RegistrySource   SessionRegistrySource
-	WorkerPreference WorkerPreference
-	Host             WorkerHost
-	FallbackHost     WorkerHost
-	Input            io.Reader
-	Output           io.Writer
-	RefreshInterval  time.Duration
+	TaskID            string
+	Source            SnapshotSource
+	MessageSender     TaskMessageSender
+	ActionExecutor    PrimaryActionExecutor
+	LifecycleSink     LifecycleSink
+	RegistrySink      SessionRegistrySink
+	RegistrySource    SessionRegistrySource
+	TranscriptSink    TranscriptSink
+	WorkerPreference  WorkerPreference
+	ReattachSessionID string
+	Host              WorkerHost
+	FallbackHost      WorkerHost
+	Input             io.Reader
+	Output            io.Writer
+	RefreshInterval   time.Duration
 }
 
 type primaryActionExecutionResult struct {
@@ -86,9 +88,38 @@ func (a *App) Run(ctx context.Context) error {
 	defer restore()
 
 	preferredHost := a.Host
-	resolvedWorker := resolveWorkerPreference(a.WorkerPreference, snapshot)
+	requestedPreference := a.WorkerPreference
+	resolvedWorker := resolveWorkerPreference(requestedPreference, snapshot)
 	if isScratchIntakeSnapshot(snapshot) {
 		resolvedWorker = WorkerPreferenceAuto
+	}
+	if err := loadKnownShellSessions(a.RegistrySource, a.TaskID, &ui.Session); err != nil {
+		ui.LastError = "shell session registry read failed: " + err.Error()
+	}
+	reattachTarget, shouldReattach, err := resolveReattachTarget(strings.TrimSpace(a.ReattachSessionID), ui.Session.KnownSessions)
+	if err != nil {
+		recordLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, PersistedLifecycleReattachFailed, HostStatus{
+			Mode:  HostModeTranscript,
+			State: HostStateTranscriptOnly,
+			Note:  err.Error(),
+		}, &ui)
+		return err
+	}
+	if shouldReattach {
+		if preferred := sessionPreferredWorker(reattachTarget); preferred != WorkerPreferenceAuto {
+			requestedPreference = preferred
+		}
+		ui.Session.WorkerSessionID = reattachTarget.WorkerSessionID
+		ui.Session.WorkerSessionIDSource = reattachTarget.WorkerSessionIDSource
+		ui.Session.AttachCapability = WorkerAttachCapabilityAttachable
+		addSessionEvent(&ui.Session, ui.LastRefresh, SessionEventHostStartupAttempted, fmt.Sprintf("Requested reattach to prior worker session %s via shell session %s.", truncateWithEllipsis(reattachTarget.WorkerSessionID, 20), shortTaskID(reattachTarget.SessionID)))
+		recordLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, PersistedLifecycleReattachRequested, HostStatus{
+			Mode:                  reattachTarget.HostMode,
+			State:                 reattachTarget.HostState,
+			Note:                  fmt.Sprintf("reattach requested using session %s", reattachTarget.SessionID),
+			WorkerSessionID:       reattachTarget.WorkerSessionID,
+			WorkerSessionIDSource: reattachTarget.WorkerSessionIDSource,
+		}, &ui)
 	}
 	if preferredHost != nil {
 		if hostPreference := workerPreferenceFromHost(preferredHost); hostPreference != WorkerPreferenceAuto {
@@ -96,16 +127,24 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}
 	if preferredHost == nil {
-		preferredHost, resolvedWorker, err = selectPreferredHost(a.WorkerPreference, snapshot)
+		preferredHost, resolvedWorker, err = selectPreferredHost(requestedPreference, snapshot)
 		if err != nil {
 			return err
 		}
 	}
+	if shouldReattach && !configureHostResumeSession(preferredHost, reattachTarget.WorkerSessionID) {
+		err := fmt.Errorf("shell session %s is attachable but %s host does not support reattach in this runtime", reattachTarget.SessionID, workerPreferenceLabel(resolvedWorker))
+		recordLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, PersistedLifecycleReattachFailed, HostStatus{
+			Mode:                  reattachTarget.HostMode,
+			State:                 reattachTarget.HostState,
+			Note:                  err.Error(),
+			WorkerSessionID:       reattachTarget.WorkerSessionID,
+			WorkerSessionIDSource: reattachTarget.WorkerSessionIDSource,
+		}, &ui)
+		return err
+	}
 	ui.Session.ResolvedWorker = resolvedWorker
 	reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, preferredHost.Status(), true, &ui)
-	if err := loadKnownShellSessions(a.RegistrySource, a.TaskID, &ui.Session); err != nil {
-		ui.LastError = "shell session registry read failed: " + err.Error()
-	}
 
 	host, hostErr := startPreferredHost(ctx, preferredHost, a.FallbackHost, snapshot)
 	startupLabel := workerPreferenceLabel(resolvedWorker)
@@ -144,6 +183,9 @@ func (a *App) Run(ctx context.Context) error {
 	defer snapshotTicker.Stop()
 	registryTicker := time.NewTicker(shellSessionHeartbeatInterval)
 	defer registryTicker.Stop()
+	transcriptTicker := time.NewTicker(shellTranscriptFlushInterval)
+	defer transcriptTicker.Stop()
+	defer flushTranscriptEvidence(a.TaskID, ui.Session.SessionID, host, a.TranscriptSink, &ui)
 
 	ui.ObservedAt = time.Now().UTC()
 	if err := renderShell(stdoutFile, snapshot, ui, host); err != nil {
@@ -235,6 +277,8 @@ func (a *App) Run(ctx context.Context) error {
 			ui.LastError = ""
 		case <-registryTicker.C:
 			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, host.Status(), true, &ui)
+		case <-transcriptTicker.C:
+			flushTranscriptEvidence(a.TaskID, ui.Session.SessionID, host, a.TranscriptSink, &ui)
 		case <-frameTicker.C:
 		}
 
@@ -253,6 +297,7 @@ func (a *App) Run(ctx context.Context) error {
 			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, currentStatus, true, &ui)
 		}
 		if nextHost, note, changed := transitionExitedHost(ctx, host, a.FallbackHost, snapshot); changed {
+			flushTranscriptEvidence(a.TaskID, ui.Session.SessionID, host, a.TranscriptSink, &ui)
 			host = nextHost
 			applyHostResize(host, lastWidth, lastHeight, ui)
 			if note != "" {
@@ -738,6 +783,12 @@ func hostStatusChanged(previous HostStatus, current HostStatus) bool {
 	if previous.Note != current.Note {
 		return true
 	}
+	if previous.WorkerSessionID != current.WorkerSessionID {
+		return true
+	}
+	if previous.WorkerSessionIDSource != current.WorkerSessionIDSource {
+		return true
+	}
 	if previous.Width != current.Width || previous.Height != current.Height {
 		return true
 	}
@@ -793,9 +844,73 @@ func recordLifecycle(ctx context.Context, sink LifecycleSink, taskID string, ses
 	if sink == nil {
 		return
 	}
+	if ui != nil {
+		if strings.TrimSpace(status.WorkerSessionID) == "" {
+			status.WorkerSessionID = strings.TrimSpace(ui.Session.WorkerSessionID)
+		}
+		status.WorkerSessionIDSource = normalizeWorkerSessionIDSource(status.WorkerSessionIDSource, status.WorkerSessionID)
+	}
 	if err := sink.Record(taskID, sessionID, kind, status); err != nil {
 		ui.LastError = "shell lifecycle proof bridge failed: " + err.Error()
 	}
+}
+
+func resolveReattachTarget(targetSessionID string, known []KnownShellSession) (KnownShellSession, bool, error) {
+	targetSessionID = strings.TrimSpace(targetSessionID)
+	if targetSessionID == "" {
+		return KnownShellSession{}, false, nil
+	}
+	for _, session := range known {
+		if session.SessionID != targetSessionID {
+			continue
+		}
+		if session.SessionClass == KnownShellSessionClassEnded {
+			return KnownShellSession{}, false, fmt.Errorf("shell session %s is ended; reattach is unavailable", targetSessionID)
+		}
+		if session.SessionClass == KnownShellSessionClassStale {
+			return KnownShellSession{}, false, fmt.Errorf("shell session %s is stale (last updated %s); live continuity is not trusted for reattach", targetSessionID, session.LastUpdatedAt.Format(time.RFC3339))
+		}
+		if strings.TrimSpace(session.WorkerSessionID) == "" {
+			return KnownShellSession{}, false, fmt.Errorf("shell session %s has no worker session id; reattach requires an authoritative worker session id", targetSessionID)
+		}
+		if session.WorkerSessionIDSource != WorkerSessionIDSourceAuthoritative {
+			return KnownShellSession{}, false, fmt.Errorf("shell session %s only has a %s worker session id; reattach requires an authoritative id", targetSessionID, nonEmpty(string(session.WorkerSessionIDSource), "unknown"))
+		}
+		if session.AttachCapability != WorkerAttachCapabilityAttachable {
+			return KnownShellSession{}, false, fmt.Errorf("shell session %s reports attach capability %s; host/worker attach is unsupported", targetSessionID, nonEmpty(string(session.AttachCapability), "none"))
+		}
+		if session.SessionClass != KnownShellSessionClassAttachable {
+			reason := strings.TrimSpace(session.SessionClassReason)
+			if reason == "" {
+				reason = fmt.Sprintf("class=%s state=%s", session.SessionClass, session.HostState)
+			}
+			return KnownShellSession{}, false, fmt.Errorf("shell session %s is not attachable: %s", targetSessionID, reason)
+		}
+		return session, true, nil
+	}
+	return KnownShellSession{}, false, fmt.Errorf("shell session %s was not found in the durable registry for this task", targetSessionID)
+}
+
+func sessionPreferredWorker(session KnownShellSession) WorkerPreference {
+	if session.ResolvedWorker == WorkerPreferenceCodex || session.ResolvedWorker == WorkerPreferenceClaude {
+		return session.ResolvedWorker
+	}
+	if session.WorkerPreference == WorkerPreferenceCodex || session.WorkerPreference == WorkerPreferenceClaude {
+		return session.WorkerPreference
+	}
+	return WorkerPreferenceAuto
+}
+
+func configureHostResumeSession(host WorkerHost, workerSessionID string) bool {
+	if host == nil || strings.TrimSpace(workerSessionID) == "" {
+		return false
+	}
+	resumeConfigurable, ok := host.(interface{ SetResumeSessionID(sessionID string) })
+	if !ok {
+		return false
+	}
+	resumeConfigurable.SetResumeSessionID(strings.TrimSpace(workerSessionID))
+	return true
 }
 
 func readKeys(in io.Reader, out chan<- byte) {
@@ -807,6 +922,23 @@ func readKeys(in io.Reader, out chan<- byte) {
 			return
 		}
 		out <- buf[0]
+	}
+}
+
+func flushTranscriptEvidence(taskID string, sessionID string, host WorkerHost, sink TranscriptSink, ui *UIState) {
+	if sink == nil || host == nil {
+		return
+	}
+	provider, ok := host.(TranscriptProvider)
+	if !ok {
+		return
+	}
+	chunks := provider.DrainTranscriptEvidence(80)
+	if len(chunks) == 0 {
+		return
+	}
+	if err := sink.Append(taskID, sessionID, chunks); err != nil && ui != nil {
+		ui.LastError = "shell transcript evidence append failed: " + err.Error()
 	}
 }
 
