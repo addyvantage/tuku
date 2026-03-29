@@ -19,13 +19,13 @@ type ClaudePTYHost struct {
 	extraArgs       []string
 	resumeSessionID string
 
-	mu       sync.Mutex
-	snapshot Snapshot
-	lines    []string
-	activity []string
+	mu                sync.Mutex
+	snapshot          Snapshot
+	lines             []string
+	activity          []string
 	transcriptPending []TranscriptEvidenceChunk
-	partial  string
-	status   HostStatus
+	partial           string
+	status            HostStatus
 
 	ptyFile *os.File
 	cmd     *exec.Cmd

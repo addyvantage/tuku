@@ -146,4 +146,3 @@ func summarizeLaunch(stdout, stderr string, exitCode int) string {
 	}
 	return fmt.Sprintf("exit=%d no output summary", exitCode)
 }
-

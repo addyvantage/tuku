@@ -103,10 +103,10 @@ func (s *SimpleSynthesizer) Synthesize(_ context.Context, c capsule.WorkCapsule,
 				continue
 			}
 			var payload struct {
-				ExitCode             int      `json:"exit_code"`
-				Summary              string   `json:"summary"`
-				ChangedFiles         []string `json:"changed_files"`
-				ChangedFilesSemantics string  `json:"changed_files_semantics"`
+				ExitCode              int      `json:"exit_code"`
+				Summary               string   `json:"summary"`
+				ChangedFiles          []string `json:"changed_files"`
+				ChangedFilesSemantics string   `json:"changed_files_semantics"`
 			}
 			if err := json.Unmarshal([]byte(e.PayloadJSON), &payload); err == nil {
 				if payload.Summary != "" {

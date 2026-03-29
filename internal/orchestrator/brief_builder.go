@@ -43,27 +43,27 @@ func (b *BriefBuilderV1) Build(input brief.BuildInput) (brief.ExecutionBrief, er
 	}
 
 	payload := struct {
-		Version                int                  `json:"version"`
-		TaskID                 common.TaskID        `json:"task_id"`
-		IntentID               common.IntentID      `json:"intent_id"`
-		CapsuleVersion         common.CapsuleVersion `json:"capsule_version"`
-		Posture                brief.Posture        `json:"posture"`
-		Goal                   string               `json:"goal"`
-		RequestedOutcome       string               `json:"requested_outcome"`
-		NormalizedAction       string               `json:"normalized_action"`
-		ScopeSummary           string               `json:"scope_summary"`
-		ScopeIn                []string             `json:"scope_in"`
-		ScopeOut               []string             `json:"scope_out"`
-		Constraints            []string             `json:"constraints"`
-		DoneCriteria           []string             `json:"done_criteria"`
-		AmbiguityFlags         []string             `json:"ambiguity_flags"`
-		ClarificationQuestions []string             `json:"clarification_questions"`
-		RequiresClarification  bool                 `json:"requires_clarification"`
-		WorkerFraming          string               `json:"worker_framing"`
-		BoundedEvidenceMessages int                 `json:"bounded_evidence_messages"`
-		ContextPackID          common.ContextPackID `json:"context_pack_id"`
-		Verbosity              brief.Verbosity      `json:"verbosity"`
-		PolicyProfileID        string               `json:"policy_profile_id"`
+		Version                 int                   `json:"version"`
+		TaskID                  common.TaskID         `json:"task_id"`
+		IntentID                common.IntentID       `json:"intent_id"`
+		CapsuleVersion          common.CapsuleVersion `json:"capsule_version"`
+		Posture                 brief.Posture         `json:"posture"`
+		Goal                    string                `json:"goal"`
+		RequestedOutcome        string                `json:"requested_outcome"`
+		NormalizedAction        string                `json:"normalized_action"`
+		ScopeSummary            string                `json:"scope_summary"`
+		ScopeIn                 []string              `json:"scope_in"`
+		ScopeOut                []string              `json:"scope_out"`
+		Constraints             []string              `json:"constraints"`
+		DoneCriteria            []string              `json:"done_criteria"`
+		AmbiguityFlags          []string              `json:"ambiguity_flags"`
+		ClarificationQuestions  []string              `json:"clarification_questions"`
+		RequiresClarification   bool                  `json:"requires_clarification"`
+		WorkerFraming           string                `json:"worker_framing"`
+		BoundedEvidenceMessages int                   `json:"bounded_evidence_messages"`
+		ContextPackID           common.ContextPackID  `json:"context_pack_id"`
+		Verbosity               brief.Verbosity       `json:"verbosity"`
+		PolicyProfileID         string                `json:"policy_profile_id"`
 	}{
 		Version:                 2,
 		TaskID:                  input.TaskID,
@@ -103,30 +103,30 @@ func (b *BriefBuilderV1) Build(input brief.BuildInput) (brief.ExecutionBrief, er
 	}
 
 	out := brief.ExecutionBrief{
-		Version:                2,
-		BriefID:                common.BriefID(b.idGenerator("brf")),
-		TaskID:                 input.TaskID,
-		IntentID:               input.IntentID,
-		CapsuleVersion:         input.CapsuleVersion,
-		CreatedAt:              b.clock(),
-		Posture:                posture,
-		Objective:              objective,
-		RequestedOutcome:       strings.TrimSpace(input.RequestedOutcome),
-		NormalizedAction:       input.NormalizedAction,
-		ScopeSummary:           scopeSummary,
-		ScopeIn:                append([]string{}, input.ScopeHints...),
-		ScopeOut:               append([]string{}, input.ScopeOutHints...),
-		Constraints:            append([]string{}, input.Constraints...),
-		DoneCriteria:           append([]string{}, input.DoneCriteria...),
-		AmbiguityFlags:         append([]string{}, input.AmbiguityFlags...),
-		ClarificationQuestions: append([]string{}, input.ClarificationQuestions...),
-		RequiresClarification:  input.RequiresClarification,
-		WorkerFraming:          workerFraming,
+		Version:                 2,
+		BriefID:                 common.BriefID(b.idGenerator("brf")),
+		TaskID:                  input.TaskID,
+		IntentID:                input.IntentID,
+		CapsuleVersion:          input.CapsuleVersion,
+		CreatedAt:               b.clock(),
+		Posture:                 posture,
+		Objective:               objective,
+		RequestedOutcome:        strings.TrimSpace(input.RequestedOutcome),
+		NormalizedAction:        input.NormalizedAction,
+		ScopeSummary:            scopeSummary,
+		ScopeIn:                 append([]string{}, input.ScopeHints...),
+		ScopeOut:                append([]string{}, input.ScopeOutHints...),
+		Constraints:             append([]string{}, input.Constraints...),
+		DoneCriteria:            append([]string{}, input.DoneCriteria...),
+		AmbiguityFlags:          append([]string{}, input.AmbiguityFlags...),
+		ClarificationQuestions:  append([]string{}, input.ClarificationQuestions...),
+		RequiresClarification:   input.RequiresClarification,
+		WorkerFraming:           workerFraming,
 		BoundedEvidenceMessages: input.BoundedEvidenceMessages,
-		ContextPackID:          input.ContextPackID,
-		Verbosity:              input.Verbosity,
-		PolicyProfileID:        input.PolicyProfileID,
-		BriefHash:              hash,
+		ContextPackID:           input.ContextPackID,
+		Verbosity:               input.Verbosity,
+		PolicyProfileID:         input.PolicyProfileID,
+		BriefHash:               hash,
 	}
 	return out, nil
 }

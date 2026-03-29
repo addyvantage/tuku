@@ -511,11 +511,11 @@ func (c *Coordinator) MessageTask(ctx context.Context, taskID string, message st
 		}
 
 		if err := txc.appendProof(caps, proof.EventBriefCreated, proof.ActorSystem, "tuku-brief-builder", map[string]any{
-			"brief_id":                 briefArtifact.BriefID,
-			"brief_hash":               briefArtifact.BriefHash,
-			"intent_id":                intentState.IntentID,
-			"brief_posture":            briefArtifact.Posture,
-			"requires_clarification":   briefArtifact.RequiresClarification,
+			"brief_id":                  briefArtifact.BriefID,
+			"brief_hash":                briefArtifact.BriefHash,
+			"intent_id":                 intentState.IntentID,
+			"brief_posture":             briefArtifact.Posture,
+			"requires_clarification":    briefArtifact.RequiresClarification,
 			"bounded_evidence_messages": briefArtifact.BoundedEvidenceMessages,
 		}, nil); err != nil {
 			return err

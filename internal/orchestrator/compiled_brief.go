@@ -14,23 +14,23 @@ import (
 )
 
 type CompiledBriefSummary struct {
-	BriefID                common.BriefID `json:"brief_id"`
-	IntentID               common.IntentID `json:"intent_id"`
-	Posture                brief.Posture `json:"posture"`
-	Objective              string `json:"objective,omitempty"`
-	RequestedOutcome       string `json:"requested_outcome,omitempty"`
-	NormalizedAction       string `json:"normalized_action,omitempty"`
-	ScopeSummary           string `json:"scope_summary,omitempty"`
-	Constraints            []string `json:"constraints,omitempty"`
-	DoneCriteria           []string `json:"done_criteria,omitempty"`
-	AmbiguityFlags         []string `json:"ambiguity_flags,omitempty"`
-	ClarificationQuestions []string `json:"clarification_questions,omitempty"`
-	RequiresClarification  bool `json:"requires_clarification"`
-	WorkerFraming          string `json:"worker_framing,omitempty"`
-	BoundedEvidenceMessages int `json:"bounded_evidence_messages"`
-	CreatedAt              time.Time `json:"created_at,omitempty"`
-	Digest                 string `json:"digest,omitempty"`
-	Advisory               string `json:"advisory,omitempty"`
+	BriefID                 common.BriefID  `json:"brief_id"`
+	IntentID                common.IntentID `json:"intent_id"`
+	Posture                 brief.Posture   `json:"posture"`
+	Objective               string          `json:"objective,omitempty"`
+	RequestedOutcome        string          `json:"requested_outcome,omitempty"`
+	NormalizedAction        string          `json:"normalized_action,omitempty"`
+	ScopeSummary            string          `json:"scope_summary,omitempty"`
+	Constraints             []string        `json:"constraints,omitempty"`
+	DoneCriteria            []string        `json:"done_criteria,omitempty"`
+	AmbiguityFlags          []string        `json:"ambiguity_flags,omitempty"`
+	ClarificationQuestions  []string        `json:"clarification_questions,omitempty"`
+	RequiresClarification   bool            `json:"requires_clarification"`
+	WorkerFraming           string          `json:"worker_framing,omitempty"`
+	BoundedEvidenceMessages int             `json:"bounded_evidence_messages"`
+	CreatedAt               time.Time       `json:"created_at,omitempty"`
+	Digest                  string          `json:"digest,omitempty"`
+	Advisory                string          `json:"advisory,omitempty"`
 }
 
 type ReadGeneratedBriefRequest struct {
@@ -38,11 +38,11 @@ type ReadGeneratedBriefRequest struct {
 }
 
 type ReadGeneratedBriefResult struct {
-	TaskID          common.TaskID
-	CurrentBriefID  common.BriefID
-	Bounded         bool
-	Brief           *brief.ExecutionBrief
-	CompiledBrief   *CompiledBriefSummary
+	TaskID         common.TaskID
+	CurrentBriefID common.BriefID
+	Bounded        bool
+	Brief          *brief.ExecutionBrief
+	CompiledBrief  *CompiledBriefSummary
 }
 
 func (c *Coordinator) ReadGeneratedBrief(ctx context.Context, req ReadGeneratedBriefRequest) (ReadGeneratedBriefResult, error) {

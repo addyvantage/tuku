@@ -92,18 +92,18 @@ type CompiledIntentSummary struct {
 }
 
 type BriefSummary struct {
-	ID                     string
-	Posture                string
-	Objective              string
-	RequestedOutcome       string
-	NormalizedAction       string
-	ScopeSummary           string
-	Constraints            []string
-	DoneCriteria           []string
-	AmbiguityFlags         []string
-	ClarificationQuestions []string
-	RequiresClarification  bool
-	WorkerFraming          string
+	ID                      string
+	Posture                 string
+	Objective               string
+	RequestedOutcome        string
+	NormalizedAction        string
+	ScopeSummary            string
+	Constraints             []string
+	DoneCriteria            []string
+	AmbiguityFlags          []string
+	ClarificationQuestions  []string
+	RequiresClarification   bool
+	WorkerFraming           string
 	BoundedEvidenceMessages int
 }
 

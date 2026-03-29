@@ -174,18 +174,18 @@ func snapshotFromIPC(raw ipc.TaskShellSnapshotResponse) Snapshot {
 	}
 	if raw.Brief != nil {
 		out.Brief = &BriefSummary{
-			ID:                     string(raw.Brief.BriefID),
-			Posture:                raw.Brief.Posture,
-			Objective:              raw.Brief.Objective,
-			RequestedOutcome:       raw.Brief.RequestedOutcome,
-			NormalizedAction:       raw.Brief.NormalizedAction,
-			ScopeSummary:           raw.Brief.ScopeSummary,
-			Constraints:            append([]string{}, raw.Brief.Constraints...),
-			DoneCriteria:           append([]string{}, raw.Brief.DoneCriteria...),
-			AmbiguityFlags:         append([]string{}, raw.Brief.AmbiguityFlags...),
-			ClarificationQuestions: append([]string{}, raw.Brief.ClarificationQuestions...),
-			RequiresClarification:  raw.Brief.RequiresClarification,
-			WorkerFraming:          raw.Brief.WorkerFraming,
+			ID:                      string(raw.Brief.BriefID),
+			Posture:                 raw.Brief.Posture,
+			Objective:               raw.Brief.Objective,
+			RequestedOutcome:        raw.Brief.RequestedOutcome,
+			NormalizedAction:        raw.Brief.NormalizedAction,
+			ScopeSummary:            raw.Brief.ScopeSummary,
+			Constraints:             append([]string{}, raw.Brief.Constraints...),
+			DoneCriteria:            append([]string{}, raw.Brief.DoneCriteria...),
+			AmbiguityFlags:          append([]string{}, raw.Brief.AmbiguityFlags...),
+			ClarificationQuestions:  append([]string{}, raw.Brief.ClarificationQuestions...),
+			RequiresClarification:   raw.Brief.RequiresClarification,
+			WorkerFraming:           raw.Brief.WorkerFraming,
 			BoundedEvidenceMessages: raw.Brief.BoundedEvidenceMessages,
 		}
 	}

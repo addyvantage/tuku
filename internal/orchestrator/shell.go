@@ -72,18 +72,18 @@ type ShellSnapshotResult struct {
 }
 
 type ShellBriefSummary struct {
-	BriefID                common.BriefID
-	Posture                brief.Posture
-	Objective              string
-	RequestedOutcome       string
-	NormalizedAction       string
-	ScopeSummary           string
-	Constraints            []string
-	DoneCriteria           []string
-	AmbiguityFlags         []string
-	ClarificationQuestions []string
-	RequiresClarification  bool
-	WorkerFraming          string
+	BriefID                 common.BriefID
+	Posture                 brief.Posture
+	Objective               string
+	RequestedOutcome        string
+	NormalizedAction        string
+	ScopeSummary            string
+	Constraints             []string
+	DoneCriteria            []string
+	AmbiguityFlags          []string
+	ClarificationQuestions  []string
+	RequiresClarification   bool
+	WorkerFraming           string
 	BoundedEvidenceMessages int
 }
 
@@ -361,18 +361,18 @@ func (c *Coordinator) ShellSnapshotTask(ctx context.Context, taskID string) (She
 		return ShellSnapshotResult{}, err
 	} else if ok {
 		result.Brief = &ShellBriefSummary{
-			BriefID:                b.BriefID,
-			Posture:                b.Posture,
-			Objective:              b.Objective,
-			RequestedOutcome:       b.RequestedOutcome,
-			NormalizedAction:       b.NormalizedAction,
-			ScopeSummary:           b.ScopeSummary,
-			Constraints:            append([]string{}, b.Constraints...),
-			DoneCriteria:           append([]string{}, b.DoneCriteria...),
-			AmbiguityFlags:         append([]string{}, b.AmbiguityFlags...),
-			ClarificationQuestions: append([]string{}, b.ClarificationQuestions...),
-			RequiresClarification:  b.RequiresClarification,
-			WorkerFraming:          b.WorkerFraming,
+			BriefID:                 b.BriefID,
+			Posture:                 b.Posture,
+			Objective:               b.Objective,
+			RequestedOutcome:        b.RequestedOutcome,
+			NormalizedAction:        b.NormalizedAction,
+			ScopeSummary:            b.ScopeSummary,
+			Constraints:             append([]string{}, b.Constraints...),
+			DoneCriteria:            append([]string{}, b.DoneCriteria...),
+			AmbiguityFlags:          append([]string{}, b.AmbiguityFlags...),
+			ClarificationQuestions:  append([]string{}, b.ClarificationQuestions...),
+			RequiresClarification:   b.RequiresClarification,
+			WorkerFraming:           b.WorkerFraming,
 			BoundedEvidenceMessages: b.BoundedEvidenceMessages,
 		}
 	}

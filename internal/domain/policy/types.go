@@ -18,7 +18,7 @@ const (
 type DecisionStatus string
 
 const (
-	DecisionPending DecisionStatus = "PENDING"
+	DecisionPending  DecisionStatus = "PENDING"
 	DecisionApproved DecisionStatus = "APPROVED"
 	DecisionRejected DecisionStatus = "REJECTED"
 )

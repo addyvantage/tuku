@@ -122,11 +122,11 @@ type TaskBriefRequest struct {
 }
 
 type TaskBriefResponse struct {
-	TaskID          common.TaskID              `json:"task_id"`
-	CurrentBriefID  common.BriefID             `json:"current_brief_id,omitempty"`
-	Bounded         bool                       `json:"bounded"`
-	Brief           *brief.ExecutionBrief      `json:"brief,omitempty"`
-	CompiledBrief   *TaskCompiledBriefSummary  `json:"compiled_brief,omitempty"`
+	TaskID         common.TaskID             `json:"task_id"`
+	CurrentBriefID common.BriefID            `json:"current_brief_id,omitempty"`
+	Bounded        bool                      `json:"bounded"`
+	Brief          *brief.ExecutionBrief     `json:"brief,omitempty"`
+	CompiledBrief  *TaskCompiledBriefSummary `json:"compiled_brief,omitempty"`
 }
 
 type TaskRecoveryActionRecord struct {

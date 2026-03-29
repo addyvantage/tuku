@@ -37,14 +37,14 @@ type LaunchHandoffRequest struct {
 }
 
 type LaunchHandoffResult struct {
-	TaskID            common.TaskID
-	HandoffID         string
-	TargetWorker      rundomain.WorkerKind
-	LaunchStatus      HandoffLaunchStatus
-	LaunchID          string
+	TaskID              common.TaskID
+	HandoffID           string
+	TargetWorker        rundomain.WorkerKind
+	LaunchStatus        HandoffLaunchStatus
+	LaunchID            string
 	TransitionReceiptID common.EventID
-	CanonicalResponse string
-	Payload           *handoff.LaunchPayload
+	CanonicalResponse   string
+	Payload             *handoff.LaunchPayload
 }
 
 type preparedHandoffLaunch struct {
@@ -330,14 +330,14 @@ func (c *Coordinator) finalizeHandoffLaunch(ctx context.Context, prepared *prepa
 				return err
 			}
 			result = LaunchHandoffResult{
-				TaskID:            prepared.TaskID,
-				HandoffID:         prepared.Packet.HandoffID,
-				TargetWorker:      target,
-				LaunchStatus:      HandoffLaunchStatusFailed,
-				LaunchID:          launchRec.LaunchID,
+				TaskID:              prepared.TaskID,
+				HandoffID:           prepared.Packet.HandoffID,
+				TargetWorker:        target,
+				LaunchStatus:        HandoffLaunchStatusFailed,
+				LaunchID:            launchRec.LaunchID,
 				TransitionReceiptID: transitionReceipt.ReceiptID,
-				CanonicalResponse: canonical,
-				Payload:           &prepared.Payload,
+				CanonicalResponse:   canonical,
+				Payload:             &prepared.Payload,
 			}
 			return nil
 		}
@@ -441,14 +441,14 @@ func (c *Coordinator) finalizeHandoffLaunch(ctx context.Context, prepared *prepa
 			return err
 		}
 		result = LaunchHandoffResult{
-			TaskID:            prepared.TaskID,
-			HandoffID:         prepared.Packet.HandoffID,
-			TargetWorker:      target,
-			LaunchStatus:      HandoffLaunchStatusCompleted,
-			LaunchID:          launchRec.LaunchID,
+			TaskID:              prepared.TaskID,
+			HandoffID:           prepared.Packet.HandoffID,
+			TargetWorker:        target,
+			LaunchStatus:        HandoffLaunchStatusCompleted,
+			LaunchID:            launchRec.LaunchID,
 			TransitionReceiptID: transitionReceipt.ReceiptID,
-			CanonicalResponse: canonical,
-			Payload:           &prepared.Payload,
+			CanonicalResponse:   canonical,
+			Payload:             &prepared.Payload,
 		}
 		return nil
 	})

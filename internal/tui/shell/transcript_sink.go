@@ -79,4 +79,3 @@ func (s *IPCTranscriptSink) Append(taskID string, sessionID string, chunks []Tra
 	})
 	return err
 }
-

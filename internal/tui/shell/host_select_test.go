@@ -24,10 +24,10 @@ func (h failingHost) Status() HostStatus {
 	}
 	return h.status
 }
-func (h failingHost) Title() string                             { return "failing" }
-func (h failingHost) WorkerLabel() string                       { return "" }
-func (h failingHost) Lines(_ int, _ int) []string               { return nil }
-func (h failingHost) ActivityLines(_ int) []string              { return nil }
+func (h failingHost) Title() string                { return "failing" }
+func (h failingHost) WorkerLabel() string          { return "" }
+func (h failingHost) Lines(_ int, _ int) []string  { return nil }
+func (h failingHost) ActivityLines(_ int) []string { return nil }
 
 func TestStartPreferredHostFallsBackToTranscript(t *testing.T) {
 	fallback := NewTranscriptHost()

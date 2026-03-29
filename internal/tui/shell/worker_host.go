@@ -8,9 +8,9 @@ import (
 )
 
 type TranscriptHost struct {
-	snapshot Snapshot
-	status   HostStatus
-	activity []string
+	snapshot          Snapshot
+	status            HostStatus
+	activity          []string
 	transcriptPending []TranscriptEvidenceChunk
 }
 
