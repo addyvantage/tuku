@@ -118,6 +118,7 @@ go test ./...
 - Security reporting: see [SECURITY.md](SECURITY.md)
 - Community standards: see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 - License: [MIT](LICENSE)
+- Release process checklist: [docs/release-checklist.md](docs/release-checklist.md)
 
 ## Repository Layout
 - `cmd/tuku`: CLI
