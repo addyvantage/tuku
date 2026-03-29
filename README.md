@@ -1,257 +1,124 @@
 # Tuku
 
-Tuku is a local-first orchestration brain for coding work.
+Tuku is a local-first orchestration and continuity control plane for coding-agent execution.
 
-## Current Manual-Test Scope
-This repository currently supports a runnable local flow for:
-- `task.start`
-- `task.message`
-- `task.shell.snapshot`
-- `task.run`
-- `task.status`
-- `task.inspect`
-- `task.checkpoint`
-- `task.continue`
-- `task.handoff.create`
-- `task.handoff.accept`
-- `task.handoff.launch`
-- `tuku`
-- `tuku chat`
-- `tuku shell --task <TASK_ID>`
+Tuku owns canonical task state, continuity state, and canonical responses. Worker output is treated as bounded evidence, not final truth.
 
-Tuku remains the canonical response owner:
-- worker output is captured as evidence
-- Tuku emits the final canonical user-facing response
+## Product Contract
+- Canonical response owner: Tuku synthesizes operator-facing truth.
+- Worker adapters are bounded executors (`codex`, `claude` handoff path).
+- Evidence over claims: transcripts, follow-up receipts, closure/risk posture are advisory and bounded.
+- No hidden policy engine: advisory posture does not silently become hard authority.
 
-## Prerequisites
-- macOS (current focus)
-- Go toolchain installed and on `PATH`
-- `codex` executable installed and on `PATH` for the live PTY shell path
-  - Optional override: `TUKU_SHELL_CODEX_BIN=/absolute/path/to/codex`
-  - Optional args: `TUKU_SHELL_CODEX_ARGS="..."`
-- `claude` executable installed and on `PATH` for real handoff launch tests
-  - Optional override: `TUKU_CLAUDE_BIN=/absolute/path/to/claude`
-  - Optional args: `TUKU_CLAUDE_ARGS="--your --flags"`
-  - Optional timeout: `TUKU_CLAUDE_TIMEOUT_SEC=90`
+## Current Capability Surface
+
+### Core task control
+- Durable task/capsule/intent/brief/checkpoint/run/proof state in SQLite.
+- CLI + daemon over Unix socket IPC.
+- `start`, `message`, `run`, `checkpoint`, `continue`, `next`, `status`, `inspect`.
+
+### Continuity + handoff control plane
+- Handoff lifecycle: create, accept, launch, follow-through, resolution.
+- Recovery actions and operator-step projections.
+- Active branch ownership and continuity/recovery posture projections.
+
+### Evidence and transcript posture
+- Durable shell session registry.
+- Bounded transcript read/review/review-history surfaces.
+- Review gap acknowledgments and transition receipts.
+
+### Incident intelligence
+- Incident triage + follow-up progression (`RECORDED_PENDING`, `PROGRESSED`, `CLOSED`, `REOPENED`).
+- Closure intelligence (bounded, conservative classes).
+- Cross-incident task risk derivation (`incident risk`).
+
+### Intent + brief front-end of execution
+- Compiled Intent v1: bounded deterministic extraction of objective/scope/constraints/done-criteria/ambiguity/readiness.
+- Brief Generation v2: compiled-intent-driven brief posture and worker framing with explicit clarification-needed state.
+
+### Operator human-mode parity
+- Human-mode summaries across major commands (`--human`) with consistent digest/window/detail ordering.
+
+## Requirements
+- Go 1.22+
+- macOS/Linux shell environment
+- Optional local workers on `PATH`:
+  - `codex` for live local execution shell
+  - `claude` for handoff launch path
 
 ## Build
 ```bash
-cd /Users/kagaya/Desktop/Tuku
 go build ./cmd/tuku ./cmd/tukud
 ```
 
-## Start Local Daemon
-Run in one terminal:
+## Run
+
+### 1) Start daemon
 ```bash
-cd /Users/kagaya/Desktop/Tuku
 go run ./cmd/tukud
 ```
 
-This manual daemon path remains useful for debugging and development. The primary `tuku` / `tuku chat` entry now tries to start the local daemon automatically when it is not already running.
+Default local runtime paths:
+- DB: `~/Library/Application Support/Tuku/tuku.db`
+- Socket: `~/Library/Application Support/Tuku/run/tukud.sock`
 
-Default local paths:
-- SQLite DB: `~/Library/Application Support/Tuku/tuku.db`
-- Unix socket: `~/Library/Application Support/Tuku/run/tukud.sock`
-
-## CLI Help
+### 2) CLI help
 ```bash
-cd /Users/kagaya/Desktop/Tuku
 go run ./cmd/tuku help
 ```
 
-## Primary Entry
-The main entry surface now resolves the current git repo automatically:
-- it tries the local daemon first and starts it automatically in the common "not running yet" case
-- it finds the current repo root from `cwd`
-- it reuses the most recent matching task for that repo, preferring an `ACTIVE` task
-- if no matching task exists, it creates a new task with a minimal continuation goal
-- if that repo-backed task is newly created and a local scratch session exists for the same directory, Tuku surfaces those local notes in the initial shell as adoptable intake context without importing them automatically
-- those surfaced local notes can be staged into a shell-local draft, edited locally inside the shell, and only become canonical after an explicit send
-- it then opens the existing full-screen shell flow
-- if no git repo is detected, it opens a simple local scratch and intake prompt without inventing repo-backed continuity
-- local scratch notes entered there are persisted only on this machine and reopen when you return to the same non-repo directory
+## Common command flow
 
-Run it with:
 ```bash
-cd /Users/kagaya/Desktop/Tuku
-go run ./cmd/tuku
-go run ./cmd/tuku chat
-```
+# start task
+go run ./cmd/tuku start --goal "Implement bounded feature" --repo .
 
-Optional worker preference:
-```bash
-go run ./cmd/tuku --worker auto
-go run ./cmd/tuku --worker codex
-go run ./cmd/tuku --worker claude
-go run ./cmd/tuku chat --worker auto
-go run ./cmd/tuku chat --worker codex
-go run ./cmd/tuku chat --worker claude
-```
+# compile intent + generate brief
+go run ./cmd/tuku message --task <TASK_ID> --text "Implement X with Y constraints"
 
-If the current directory is not inside a git repository, Tuku now opens a deliberate local scratch and intake prompt and says so directly instead of inventing task continuity. That no-repo mode is intentionally simpler than the repo-backed shell: normal terminal input, obvious `/help`, `/list`, and `/quit` commands, and one-line local scratch note capture. Scratch notes from that mode are stored locally under `~/Library/Application Support/Tuku/scratch/` and are not part of daemon-backed task state. When you later create the first repo-backed task in the same directory, Tuku can surface those notes as local intake context, stage them into a shell-local draft, edit that draft locally inside the shell, and then explicitly adopt them only when you send that draft through `task.message`. If the daemon cannot be started automatically for the repo-backed path, Tuku returns a direct local-daemon startup error instead of pretending the shell can continue.
+# read operator summaries
+go run ./cmd/tuku status --task <TASK_ID> --human
+go run ./cmd/tuku inspect --task <TASK_ID> --human
 
-## Terminal Shell
-Tuku now includes a worker-native terminal shell:
-- the center pane stays worker-first
-- Tuku chrome only adds continuity, handoff, and proof context around it
-- the default shell now opens with calmer secondary chrome: the worker pane stays dominant and inspector/activity can be toggled in as needed
-- current shell can host either a real Codex PTY session or a real Claude PTY session
-- the live host now tracks explicit shell-local lifecycle state: starting, live, exited, failed, fallback, transcript-only
-- the worker pane now labels live sessions as live input and transcript modes as read-only so fallback state is obvious at a glance
-- each shell run gets a shell-local session id and compact in-memory session journal
-- the daemon now owns a narrow durable shell-session registry with compact metadata only
-- shell-session reads now classify sessions as attachable, active-unattachable, stale, or ended
-- live PTY-backed shells now report a durable worker-session id and narrow attach capability metadata for future reattach groundwork
-- major shell lifecycle milestones are bridged into persisted proof: host started, host exited, transcript fallback activated
-- terminal resize is propagated into the live worker pane when the PTY host is active
-- if PTY startup fails or the live worker exits, the shell falls back to the persisted transcript view and keeps the shell usable
-- if you open the shell again later, the new shell session surfaces both the latest persisted shell outcome and any other known shell sessions for the task, including stale-session uncertainty
+go run ./cmd/tuku intent --task <TASK_ID>
+go run ./cmd/tuku brief --task <TASK_ID> --human
 
-Run it with:
-```bash
-go run ./cmd/tuku shell --task <TASK_ID>
-```
-
-Optional worker preference:
-```bash
-go run ./cmd/tuku shell --task <TASK_ID> --worker auto
-go run ./cmd/tuku shell --task <TASK_ID> --worker codex
-go run ./cmd/tuku shell --task <TASK_ID> --worker claude
-```
-
-Inspect daemon-known shell sessions for a task:
-```bash
-go run ./cmd/tuku shell-sessions --task <TASK_ID>
-```
-The output includes `worker_session_id`, `attach_capability`, and `session_class` with `attachable`, `active_unattachable`, `stale`, or `ended`.
-
-Key controls:
-- when the worker pane is live and focused:
-  - normal typing goes to the worker session
-  - use `Ctrl-G` then the next key for shell commands
-- shell commands:
-  - `q` quit
-  - `i` toggle inspector
-  - `p` toggle activity strip
-  - `r` refresh state
-  - `s` toggle compact status overlay
-  - `h` toggle help
-  - `a` stage a shell-local draft from surfaced local scratch
-  - `e` edit the staged shell-local draft in the worker pane
-  - `m` send the current draft through Tuku
-  - `x` clear the staged shell-local draft
-  - while editing the staged draft:
-    - normal typing edits the shell-local draft instead of the worker session
-    - `Ctrl-G` then `s` saves the edited draft and exits edit mode
-    - `Ctrl-G` then `c` cancels edit mode and restores the last saved draft
-  - `tab` cycle focus
-
-Optional shell host environment:
-- `TUKU_SHELL_CODEX_BIN=/absolute/path/to/codex`
-- `TUKU_SHELL_CODEX_ARGS="..."` to append extra Codex args
-- `TUKU_SHELL_CLAUDE_BIN=/absolute/path/to/claude`
-- `TUKU_SHELL_CLAUDE_ARGS="..."` to append extra Claude args
-- shell Claude host also falls back to `TUKU_CLAUDE_BIN` and `TUKU_CLAUDE_ARGS` if the shell-specific vars are not set
-
-## Manual Smoke Test (End-to-End)
-Run these in a second terminal while daemon is running.
-
-1) Start a task:
-```bash
-go run ./cmd/tuku start --goal "Implement manual smoke path" --repo /Users/kagaya/Desktop/Tuku
-```
-Copy `task_id` from output.
-
-2) Send message (intent + brief generation):
-```bash
-go run ./cmd/tuku message --task <TASK_ID> --text "Start implementation and prepare handoff packet."
-```
-
-3) Exercise run lifecycle in safe local mode (`noop`):
-```bash
+# run lifecycle
 go run ./cmd/tuku run --task <TASK_ID> --mode noop --action start
-```
-Copy `run_id`, then complete:
-```bash
-go run ./cmd/tuku run --task <TASK_ID> --action complete --run-id <RUN_ID>
-```
+go run ./cmd/tuku checkpoint --task <TASK_ID> --human
+go run ./cmd/tuku continue --task <TASK_ID> --human
 
-4) Create checkpoint:
-```bash
-go run ./cmd/tuku checkpoint --task <TASK_ID>
-```
+# continuity incident surfaces
+go run ./cmd/tuku incident --task <TASK_ID>
+go run ./cmd/tuku incident triage --task <TASK_ID> --posture triaged --summary "bounded triage"
+go run ./cmd/tuku incident followup --task <TASK_ID> --action progressed --summary "bounded follow-up"
+go run ./cmd/tuku incident closure --task <TASK_ID>
+go run ./cmd/tuku incident risk --task <TASK_ID>
 
-5) Continue assessment:
-```bash
-go run ./cmd/tuku continue --task <TASK_ID>
-```
-
-6) Create handoff packet (Claude target):
-```bash
-go run ./cmd/tuku handoff-create --task <TASK_ID> --target claude --mode resume --reason "manual smoke handoff"
-```
-Copy `handoff_id` from output.
-
-7) Accept handoff (optional but useful for audit trail):
-```bash
-go run ./cmd/tuku handoff-accept --task <TASK_ID> --handoff <HANDOFF_ID> --by claude --note "manual acceptance"
-```
-
-8) Launch handoff:
-```bash
-go run ./cmd/tuku handoff-launch --task <TASK_ID> --handoff <HANDOFF_ID>
-```
-
-9) Inspect full state:
-```bash
-go run ./cmd/tuku inspect --task <TASK_ID>
-```
-
-10) Open the full-screen shell:
-```bash
+# shell + transcripts
 go run ./cmd/tuku shell --task <TASK_ID>
+go run ./cmd/tuku shell-sessions --task <TASK_ID> --human
+go run ./cmd/tuku shell transcript --task <TASK_ID> --session <SESSION_ID>
 ```
 
-11) Read status summary:
+## Scope and Non-Goals (v1)
+- Local-first runtime and CLI/daemon foundations.
+- No cloud dependency for core runtime.
+- No broad web UI.
+- No multi-agent role orchestration.
+- No automation connector layer.
+
+## Testing
 ```bash
-go run ./cmd/tuku status --task <TASK_ID>
+go test ./...
 ```
 
-12) Optional: inspect proof ledger directly from SQLite:
-```bash
-sqlite3 "$HOME/Library/Application Support/Tuku/tuku.db" \
-  "SELECT sequence_no,type,run_id,substr(payload_json,1,140) FROM proof_events WHERE task_id='<TASK_ID>' ORDER BY sequence_no DESC LIMIT 20;"
-```
-
-## Expected Smoke Signals
-- `handoff-launch` response is canonical and explicitly avoids claiming downstream completion.
-- `tuku shell` opens a full-screen interface with:
-  - top status bar
-  - worker-first pane that attempts the selected live worker PTY session first
-  - toggleable right inspector
-  - toggleable activity/proof strip
-- shell chrome shows a session id for the current shell run
-- if a prior shell ended or fell back, the next shell run surfaces that prior persisted outcome in secondary chrome
-- if another attachable shell session is already known for the same task, the shell surfaces that in calm secondary chrome instead of pretending this session is alone
-- if another active but non-attachable shell session is known, the shell says so without implying reconnect support
-- if the daemon only knows a stale shell session, the shell says so as uncertain liveness rather than presenting it as active
-- if PTY startup fails, the footer shows fallback context and the center pane falls back to transcript mode
-- `inspect` includes:
-  - latest intent/brief/run/checkpoint
-- `handoff-create` response includes the durable handoff packet.
-- `handoff-launch` response includes the launch payload and canonical launch outcome.
-- proof ledger includes handoff launch and acknowledgment events.
-
-## Current Milestone Limitations
-- The shell is terminal-native, not a separate dashboard app.
-- Live worker PTY support currently covers Codex and Claude only.
-- The PTY host is pragmatic, not a full terminal emulator.
-- ANSI/control-sequence handling is intentionally lightweight.
-- Claude PTY support shares the same shell chrome and lifecycle model, but no reattach or reconnect path exists yet.
-- Shell session registry metadata now survives daemon restarts via SQLite-backed durable storage.
-- Stale-session classification is threshold-based only; there is no background reconciler yet.
-- Only major shell lifecycle milestones are persisted into proof; raw PTY output and shell input are not.
-- No background reconciliation services.
-- No multi-agent orchestration.
-- No full Claude session lifecycle tracking after launch invocation.
-- Launch success means launch invocation completed, not downstream coding completion.
+## Repository Layout
+- `cmd/tuku`: CLI
+- `cmd/tukud`: daemon
+- `internal/orchestrator`: centralized derivations and orchestration
+- `internal/runtime/daemon`: IPC route handling
+- `internal/ipc`: request/response payload contracts
+- `internal/storage/sqlite`: durable local persistence
+- `internal/tui/shell`: shell/TUI operator surfaces
+- `docs/architecture`: architecture notes

@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build artifacts
+/bin/
+/dist/
+/build/
+coverage.out
+*.test
+*.out
+
+# Local runtime artifacts
+*.log
+*.pid
+*.sock
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Go workspace noise
+go.work
+go.work.sum
