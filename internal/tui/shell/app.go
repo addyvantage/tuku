@@ -944,7 +944,7 @@ func flushTranscriptEvidence(taskID string, sessionID string, host WorkerHost, s
 
 func enterTerminalMode(stdin *os.File, stdout *os.File) (func(), error) {
 	fd := int(stdin.Fd())
-	termios, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
+	termios, err := ioctlGetTermios(fd)
 	if err != nil {
 		return nil, fmt.Errorf("read terminal attrs: %w", err)
 	}
@@ -956,14 +956,14 @@ func enterTerminalMode(stdin *os.File, stdout *os.File) (func(), error) {
 	raw.Cflag |= unix.CS8
 	raw.Cc[unix.VMIN] = 1
 	raw.Cc[unix.VTIME] = 0
-	if err := unix.IoctlSetTermios(fd, unix.TIOCSETA, &raw); err != nil {
+	if err := ioctlSetTermios(fd, &raw); err != nil {
 		return nil, fmt.Errorf("set raw terminal attrs: %w", err)
 	}
 	if _, err := io.WriteString(stdout, "\x1b[?1049h\x1b[?25l"); err != nil {
 		return nil, err
 	}
 	return func() {
-		_ = unix.IoctlSetTermios(fd, unix.TIOCSETA, termios)
+		_ = ioctlSetTermios(fd, termios)
 		_, _ = io.WriteString(stdout, "\x1b[?25h\x1b[?1049l")
 	}, nil
 }
