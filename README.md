@@ -113,6 +113,12 @@ go run ./cmd/tuku shell transcript --task <TASK_ID> --session <SESSION_ID>
 go test ./...
 ```
 
+## Project Governance
+- Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md)
+- Security reporting: see [SECURITY.md](SECURITY.md)
+- Community standards: see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- License: [MIT](LICENSE)
+
 ## Repository Layout
 - `cmd/tuku`: CLI
 - `cmd/tukud`: daemon
