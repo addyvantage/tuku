@@ -3,6 +3,7 @@ package shell
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/creack/pty"
 )
@@ -23,6 +25,7 @@ type CodexPTYHost struct {
 	binPath         string
 	extraArgs       []string
 	resumeSessionID string
+	mode            string
 
 	mu                sync.Mutex
 	snapshot          Snapshot
@@ -32,15 +35,24 @@ type CodexPTYHost struct {
 	partial           string
 	parserState       terminalParserState
 	status            HostStatus
+	inputBuffer       string
+	execRunning       bool
+	execThreadID      string
+	execCancel        context.CancelFunc
 
 	ptyFile *os.File
 	cmd     *exec.Cmd
 }
 
 func NewDefaultCodexPTYHost() *CodexPTYHost {
+	mode := strings.TrimSpace(strings.ToLower(os.Getenv("TUKU_SHELL_CODEX_MODE")))
+	if mode == "" {
+		mode = "exec"
+	}
 	return &CodexPTYHost{
 		binPath:   strings.TrimSpace(os.Getenv("TUKU_SHELL_CODEX_BIN")),
 		extraArgs: strings.Fields(os.Getenv("TUKU_SHELL_CODEX_ARGS")),
+		mode:      mode,
 		status: HostStatus{
 			Mode:                  HostModeCodexPTY,
 			State:                 HostStateStarting,
@@ -69,6 +81,9 @@ func (h *CodexPTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 			return fmt.Errorf("codex binary not found: %w", err)
 		}
 		codexBin = path
+	}
+	if h.useExecMode() {
+		return h.startExecMode(snapshot)
 	}
 
 	h.setStatus(HostStateStarting, "starting codex PTY host", nil, false)
@@ -127,6 +142,27 @@ func (h *CodexPTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 }
 
 func (h *CodexPTYHost) Stop() error {
+	if h.useExecMode() {
+		h.mu.Lock()
+		cancel := h.execCancel
+		cmd := h.cmd
+		h.execCancel = nil
+		h.execRunning = false
+		h.status.InputLive = false
+		h.status.State = HostStateExited
+		h.status.Label = "codex exited"
+		h.status.Note = "codex host stopped"
+		h.status.StateChangedAt = time.Now().UTC()
+		h.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		if cmd != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		return nil
+	}
+
 	h.mu.Lock()
 	ptmx := h.ptyFile
 	cmd := h.cmd
@@ -162,6 +198,14 @@ func (h *CodexPTYHost) Resize(width int, height int) bool {
 		return false
 	}
 
+	if h.useExecMode() {
+		h.mu.Lock()
+		h.status.Width = width
+		h.status.Height = height
+		h.mu.Unlock()
+		return false
+	}
+
 	h.mu.Lock()
 	h.status.Width = width
 	h.status.Height = height
@@ -184,12 +228,22 @@ func (h *CodexPTYHost) Resize(width int, height int) bool {
 }
 
 func (h *CodexPTYHost) CanAcceptInput() bool {
+	if h.useExecMode() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.status.State == HostStateLive && h.status.InputLive && !h.execRunning
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.status.State == HostStateLive && h.ptyFile != nil && h.status.InputLive
 }
 
 func (h *CodexPTYHost) WriteInput(data []byte) bool {
+	if h.useExecMode() {
+		return h.writeInputExec(data)
+	}
+
 	h.mu.Lock()
 	ptmx := h.ptyFile
 	live := h.status.State == HostStateLive && h.status.InputLive
@@ -361,6 +415,314 @@ func (h *CodexPTYHost) wait() {
 	h.status.Note = fmt.Sprintf("codex exited cleanly with code %d", exitCode)
 	h.mu.Unlock()
 	h.recordActivity(fmt.Sprintf("worker host exited cleanly with code %d", exitCode))
+}
+
+func (h *CodexPTYHost) useExecMode() bool {
+	mode := strings.TrimSpace(strings.ToLower(h.mode))
+	return mode != "pty"
+}
+
+func (h *CodexPTYHost) startExecMode(snapshot Snapshot) error {
+	h.mu.Lock()
+	h.lines = nil
+	h.activity = nil
+	h.transcriptPending = nil
+	h.partial = ""
+	h.parserState = terminalParserState{}
+	h.inputBuffer = ""
+	h.execRunning = false
+	h.execCancel = nil
+	h.cmd = nil
+	h.ptyFile = nil
+	h.status.Mode = HostModeCodexPTY
+	h.status.State = HostStateLive
+	h.status.Label = "codex live"
+	h.status.Note = "codex exec mode"
+	h.status.WorkerSessionID = strings.TrimSpace(h.resumeSessionID)
+	if h.status.WorkerSessionID != "" {
+		h.status.WorkerSessionIDSource = WorkerSessionIDSourceAuthoritative
+		h.execThreadID = h.status.WorkerSessionID
+	} else {
+		h.status.WorkerSessionIDSource = WorkerSessionIDSourceNone
+		h.execThreadID = ""
+	}
+	h.status.InputLive = true
+	h.status.ExitCode = nil
+	h.status.LastOutputAt = time.Time{}
+	h.status.StateChangedAt = time.Now().UTC()
+	h.mu.Unlock()
+
+	h.recordActivity("worker host started: codex exec session is live")
+	return nil
+}
+
+func (h *CodexPTYHost) writeInputExec(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+
+	var prompt string
+
+	h.mu.Lock()
+	live := h.status.State == HostStateLive && h.status.InputLive && !h.execRunning
+	if !live {
+		h.mu.Unlock()
+		return false
+	}
+	for _, b := range data {
+		switch b {
+		case '\r', '\n':
+			prompt = strings.TrimSpace(h.inputBuffer)
+			h.inputBuffer = ""
+			if prompt != "" {
+				h.execRunning = true
+				h.status.InputLive = true
+				h.status.Note = "running codex prompt"
+				h.status.StateChangedAt = time.Now().UTC()
+			}
+		case 0x7f, 0x08:
+			if h.inputBuffer != "" {
+				_, size := utf8.DecodeLastRuneInString(h.inputBuffer)
+				if size <= 0 {
+					h.inputBuffer = ""
+				} else {
+					h.inputBuffer = h.inputBuffer[:len(h.inputBuffer)-size]
+				}
+			}
+		default:
+			if b >= 32 && b < 127 {
+				h.inputBuffer += string(b)
+			}
+		}
+		if prompt != "" {
+			break
+		}
+	}
+	h.mu.Unlock()
+
+	if prompt == "" {
+		return true
+	}
+
+	h.recordActivity("codex prompt submitted")
+	h.appendExecOutputLine("tuku> " + prompt)
+	go h.runExecPrompt(prompt)
+	return true
+}
+
+type codexExecEvent struct {
+	Type     string `json:"type"`
+	ThreadID string `json:"thread_id"`
+	Item     struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"item"`
+	Usage struct {
+		InputTokens       int `json:"input_tokens"`
+		CachedInputTokens int `json:"cached_input_tokens"`
+		OutputTokens      int `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+func (h *CodexPTYHost) runExecPrompt(prompt string) {
+	h.mu.Lock()
+	snapshot := h.snapshot
+	h.mu.Unlock()
+	repoRoot := strings.TrimSpace(snapshot.Repo.RepoRoot)
+	if repoRoot == "" {
+		h.finishExecPrompt(fmt.Errorf("repo root is required"), false)
+		return
+	}
+
+	codexBin := h.binPath
+	if codexBin == "" {
+		path, err := exec.LookPath("codex")
+		if err != nil {
+			h.finishExecPrompt(fmt.Errorf("codex binary not found: %w", err), false)
+			return
+		}
+		codexBin = path
+	}
+
+	args := h.execArgsForPrompt(prompt)
+	runCtx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(runCtx, codexBin, args...)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		h.finishExecPrompt(fmt.Errorf("codex stdout pipe: %w", err), false)
+		return
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		h.finishExecPrompt(fmt.Errorf("codex stderr pipe: %w", err), false)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		cancel()
+		h.finishExecPrompt(fmt.Errorf("codex exec start: %w", err), false)
+		return
+	}
+
+	h.mu.Lock()
+	h.execCancel = cancel
+	h.cmd = cmd
+	h.mu.Unlock()
+
+	var (
+		wg           sync.WaitGroup
+		outputSeenMu sync.Mutex
+		outputSeen   bool
+	)
+	markOutput := func() {
+		outputSeenMu.Lock()
+		outputSeen = true
+		outputSeenMu.Unlock()
+	}
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			if h.handleExecJSONLine(line) {
+				markOutput()
+				continue
+			}
+			h.recordActivity("codex stdout: " + truncateWithEllipsis(line, 140))
+		}
+		if err := scanner.Err(); err != nil {
+			h.recordActivity("codex stdout read error")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stderr)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			h.recordActivity("codex stderr: " + truncateWithEllipsis(line, 140))
+		}
+		if err := scanner.Err(); err != nil {
+			h.recordActivity("codex stderr read error")
+		}
+	}()
+
+	err = cmd.Wait()
+	wg.Wait()
+
+	outputSeenMu.Lock()
+	sawOutput := outputSeen
+	outputSeenMu.Unlock()
+	if !sawOutput {
+		h.appendExecOutputLine("tuku> Codex returned no visible assistant message.")
+	}
+	h.finishExecPrompt(err, sawOutput)
+}
+
+func (h *CodexPTYHost) execArgsForPrompt(prompt string) []string {
+	args := make([]string, 0, 8)
+	h.mu.Lock()
+	threadID := strings.TrimSpace(h.execThreadID)
+	resumeSessionID := strings.TrimSpace(h.resumeSessionID)
+	h.mu.Unlock()
+	if threadID == "" {
+		threadID = resumeSessionID
+	}
+	if threadID != "" {
+		args = append(args, "exec", "resume", threadID, "--json", prompt)
+		return args
+	}
+	args = append(args, "exec", "--json", prompt)
+	return args
+}
+
+func (h *CodexPTYHost) handleExecJSONLine(line string) bool {
+	var event codexExecEvent
+	if err := json.Unmarshal([]byte(line), &event); err != nil {
+		return false
+	}
+
+	switch strings.TrimSpace(event.Type) {
+	case "thread.started":
+		if threadID := strings.TrimSpace(event.ThreadID); threadID != "" {
+			h.mu.Lock()
+			h.execThreadID = threadID
+			h.status.WorkerSessionID = threadID
+			h.status.WorkerSessionIDSource = WorkerSessionIDSourceAuthoritative
+			h.mu.Unlock()
+		}
+		return false
+	case "item.completed":
+		if strings.EqualFold(strings.TrimSpace(event.Item.Type), "agent_message") {
+			text := strings.TrimSpace(event.Item.Text)
+			if text == "" {
+				return false
+			}
+			for _, part := range strings.Split(text, "\n") {
+				if strings.TrimSpace(part) == "" {
+					continue
+				}
+				h.appendExecOutputLine(part)
+			}
+			return true
+		}
+		return false
+	case "turn.completed":
+		h.recordActivity(fmt.Sprintf("codex turn completed (%d out tokens)", event.Usage.OutputTokens))
+		return false
+	default:
+		return false
+	}
+}
+
+func (h *CodexPTYHost) appendExecOutputLine(line string) {
+	h.mu.Lock()
+	visible := h.appendLineLocked(line)
+	if visible {
+		h.status.LastOutputAt = time.Now().UTC()
+	}
+	h.mu.Unlock()
+}
+
+func (h *CodexPTYHost) finishExecPrompt(execErr error, outputSeen bool) {
+	h.mu.Lock()
+	h.execRunning = false
+	h.execCancel = nil
+	h.cmd = nil
+	h.status.State = HostStateLive
+	h.status.Label = "codex live"
+	h.status.InputLive = true
+	h.status.ExitCode = nil
+	if execErr != nil {
+		h.status.Note = "last codex prompt failed"
+	} else if outputSeen {
+		h.status.Note = "codex response received"
+	} else {
+		h.status.Note = "codex prompt completed"
+	}
+	h.status.StateChangedAt = time.Now().UTC()
+	h.mu.Unlock()
+
+	if execErr != nil {
+		h.recordActivity("codex prompt failed")
+	} else {
+		h.recordActivity("codex prompt completed")
+	}
 }
 
 func (h *CodexPTYHost) appendOutput(chunk []byte) {

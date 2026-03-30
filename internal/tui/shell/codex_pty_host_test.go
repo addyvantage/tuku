@@ -2,6 +2,8 @@ package shell
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -303,5 +305,58 @@ func TestCodexPTYHostExitedStateUsesConciseBodyCopy(t *testing.T) {
 	}
 	if strings.Contains(lines, "is not live") {
 		t.Fatalf("expected exited body to avoid repetitive not-live wording, got %q", lines)
+	}
+}
+
+func TestCodexPTYHostExecModeProcessesPromptAndResponse(t *testing.T) {
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "codex")
+	script := `#!/bin/sh
+printf '{"type":"thread.started","thread_id":"thr_test_123"}\n'
+printf '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"patched runtime"}}\n'
+printf '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":3}}\n'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write codex stub: %v", err)
+	}
+
+	host := NewDefaultCodexPTYHost()
+	host.mode = "exec"
+	host.binPath = bin
+	if err := host.Start(context.Background(), Snapshot{
+		TaskID: "tsk_exec",
+		Repo:   RepoAnchor{RepoRoot: tmp},
+	}); err != nil {
+		t.Fatalf("start exec host: %v", err)
+	}
+
+	for _, b := range []byte("Fix Tuku TUI\n") {
+		if !host.WriteInput([]byte{b}) {
+			t.Fatalf("expected write to be accepted for byte %q", b)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		status := host.Status()
+		if status.InputLive && !host.execRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("exec run did not complete in time: %+v", status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	joined := strings.Join(host.Lines(40, 120), "\n")
+	if !strings.Contains(joined, "patched runtime") {
+		t.Fatalf("expected assistant response in lines, got %q", joined)
+	}
+	status := host.Status()
+	if status.WorkerSessionID != "thr_test_123" {
+		t.Fatalf("expected thread id capture, got %q", status.WorkerSessionID)
+	}
+	if status.LastOutputAt.IsZero() {
+		t.Fatalf("expected output timestamp to be set, got %+v", status)
 	}
 }
