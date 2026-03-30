@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -164,31 +165,31 @@ func TestHandleKeyTogglesShellUI(t *testing.T) {
 		Focus:         FocusWorker,
 	}
 
-	if action := handleShellKey(&ui, 'i'); action != actionNone {
-		t.Fatalf("expected no action on inspector toggle, got %v", action)
+	if action := handleShellKey(&ui, 'i'); action != actionUIUpdate {
+		t.Fatalf("expected ui update on inspector toggle, got %v", action)
 	}
 	if ui.ShowInspector {
 		t.Fatal("expected inspector hidden")
 	}
 
-	if action := handleShellKey(&ui, 'p'); action != actionNone {
-		t.Fatalf("expected no action on proof toggle, got %v", action)
+	if action := handleShellKey(&ui, 'p'); action != actionUIUpdate {
+		t.Fatalf("expected ui update on proof toggle, got %v", action)
 	}
 	if ui.ShowProof {
 		t.Fatal("expected proof hidden")
 	}
 
-	if action := handleShellKey(&ui, '/'); action != actionNone || !ui.ShowCommands {
+	if action := handleShellKey(&ui, '/'); action != actionUIUpdate || !ui.ShowCommands {
 		t.Fatal("expected command palette enabled")
 	}
-	if action := handleShellKey(&ui, '?'); action != actionNone || !ui.ShowHelp || ui.ShowCommands {
+	if action := handleShellKey(&ui, '?'); action != actionUIUpdate || !ui.ShowHelp || ui.ShowCommands {
 		t.Fatal("expected shortcut help enabled and commands cleared")
 	}
 
-	if action := handleShellKey(&ui, 'h'); action != actionNone || ui.ShowHelp {
+	if action := handleShellKey(&ui, 'h'); action != actionUIUpdate || ui.ShowHelp {
 		t.Fatal("expected h to toggle help overlay off when already enabled")
 	}
-	if action := handleShellKey(&ui, 's'); action != actionNone || !ui.ShowStatus || ui.ShowHelp {
+	if action := handleShellKey(&ui, 's'); action != actionUIUpdate || !ui.ShowStatus || ui.ShowHelp {
 		t.Fatal("expected status overlay enabled and help cleared")
 	}
 	if action := handleShellKey(&ui, 'r'); action != actionRefresh {
@@ -218,11 +219,27 @@ func TestRouteKeyOverlayConsumesWorkerInput(t *testing.T) {
 	if len(host.writes) != 0 {
 		t.Fatalf("expected overlay mode to suppress worker writes, got %#v", host.writes)
 	}
-	if action := routeKey(&ui, host, '/'); action != actionNone {
+	if action := routeKey(&ui, host, '/'); action != actionUIUpdate {
 		t.Fatalf("expected overlay toggle to remain local, got %v", action)
 	}
 	if ui.ShowCommands {
 		t.Fatal("expected slash to close command overlay")
+	}
+}
+
+func TestReadKeysFiltersTerminalControlSequences(t *testing.T) {
+	input := bytes.NewBuffer([]byte("ab\x1b[A\x1b]11;?\x07c\x1b[6nd"))
+	out := make(chan byte, 32)
+
+	go readKeys(input, out)
+
+	var got []byte
+	for b := range out {
+		got = append(got, b)
+	}
+
+	if string(got) != "abcd" {
+		t.Fatalf("expected filtered key stream \"abcd\", got %q", string(got))
 	}
 }
 

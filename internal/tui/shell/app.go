@@ -207,12 +207,14 @@ func (a *App) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if shouldQuit, err := handleKeyAction(key, &ui, host, a, &snapshot, primaryActionDoneCh); err != nil {
+			if shouldQuit, renderNow, err := handleKeyAction(key, &ui, host, a, &snapshot, primaryActionDoneCh); err != nil {
 				ui.LastError = err.Error()
+				needsRender = true
 			} else if shouldQuit {
 				return nil
+			} else if renderNow {
+				needsRender = true
 			}
-			needsRender = true
 			draining := true
 			for draining {
 				select {
@@ -220,12 +222,14 @@ func (a *App) Run(ctx context.Context) error {
 					if !ok {
 						return nil
 					}
-					if shouldQuit, err := handleKeyAction(nextKey, &ui, host, a, &snapshot, primaryActionDoneCh); err != nil {
+					if shouldQuit, renderNow, err := handleKeyAction(nextKey, &ui, host, a, &snapshot, primaryActionDoneCh); err != nil {
 						ui.LastError = err.Error()
+						needsRender = true
 					} else if shouldQuit {
 						return nil
+					} else if renderNow {
+						needsRender = true
 					}
-					needsRender = true
 				default:
 					draining = false
 				}
@@ -333,55 +337,57 @@ func handleKeyAction(
 	app *App,
 	snapshot *Snapshot,
 	primaryActionDoneCh chan<- primaryActionExecutionResult,
-) (bool, error) {
+) (bool, bool, error) {
 	if ui == nil || app == nil || snapshot == nil {
-		return false, fmt.Errorf("shell key handling state is unavailable")
+		return false, false, fmt.Errorf("shell key handling state is unavailable")
 	}
 
 	action := routeKey(ui, host, key)
 	switch action {
 	case actionNone:
-		return false, nil
+		return false, false, nil
+	case actionUIUpdate:
+		return false, true, nil
 	case actionQuit:
-		return true, nil
+		return true, false, nil
 	case actionRefresh:
 		if loadErr := reloadShellSnapshot(app.Source, app.TaskID, host, app.RegistrySource, snapshot, ui, true); loadErr != nil {
-			return false, loadErr
+			return false, false, loadErr
 		}
 		ui.LastError = ""
-		return false, nil
+		return false, true, nil
 	case actionStageScratchAdoption:
 		if err := stagePendingTaskMessageFromLocalScratch(ui, *snapshot); err != nil {
-			return false, err
+			return false, false, err
 		}
 		ui.LastError = ""
-		return false, nil
+		return false, true, nil
 	case actionEnterPendingTaskMessageEdit:
 		if err := enterPendingTaskMessageEditMode(ui); err != nil {
-			return false, err
+			return false, false, err
 		}
 		ui.LastError = ""
-		return false, nil
+		return false, true, nil
 	case actionSavePendingTaskMessageEdit:
 		if err := savePendingTaskMessageEditMode(ui); err != nil {
-			return false, err
+			return false, false, err
 		}
 		ui.LastError = ""
-		return false, nil
+		return false, true, nil
 	case actionCancelPendingTaskMessageEdit:
 		if err := cancelPendingTaskMessageEditMode(ui); err != nil {
-			return false, err
+			return false, false, err
 		}
 		ui.LastError = ""
-		return false, nil
+		return false, true, nil
 	case actionSendPendingTaskMessage:
 		if err := sendPendingTaskMessage(app.MessageSender, app.TaskID, ui); err != nil {
-			return false, err
+			return false, false, err
 		}
 		next, loadErr := app.Source.Load(app.TaskID)
 		if loadErr != nil {
 			ui.LastRefresh = time.Now().UTC()
-			return false, fmt.Errorf("task message sent, but shell refresh failed: %w", loadErr)
+			return false, false, fmt.Errorf("task message sent, but shell refresh failed: %w", loadErr)
 		}
 		*snapshot = next
 		if host != nil {
@@ -390,20 +396,20 @@ func handleKeyAction(
 		ui.LastRefresh = time.Now().UTC()
 		ui.LastError = ""
 		if err := loadKnownShellSessions(app.RegistrySource, app.TaskID, &ui.Session); err != nil {
-			return false, fmt.Errorf("shell session registry read failed: %w", err)
+			return false, false, fmt.Errorf("shell session registry read failed: %w", err)
 		}
-		return false, nil
+		return false, true, nil
 	case actionClearPendingTaskMessage:
 		clearPendingTaskMessage(ui)
-		return false, nil
+		return false, true, nil
 	case actionExecutePrimaryOperatorStep:
 		if err := startPrimaryOperatorStepExecution(app.ActionExecutor, app.TaskID, *snapshot, ui, primaryActionDoneCh); err != nil {
-			return false, err
+			return false, false, err
 		}
 		ui.LastError = ""
-		return false, nil
+		return false, true, nil
 	default:
-		return false, nil
+		return false, false, nil
 	}
 }
 
@@ -424,6 +430,7 @@ type keyAction int
 
 const (
 	actionNone keyAction = iota
+	actionUIUpdate
 	actionQuit
 	actionRefresh
 	actionStageScratchAdoption
@@ -444,28 +451,33 @@ func handleShellKey(ui *UIState, key byte) keyAction {
 		ui.ShowCommands = false
 		ui.ShowHelp = false
 		ui.ShowStatus = false
+		return actionUIUpdate
 	case '/':
 		ui.ShowCommands = !ui.ShowCommands
 		if ui.ShowCommands {
 			ui.ShowHelp = false
 			ui.ShowStatus = false
 		}
+		return actionUIUpdate
 	case '?':
 		ui.ShowHelp = !ui.ShowHelp
 		if ui.ShowHelp {
 			ui.ShowCommands = false
 			ui.ShowStatus = false
 		}
+		return actionUIUpdate
 	case 'i', 'I':
 		ui.ShowInspector = !ui.ShowInspector
 		if !ui.ShowInspector && ui.Focus == FocusInspector {
 			ui.Focus = FocusWorker
 		}
+		return actionUIUpdate
 	case 'p', 'P':
 		ui.ShowProof = !ui.ShowProof
 		if !ui.ShowProof && ui.Focus == FocusActivity {
 			ui.Focus = FocusWorker
 		}
+		return actionUIUpdate
 	case 'r', 'R':
 		return actionRefresh
 	case 'a', 'A':
@@ -484,14 +496,17 @@ func handleShellKey(ui *UIState, key byte) keyAction {
 			ui.ShowCommands = false
 			ui.ShowStatus = false
 		}
+		return actionUIUpdate
 	case 's', 'S':
 		ui.ShowStatus = !ui.ShowStatus
 		if ui.ShowStatus {
 			ui.ShowCommands = false
 			ui.ShowHelp = false
 		}
+		return actionUIUpdate
 	case '\t':
 		ui.Focus = nextFocus(*ui)
+		return actionUIUpdate
 	}
 	return actionNone
 }
@@ -1040,6 +1055,10 @@ func configureHostResumeSession(host WorkerHost, workerSessionID string) bool {
 
 func readKeys(in io.Reader, out chan<- byte) {
 	buf := make([]byte, 64)
+	pendingEscape := false
+	inCSI := false
+	inString := false
+	stringEsc := false
 	for {
 		n, err := in.Read(buf)
 		if err != nil || n == 0 {
@@ -1047,6 +1066,56 @@ func readKeys(in io.Reader, out chan<- byte) {
 			return
 		}
 		for _, key := range buf[:n] {
+			if inString {
+				if key == 0x07 {
+					inString = false
+					stringEsc = false
+					continue
+				}
+				if key == 0x9c {
+					inString = false
+					stringEsc = false
+					continue
+				}
+				if stringEsc {
+					if key == '\\' {
+						inString = false
+					}
+					stringEsc = key == 0x1b
+					continue
+				}
+				if key == 0x1b {
+					stringEsc = true
+				}
+				continue
+			}
+			if inCSI {
+				if key >= 0x40 && key <= 0x7e {
+					inCSI = false
+				}
+				continue
+			}
+			if pendingEscape {
+				pendingEscape = false
+				switch key {
+				case '[':
+					inCSI = true
+					continue
+				case ']', 'P', 'X', '^', '_':
+					inString = true
+					stringEsc = false
+					continue
+				case 'O':
+					inCSI = true
+					continue
+				default:
+					out <- 0x1b
+				}
+			}
+			if key == 0x1b {
+				pendingEscape = true
+				continue
+			}
 			out <- key
 		}
 	}
