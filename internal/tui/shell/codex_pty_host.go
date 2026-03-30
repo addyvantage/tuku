@@ -255,6 +255,10 @@ func (h *CodexPTYHost) Lines(height int, width int) []string {
 	}
 
 	_ = partial
+	partialLine := sanitizeRenderedLine(partial)
+	if partialLine != "" && !isLikelyCursorNoiseLine(partialLine) && !isLikelyFrameNoiseLine(partialLine) {
+		lines = append(lines, partialLine)
+	}
 	if len(lines) == 0 {
 		switch state {
 		case HostStateStarting:
@@ -361,6 +365,7 @@ func (h *CodexPTYHost) wait() {
 
 func (h *CodexPTYHost) appendOutput(chunk []byte) {
 	h.mu.Lock()
+	prevPartial := h.partial
 	result := normalizeTerminalChunkWithState(h.partial, h.parserState, chunk)
 	h.partial = result.partial
 	h.parserState = result.state
@@ -377,6 +382,12 @@ func (h *CodexPTYHost) appendOutput(chunk []byte) {
 	if detected, source := detectWorkerSessionIDWithSource(result.partial); detected != "" && strings.TrimSpace(h.status.WorkerSessionID) == "" {
 		h.status.WorkerSessionID = detected
 		h.status.WorkerSessionIDSource = source
+	}
+	if !visibleOutput {
+		currentPartial := sanitizeRenderedLine(result.partial)
+		if currentPartial != "" && !isLikelyCursorNoiseLine(currentPartial) && !isLikelyFrameNoiseLine(currentPartial) && currentPartial != sanitizeRenderedLine(prevPartial) {
+			visibleOutput = true
+		}
 	}
 	if visibleOutput {
 		h.status.LastOutputAt = time.Now().UTC()

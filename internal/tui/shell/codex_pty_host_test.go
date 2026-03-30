@@ -122,6 +122,29 @@ func TestCodexPTYHostAppendOutputFiltersCursorNoiseRunes(t *testing.T) {
 	}
 }
 
+func TestCodexPTYHostLinesIncludeVisiblePartialOutput(t *testing.T) {
+	host := NewDefaultCodexPTYHost()
+	host.status.State = HostStateLive
+	host.partial = "working on runtime stabilization"
+
+	lines := host.Lines(10, 80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "working on runtime stabilization") {
+		t.Fatalf("expected partial output to be visible, got %q", joined)
+	}
+}
+
+func TestCodexPTYHostAppendOutputMarksActivityFromPartialOnly(t *testing.T) {
+	host := NewDefaultCodexPTYHost()
+	host.status.State = HostStateLive
+	host.status.LastOutputAt = time.Time{}
+
+	host.appendOutput([]byte("partial activity without newline"))
+	if host.Status().LastOutputAt.IsZero() {
+		t.Fatal("expected partial output to update last output timestamp")
+	}
+}
+
 func TestSanitizeRenderedLineStripsInlineCursorArtifacts(t *testing.T) {
 	line := "MCP startup incomplete (failed: figma)[A[A[A[A[A"
 	sanitized := sanitizeRenderedLine(line)
