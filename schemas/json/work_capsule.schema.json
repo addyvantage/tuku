@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TukuWorkCapsuleV1",
+  "type": "object",
+  "required": ["task_id", "version", "goal", "current_phase", "repo_root"],
+  "properties": {
+    "task_id": {"type": "string"},
+    "version": {"type": "integer"},
+    "goal": {"type": "string"},
+    "current_phase": {"type": "string"},
+    "repo_root": {"type": "string"}
+  }
+}

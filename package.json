@@ -1,0 +1,34 @@
+{
+  "name": "tukuai",
+  "version": "0.1.0",
+  "description": "Tuku CLI launcher that installs native binaries and runs Tuku from your terminal.",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "bin": {
+    "tuku": "scripts/tuku.js"
+  },
+  "files": [
+    "cmd/",
+    "internal/",
+    "go.mod",
+    "go.sum",
+    "scripts/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js"
+  },
+  "config": {
+    "releaseRepo": "kagaya/Tuku",
+    "assetPrefix": "tuku"
+  },
+  "keywords": [
+    "tuku",
+    "cli",
+    "ai",
+    "developer-tools"
+  ]
+}
