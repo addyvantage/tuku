@@ -2470,3 +2470,54 @@ func TestBuildViewModelSurfacesTaskIncidentRiskCues(t *testing.T) {
 		t.Fatalf("task-level risk wording must stay conservative, got %q", joinedActivity)
 	}
 }
+
+func TestBuildViewModelShowsCommandOverlayWhenRequested(t *testing.T) {
+	host := &stubHost{
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+		canInput: true,
+	}
+	vm := BuildViewModel(Snapshot{
+		TaskID: "tsk_cmd_overlay",
+		Phase:  "EXECUTING",
+		Status: "ACTIVE",
+		Repo: RepoAnchor{
+			RepoRoot: "/Users/kagaya/Desktop/Tuku",
+			Branch:   "main",
+		},
+	}, UIState{
+		ShowCommands: true,
+		Focus:        FocusWorker,
+	}, host, 120, 32)
+
+	if vm.Overlay == nil {
+		t.Fatal("expected command overlay")
+	}
+	if vm.Overlay.Title != "commands" {
+		t.Fatalf("expected commands overlay title, got %q", vm.Overlay.Title)
+	}
+	joined := strings.Join(vm.Overlay.Lines, "\n")
+	if !strings.Contains(joined, "Command palette") {
+		t.Fatalf("expected command palette copy, got %q", joined)
+	}
+	if !strings.Contains(joined, "Ctrl-G") {
+		t.Fatalf("expected live-input ctrl-g guidance, got %q", joined)
+	}
+}
+
+func TestBuildViewModelLiveDockHintsIncludeCommandDiscovery(t *testing.T) {
+	host := &stubHost{
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+		canInput: true,
+	}
+	vm := BuildViewModel(Snapshot{
+		TaskID: "tsk_live_hint",
+		Phase:  "EXECUTING",
+		Status: "ACTIVE",
+	}, UIState{
+		Focus: FocusWorker,
+	}, host, 120, 32)
+
+	if !strings.Contains(vm.InputDock.Hint, "commands") || !strings.Contains(vm.InputDock.Hint, "shortcuts") {
+		t.Fatalf("expected dock hint to include command discovery, got %q", vm.InputDock.Hint)
+	}
+}

@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"strings"
@@ -46,7 +47,7 @@ func NewApp(taskID string, source SnapshotSource) *App {
 		FallbackHost:     NewTranscriptHost(),
 		Input:            os.Stdin,
 		Output:           os.Stdout,
-		RefreshInterval:  5 * time.Second,
+		RefreshInterval:  15 * time.Second,
 	}
 }
 
@@ -188,14 +189,17 @@ func (a *App) Run(ctx context.Context) error {
 	defer flushTranscriptEvidence(a.TaskID, ui.Session.SessionID, host, a.TranscriptSink, &ui)
 
 	ui.ObservedAt = time.Now().UTC()
-	if err := renderShell(stdoutFile, snapshot, ui, host); err != nil {
+	lastRenderedFrame := ""
+	if err := renderShell(stdoutFile, snapshot, ui, host, true, &lastRenderedFrame); err != nil {
 		return err
 	}
 
 	lastHostStatus := host.Status()
+	lastHostDigest := hostVisibleDigest(host, computeShellLayout(lastWidth, lastHeight, ui))
 
 	for {
 		needsRender := false
+		clearFrame := false
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -234,6 +238,11 @@ func (a *App) Run(ctx context.Context) error {
 			}
 			needsRender = true
 		case <-snapshotTicker.C:
+			hostStatus := host.Status()
+			if hostStatus.State == HostStateLive && hostStatus.InputLive {
+				// Avoid interruptive periodic redraws while the live worker is actively interactive.
+				break
+			}
 			if loadErr := reloadShellSnapshot(a.Source, a.TaskID, host, a.RegistrySource, &snapshot, &ui, false); loadErr != nil {
 				ui.LastError = loadErr.Error()
 				needsRender = true
@@ -243,10 +252,8 @@ func (a *App) Run(ctx context.Context) error {
 			needsRender = true
 		case <-registryTicker.C:
 			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, host.Status(), true, &ui)
-			needsRender = true
 		case <-transcriptTicker.C:
 			flushTranscriptEvidence(a.TaskID, ui.Session.SessionID, host, a.TranscriptSink, &ui)
-			needsRender = true
 		case <-hostPollTicker.C:
 			// Poll host output/status at a controlled cadence.
 			// Rendering is still gated by state deltas below.
@@ -260,13 +267,16 @@ func (a *App) Run(ctx context.Context) error {
 			lastWidth = width
 			lastHeight = height
 			needsRender = true
+			clearFrame = true
+		}
+		layout := computeShellLayout(lastWidth, lastHeight, ui)
+		currentHostDigest := hostVisibleDigest(host, layout)
+		if currentHostDigest != lastHostDigest {
+			needsRender = true
 		}
 
 		currentStatus := host.Status()
 		captureHostLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, &ui, lastHostStatus, currentStatus)
-		if hostOutputChanged(lastHostStatus, currentStatus) {
-			needsRender = true
-		}
 		if hostStatusChanged(lastHostStatus, currentStatus) {
 			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, currentStatus, true, &ui)
 			needsRender = true
@@ -280,6 +290,7 @@ func (a *App) Run(ctx context.Context) error {
 			}
 			captureHostLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, &ui, currentStatus, host.Status())
 			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, host.Status(), true, &ui)
+			currentHostDigest = hostVisibleDigest(host, computeShellLayout(lastWidth, lastHeight, ui))
 			needsRender = true
 		}
 		lastHostStatus = host.Status()
@@ -288,23 +299,31 @@ func (a *App) Run(ctx context.Context) error {
 			continue
 		}
 		ui.ObservedAt = time.Now().UTC()
-		if err := renderShell(stdoutFile, snapshot, ui, host); err != nil {
+		if err := renderShell(stdoutFile, snapshot, ui, host, clearFrame, &lastRenderedFrame); err != nil {
 			return err
 		}
+		lastHostDigest = currentHostDigest
 	}
 }
 
-const shellHostPollInterval = 200 * time.Millisecond
+const shellHostPollInterval = 300 * time.Millisecond
 
-func hostOutputChanged(previous HostStatus, current HostStatus) bool {
-	switch {
-	case previous.LastOutputAt.IsZero() && current.LastOutputAt.IsZero():
-		return false
-	case previous.LastOutputAt.IsZero() || current.LastOutputAt.IsZero():
-		return true
-	default:
-		return !previous.LastOutputAt.Equal(current.LastOutputAt)
+func hostVisibleDigest(host WorkerHost, layout shellLayout) uint64 {
+	if host == nil {
+		return 0
 	}
+	width, height := layout.workerContentSize()
+	lines := host.Lines(height, width)
+	if len(lines) > 80 {
+		lines = lines[len(lines)-80:]
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(host.Title()))
+	for _, line := range lines {
+		_, _ = h.Write([]byte(line))
+		_, _ = h.Write([]byte{'\n'})
+	}
+	return h.Sum64()
 }
 
 func handleKeyAction(
@@ -420,6 +439,23 @@ func handleShellKey(ui *UIState, key byte) keyAction {
 	switch key {
 	case 'q', 'Q', 3:
 		return actionQuit
+	case 27:
+		ui.EscapePrefix = false
+		ui.ShowCommands = false
+		ui.ShowHelp = false
+		ui.ShowStatus = false
+	case '/':
+		ui.ShowCommands = !ui.ShowCommands
+		if ui.ShowCommands {
+			ui.ShowHelp = false
+			ui.ShowStatus = false
+		}
+	case '?':
+		ui.ShowHelp = !ui.ShowHelp
+		if ui.ShowHelp {
+			ui.ShowCommands = false
+			ui.ShowStatus = false
+		}
 	case 'i', 'I':
 		ui.ShowInspector = !ui.ShowInspector
 		if !ui.ShowInspector && ui.Focus == FocusInspector {
@@ -445,11 +481,13 @@ func handleShellKey(ui *UIState, key byte) keyAction {
 	case 'h', 'H':
 		ui.ShowHelp = !ui.ShowHelp
 		if ui.ShowHelp {
+			ui.ShowCommands = false
 			ui.ShowStatus = false
 		}
 	case 's', 'S':
 		ui.ShowStatus = !ui.ShowStatus
 		if ui.ShowStatus {
+			ui.ShowCommands = false
 			ui.ShowHelp = false
 		}
 	case '\t':
@@ -459,8 +497,12 @@ func handleShellKey(ui *UIState, key byte) keyAction {
 }
 
 func routeKey(ui *UIState, host WorkerHost, key byte) keyAction {
-	if ui.PendingTaskMessageEditMode && ui.Focus == FocusWorker {
+	if ui.PendingTaskMessageEditMode && ui.Focus == FocusWorker && !ui.ShowCommands && !ui.ShowHelp && !ui.ShowStatus {
 		return routePendingTaskMessageEditKey(ui, key)
+	}
+	if ui.ShowCommands || ui.ShowHelp || ui.ShowStatus {
+		ui.EscapePrefix = false
+		return handleShellKey(ui, key)
 	}
 	if host != nil && ui.Focus == FocusWorker {
 		if ui.EscapePrefix {
@@ -525,10 +567,20 @@ func nextFocus(ui UIState) FocusPane {
 	return FocusWorker
 }
 
-func renderShell(out io.Writer, snapshot Snapshot, ui UIState, host WorkerHost) error {
+func renderShell(out io.Writer, snapshot Snapshot, ui UIState, host WorkerHost, forceClear bool, lastFrame *string) error {
 	width, height := terminalSize()
 	vm := BuildViewModel(snapshot, ui, host, width, height)
-	_, err := io.WriteString(out, Render(vm, width, height))
+	frame := Render(vm, width, height)
+	if forceClear {
+		frame = "\x1b[2J" + frame
+	}
+	if lastFrame != nil && *lastFrame == frame {
+		return nil
+	}
+	_, err := io.WriteString(out, frame)
+	if err == nil && lastFrame != nil {
+		*lastFrame = frame
+	}
 	return err
 }
 

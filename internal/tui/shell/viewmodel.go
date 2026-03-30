@@ -83,10 +83,17 @@ func BuildViewModel(snapshot Snapshot, ui UIState, host WorkerHost, width int, h
 		Layout:     layout,
 	}
 
-	if ui.ShowHelp {
+	if ui.ShowCommands {
+		vm.Overlay = &OverlayView{
+			Title: "commands",
+			Lines: commandPaletteLines(snapshot, ui, host),
+		}
+	} else if ui.ShowHelp {
 		vm.Overlay = &OverlayView{
 			Title: "help",
 			Lines: []string{
+				"/ command palette",
+				"? shortcut guide",
 				"q quit shell",
 				"i toggle inspector",
 				"p toggle activity strip",
@@ -2074,12 +2081,12 @@ func footerText(snapshot Snapshot, ui UIState, host WorkerHost) string {
 	if progress := primaryActionInFlightLine(ui); progress != "n/a" {
 		parts = append(parts, progress)
 	}
-	parts = append(parts, "keys q quit r refresh h help i inspector p activity s status")
+	parts = append(parts, "keys q quit r refresh / commands ? shortcuts i inspector p activity s status")
 	if cue := footerExecutePrimaryCue(snapshot, ui, host); cue != "" {
 		parts = append(parts, cue)
 	}
 	if host != nil && ui.Focus == FocusWorker && host.CanAcceptInput() {
-		parts = append(parts, "ctrl-g shell commands")
+		parts = append(parts, "ctrl-g prefix for shell commands")
 	}
 	if ui.EscapePrefix {
 		parts = append(parts, "shell command armed")
@@ -2110,7 +2117,7 @@ func buildInputDock(snapshot Snapshot, ui UIState, host WorkerHost) InputDockVie
 		Status:      pendingMessageSummary(snapshot, ui),
 		PromptLabel: "tuku>",
 		Placeholder: "Type in the worker pane. Use Ctrl-G then key for shell controls.",
-		Hint:        "ctrl-g n execute next step · ctrl-g h help · ctrl-g i inspector",
+		Hint:        "ctrl-g / commands · ctrl-g ? shortcuts · ctrl-g n execute next step",
 		Focused:     ui.Focus == FocusWorker,
 	}
 
@@ -2129,7 +2136,7 @@ func buildInputDock(snapshot Snapshot, ui UIState, host WorkerHost) InputDockVie
 		dock.PromptLabel = "draft>"
 		dock.Preview = previewMultiline(currentPendingTaskMessage(ui), 3, 120)
 		dock.Placeholder = "Editing staged local draft."
-		dock.Hint = "ctrl-g s save · ctrl-g c cancel · ctrl-g m send · ctrl-g x clear"
+		dock.Hint = "ctrl-g s save · ctrl-g c cancel · ctrl-g m send · ctrl-g x clear · ctrl-g ? shortcuts"
 		return dock
 	}
 
@@ -2139,7 +2146,7 @@ func buildInputDock(snapshot Snapshot, ui UIState, host WorkerHost) InputDockVie
 		dock.PromptLabel = "draft>"
 		dock.Preview = previewMultiline(staged, 2, 120)
 		dock.Placeholder = "Draft is staged locally. Send with m when ready."
-		dock.Hint = "e edit · m send · x clear"
+		dock.Hint = "e edit · m send · x clear · / commands · ? shortcuts"
 		return dock
 	}
 
@@ -2147,7 +2154,7 @@ func buildInputDock(snapshot Snapshot, ui UIState, host WorkerHost) InputDockVie
 		dock.ReadOnly = true
 		dock.Status = "worker unavailable"
 		dock.Placeholder = "Worker host unavailable."
-		dock.Hint = "r refresh shell state"
+		dock.Hint = "r refresh shell state · / commands · ? shortcuts"
 		return dock
 	}
 
@@ -2157,7 +2164,7 @@ func buildInputDock(snapshot Snapshot, ui UIState, host WorkerHost) InputDockVie
 		dock.ReadOnly = false
 		dock.Placeholder = "Input goes directly to worker. Prefix Ctrl-G for Tuku shell actions."
 		if cue := footerExecutePrimaryCue(snapshot, ui, host); cue != "" {
-			dock.Hint = cue + " · ctrl-g h help · ctrl-g i inspector · ctrl-g p activity"
+			dock.Hint = cue + " · ctrl-g / commands · ctrl-g ? shortcuts · ctrl-g i inspector · ctrl-g p activity"
 		}
 		return dock
 	}
@@ -2165,8 +2172,42 @@ func buildInputDock(snapshot Snapshot, ui UIState, host WorkerHost) InputDockVie
 	dock.ReadOnly = true
 	dock.Status = workerStateBadge(host)
 	dock.Placeholder = unavailableInputMessage(status)
-	dock.Hint = "r refresh · n execute next step · i inspector · p activity"
+	dock.Hint = "r refresh · n execute next step · / commands · ? shortcuts"
 	return dock
+}
+
+func commandPaletteLines(snapshot Snapshot, ui UIState, host WorkerHost) []string {
+	prefix := ""
+	if host != nil && ui.Focus == FocusWorker && host.CanAcceptInput() && !ui.PendingTaskMessageEditMode {
+		prefix = "ctrl-g "
+	}
+	lines := []string{
+		"Command palette (discoverability view)",
+		"Use the key in parentheses to execute.",
+	}
+	if prefix != "" {
+		lines = append(lines, "Worker-live input is active. Prefix commands with Ctrl-G.")
+	}
+	lines = append(lines,
+		"",
+		fmt.Sprintf("%s/ or %s?  open command/shortcut overlays", prefix, prefix),
+		fmt.Sprintf("%sq  quit shell", prefix),
+		fmt.Sprintf("%sr  refresh shell state", prefix),
+		fmt.Sprintf("%si  toggle inspector", prefix),
+		fmt.Sprintf("%sp  toggle activity strip", prefix),
+		fmt.Sprintf("%ss  toggle status overlay", prefix),
+		fmt.Sprintf("%sn  execute next operator step", prefix),
+		fmt.Sprintf("%sa  stage local scratch adoption draft", prefix),
+		fmt.Sprintf("%se  edit staged draft", prefix),
+		fmt.Sprintf("%sm  send staged draft", prefix),
+		fmt.Sprintf("%sx  clear staged draft", prefix),
+		"",
+		"Note: command actions execute through Tuku canonical continuity.",
+	)
+	if isScratchIntakeSnapshot(snapshot) {
+		lines = append(lines, "Scratch intake mode commands: /help, /list, /quit")
+	}
+	return lines
 }
 
 func previewMultiline(text string, maxLines int, maxLineRunes int) []string {

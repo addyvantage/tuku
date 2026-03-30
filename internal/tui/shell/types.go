@@ -816,6 +816,7 @@ const (
 type UIState struct {
 	ShowInspector                  bool
 	ShowProof                      bool
+	ShowCommands                   bool
 	ShowHelp                       bool
 	ShowStatus                     bool
 	Focus                          FocusPane

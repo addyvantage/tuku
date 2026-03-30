@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	xansi "github.com/charmbracelet/x/ansi"
 )
@@ -265,6 +266,86 @@ func sanitizeRenderedLine(line string) string {
 		return ""
 	}
 	return strings.TrimRight(line, " ")
+}
+
+func isLikelyFrameNoiseLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+
+	// Blank frame rails frequently emitted by embedded TUIs:
+	// "│      │", "|      |", "┃      ┃", etc.
+	if hasEdgeRailsWithBlankInterior(trimmed) {
+		return true
+	}
+
+	// Full horizontal borders: "┌──────┐", "╭──────╮", "│------│".
+	if isPureBorderLine(trimmed) {
+		return true
+	}
+
+	return false
+}
+
+func hasEdgeRailsWithBlankInterior(line string) bool {
+	if utf8.RuneCountInString(line) < 2 {
+		return false
+	}
+	first, firstSize := utf8.DecodeRuneInString(line)
+	last, _ := utf8.DecodeLastRuneInString(line)
+	if !isVerticalBorderRune(first) || !isVerticalBorderRune(last) {
+		return false
+	}
+	mid := line[firstSize : len(line)-utf8.RuneLen(last)]
+	for _, r := range mid {
+		if r != ' ' && r != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+func isPureBorderLine(line string) bool {
+	hasBorder := false
+	for _, r := range line {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r):
+			return false
+		case r == ' ' || r == '\t':
+			continue
+		case isBorderRune(r):
+			hasBorder = true
+		default:
+			// Any non-border symbol means this is probably real content.
+			return false
+		}
+	}
+	return hasBorder
+}
+
+func isVerticalBorderRune(r rune) bool {
+	switch r {
+	case '|', '│', '┃', '║':
+		return true
+	default:
+		return false
+	}
+}
+
+func isBorderRune(r rune) bool {
+	switch r {
+	case '-', '=', '|', '+',
+		'─', '━', '│', '┃', '║',
+		'┌', '┐', '└', '┘',
+		'├', '┤', '┬', '┴', '┼',
+		'╭', '╮', '╰', '╯',
+		'╔', '╗', '╚', '╝',
+		'═', '╬', '╠', '╣', '╦', '╩':
+		return true
+	default:
+		return false
+	}
 }
 
 func stripControlRunes(line string) string {

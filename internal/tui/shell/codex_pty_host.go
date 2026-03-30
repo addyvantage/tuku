@@ -366,30 +366,39 @@ func (h *CodexPTYHost) appendOutput(chunk []byte) {
 	result := normalizeTerminalChunkWithState(h.partial, h.parserState, chunk)
 	h.partial = result.partial
 	h.parserState = result.state
-	if len(result.lines) > 0 || strings.TrimSpace(result.partial) != "" {
-		h.status.LastOutputAt = time.Now().UTC()
-	}
+	visibleOutput := false
 	for _, line := range result.lines {
 		if detected, source := detectWorkerSessionIDWithSource(line); detected != "" && strings.TrimSpace(h.status.WorkerSessionID) == "" {
 			h.status.WorkerSessionID = detected
 			h.status.WorkerSessionIDSource = source
 		}
-		h.appendLineLocked(line)
+		if h.appendLineLocked(line) {
+			visibleOutput = true
+		}
 	}
 	if detected, source := detectWorkerSessionIDWithSource(result.partial); detected != "" && strings.TrimSpace(h.status.WorkerSessionID) == "" {
 		h.status.WorkerSessionID = detected
 		h.status.WorkerSessionIDSource = source
 	}
+	if partial := sanitizeRenderedLine(result.partial); partial != "" && !isLikelyCursorNoiseLine(partial) {
+		visibleOutput = true
+	}
+	if visibleOutput {
+		h.status.LastOutputAt = time.Now().UTC()
+	}
 	h.mu.Unlock()
 }
 
-func (h *CodexPTYHost) appendLineLocked(line string) {
+func (h *CodexPTYHost) appendLineLocked(line string) bool {
 	line = sanitizeRenderedLine(line)
 	if line == "" {
-		return
+		return false
 	}
 	if isLikelyCursorNoiseLine(line) {
-		return
+		return false
+	}
+	if isLikelyFrameNoiseLine(line) {
+		return false
 	}
 	h.lines = append(h.lines, line)
 	if strings.TrimSpace(line) != "" {
@@ -405,6 +414,7 @@ func (h *CodexPTYHost) appendLineLocked(line string) {
 	if len(h.transcriptPending) > hostMaxLines {
 		h.transcriptPending = h.transcriptPending[len(h.transcriptPending)-hostMaxLines:]
 	}
+	return true
 }
 
 func (h *CodexPTYHost) recordActivity(message string) {

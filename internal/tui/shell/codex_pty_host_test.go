@@ -141,6 +141,33 @@ func TestSanitizeRenderedLineDropsSingleCursorArtifacts(t *testing.T) {
 	}
 }
 
+func TestIsLikelyFrameNoiseLineDetectsEmptyFrameRails(t *testing.T) {
+	cases := []string{
+		"│                                                                              │",
+		"┌──────────────────────────────────────────────────────────────────────────────┐",
+		"╭────────────────────────────╮",
+		"|                                                                          |",
+	}
+	for _, line := range cases {
+		if !isLikelyFrameNoiseLine(line) {
+			t.Fatalf("expected frame-noise detection for %q", line)
+		}
+	}
+}
+
+func TestIsLikelyFrameNoiseLineKeepsContentfulBorderedText(t *testing.T) {
+	cases := []string{
+		"│ model: gpt-5.3-codex xhigh │",
+		"┆ status ready",
+		"OpenAI Codex (v0.117.0)",
+	}
+	for _, line := range cases {
+		if isLikelyFrameNoiseLine(line) {
+			t.Fatalf("did not expect frame-noise detection for %q", line)
+		}
+	}
+}
+
 func TestNormalizeTerminalChunkStripsSS3ControlSequences(t *testing.T) {
 	result := normalizeTerminalChunk("", []byte("left\x1bOAright\n"))
 	if len(result.lines) != 1 {
@@ -206,6 +233,15 @@ func TestCodexPTYHostAppendOutputTracksLastOutputTime(t *testing.T) {
 
 	if host.Status().LastOutputAt.IsZero() {
 		t.Fatal("expected last output timestamp to be recorded")
+	}
+}
+
+func TestCodexPTYHostAppendOutputIgnoresFrameNoiseForLastOutputTime(t *testing.T) {
+	host := NewDefaultCodexPTYHost()
+	host.appendOutput([]byte("│                                                                              │\n"))
+
+	if !host.Status().LastOutputAt.IsZero() {
+		t.Fatal("expected frame-noise output to be ignored for last output timestamp")
 	}
 }
 

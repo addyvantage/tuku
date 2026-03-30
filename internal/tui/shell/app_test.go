@@ -178,8 +178,15 @@ func TestHandleKeyTogglesShellUI(t *testing.T) {
 		t.Fatal("expected proof hidden")
 	}
 
-	if action := handleShellKey(&ui, 'h'); action != actionNone || !ui.ShowHelp {
-		t.Fatal("expected help overlay enabled")
+	if action := handleShellKey(&ui, '/'); action != actionNone || !ui.ShowCommands {
+		t.Fatal("expected command palette enabled")
+	}
+	if action := handleShellKey(&ui, '?'); action != actionNone || !ui.ShowHelp || ui.ShowCommands {
+		t.Fatal("expected shortcut help enabled and commands cleared")
+	}
+
+	if action := handleShellKey(&ui, 'h'); action != actionNone || ui.ShowHelp {
+		t.Fatal("expected h to toggle help overlay off when already enabled")
 	}
 	if action := handleShellKey(&ui, 's'); action != actionNone || !ui.ShowStatus || ui.ShowHelp {
 		t.Fatal("expected status overlay enabled and help cleared")
@@ -192,6 +199,30 @@ func TestHandleKeyTogglesShellUI(t *testing.T) {
 	}
 	if action := handleShellKey(&ui, 'q'); action != actionQuit {
 		t.Fatalf("expected quit action, got %v", action)
+	}
+}
+
+func TestRouteKeyOverlayConsumesWorkerInput(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live"},
+	}
+	ui := UIState{
+		Focus:        FocusWorker,
+		ShowCommands: true,
+	}
+
+	if action := routeKey(&ui, host, 'a'); action != actionStageScratchAdoption {
+		t.Fatalf("expected overlay key handling to remain shell-local, got %v", action)
+	}
+	if len(host.writes) != 0 {
+		t.Fatalf("expected overlay mode to suppress worker writes, got %#v", host.writes)
+	}
+	if action := routeKey(&ui, host, '/'); action != actionNone {
+		t.Fatalf("expected overlay toggle to remain local, got %v", action)
+	}
+	if ui.ShowCommands {
+		t.Fatal("expected slash to close command overlay")
 	}
 }
 

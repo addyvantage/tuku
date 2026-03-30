@@ -53,7 +53,7 @@ func Render(vm ViewModel, width int, height int) string {
 	}
 
 	var b strings.Builder
-	b.WriteString("\x1b[H\x1b[J")
+	b.WriteString("\x1b[H")
 	b.WriteString(strings.Join(padded, "\n"))
 	return b.String()
 }
