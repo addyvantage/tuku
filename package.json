@@ -22,7 +22,7 @@
     "postinstall": "node scripts/postinstall.js"
   },
   "config": {
-    "releaseRepo": "kagaya/Tuku",
+    "releaseRepo": "addyvantage/tuku",
     "assetPrefix": "tuku"
   },
   "keywords": [

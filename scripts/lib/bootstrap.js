@@ -34,7 +34,7 @@ function releaseRepo() {
   const fromNpmConfig = (process.env.npm_package_config_releaseRepo || "").trim();
   if (fromNpmConfig) return fromNpmConfig;
 
-  return "kagaya/Tuku";
+  return "addyvantage/tuku";
 }
 
 function assetPrefix() {
