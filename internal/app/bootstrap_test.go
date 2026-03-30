@@ -37,6 +37,102 @@ func TestParseShellWorkerPreferenceRejectsInvalidWorker(t *testing.T) {
 	}
 }
 
+func TestDefaultPathsRespectExplicitEnvironmentOverrides(t *testing.T) {
+	t.Setenv("TUKU_DATA_DIR", "/tmp/tuku-data")
+	t.Setenv("TUKU_RUN_DIR", "/tmp/tuku-run")
+	t.Setenv("TUKU_CACHE_DIR", "/tmp/tuku-cache")
+	t.Setenv("TUKU_DB_PATH", "/tmp/tuku-db/custom.db")
+	t.Setenv("TUKU_SOCKET_PATH", "/tmp/tuku-run/custom.sock")
+
+	dataRoot, err := defaultDataRoot()
+	if err != nil {
+		t.Fatalf("default data root: %v", err)
+	}
+	if dataRoot != "/tmp/tuku-data" {
+		t.Fatalf("expected env data root, got %q", dataRoot)
+	}
+
+	runRoot, err := defaultRunRoot()
+	if err != nil {
+		t.Fatalf("default run root: %v", err)
+	}
+	if runRoot != "/tmp/tuku-run" {
+		t.Fatalf("expected env run root, got %q", runRoot)
+	}
+
+	cacheRoot, err := defaultCacheRoot()
+	if err != nil {
+		t.Fatalf("default cache root: %v", err)
+	}
+	if cacheRoot != "/tmp/tuku-cache" {
+		t.Fatalf("expected env cache root, got %q", cacheRoot)
+	}
+
+	dbPath, err := defaultDBPath()
+	if err != nil {
+		t.Fatalf("default db path: %v", err)
+	}
+	if dbPath != "/tmp/tuku-db/custom.db" {
+		t.Fatalf("expected env db path, got %q", dbPath)
+	}
+
+	socketPath, err := defaultSocketPath()
+	if err != nil {
+		t.Fatalf("default socket path: %v", err)
+	}
+	if socketPath != "/tmp/tuku-run/custom.sock" {
+		t.Fatalf("expected env socket path, got %q", socketPath)
+	}
+
+	scratchPath, err := defaultScratchSessionPath("/tmp/repo")
+	if err != nil {
+		t.Fatalf("default scratch path: %v", err)
+	}
+	if !strings.HasPrefix(scratchPath, filepath.Join("/tmp/tuku-cache", "scratch")+string(os.PathSeparator)) {
+		t.Fatalf("expected scratch path under cache root, got %q", scratchPath)
+	}
+}
+
+func TestDefaultRunAndScratchRootsFallBackToDataRoot(t *testing.T) {
+	t.Setenv("TUKU_DATA_DIR", "/tmp/tuku-data")
+	t.Setenv("TUKU_RUN_DIR", "")
+	t.Setenv("TUKU_CACHE_DIR", "")
+	t.Setenv("TUKU_DB_PATH", "")
+	t.Setenv("TUKU_SOCKET_PATH", "")
+
+	runRoot, err := defaultRunRoot()
+	if err != nil {
+		t.Fatalf("default run root: %v", err)
+	}
+	if runRoot != filepath.Join("/tmp/tuku-data", "run") {
+		t.Fatalf("expected run root under data root, got %q", runRoot)
+	}
+
+	dbPath, err := defaultDBPath()
+	if err != nil {
+		t.Fatalf("default db path: %v", err)
+	}
+	if dbPath != filepath.Join("/tmp/tuku-data", "tuku.db") {
+		t.Fatalf("expected db path under data root, got %q", dbPath)
+	}
+
+	socketPath, err := defaultSocketPath()
+	if err != nil {
+		t.Fatalf("default socket path: %v", err)
+	}
+	if socketPath != filepath.Join("/tmp/tuku-data", "run", "tukud.sock") {
+		t.Fatalf("expected socket path under data/run, got %q", socketPath)
+	}
+
+	scratchPath, err := defaultScratchSessionPath("/tmp/repo")
+	if err != nil {
+		t.Fatalf("default scratch path: %v", err)
+	}
+	if !strings.HasPrefix(scratchPath, filepath.Join("/tmp/tuku-data", "scratch")+string(os.PathSeparator)) {
+		t.Fatalf("expected scratch path under data root, got %q", scratchPath)
+	}
+}
+
 func TestCLIShellTranscriptCommandRoutesReadRequestAndPrintsTruthfulSummary(t *testing.T) {
 	origCall := ipcCall
 	defer func() { ipcCall = origCall }()

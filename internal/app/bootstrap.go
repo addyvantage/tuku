@@ -973,6 +973,9 @@ func (a *DaemonApplication) Run(ctx context.Context) error {
 }
 
 func defaultDataRoot() (string, error) {
+	if configured := cleanPathFromEnv("TUKU_DATA_DIR"); configured != "" {
+		return configured, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -981,6 +984,9 @@ func defaultDataRoot() (string, error) {
 }
 
 func defaultDBPath() (string, error) {
+	if configured := cleanPathFromEnv("TUKU_DB_PATH"); configured != "" {
+		return configured, nil
+	}
 	root, err := defaultDataRoot()
 	if err != nil {
 		return "", err
@@ -989,11 +995,44 @@ func defaultDBPath() (string, error) {
 }
 
 func defaultSocketPath() (string, error) {
+	if configured := cleanPathFromEnv("TUKU_SOCKET_PATH"); configured != "" {
+		return configured, nil
+	}
+	root, err := defaultRunRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "tukud.sock"), nil
+}
+
+func defaultRunRoot() (string, error) {
+	if configured := cleanPathFromEnv("TUKU_RUN_DIR"); configured != "" {
+		return configured, nil
+	}
 	root, err := defaultDataRoot()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(root, "run", "tukud.sock"), nil
+	return filepath.Join(root, "run"), nil
+}
+
+func defaultCacheRoot() (string, error) {
+	if configured := cleanPathFromEnv("TUKU_CACHE_DIR"); configured != "" {
+		return configured, nil
+	}
+	root, err := defaultDataRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "cache"), nil
+}
+
+func cleanPathFromEnv(name string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return ""
+	}
+	return filepath.Clean(value)
 }
 
 func requestID() string {
@@ -1369,6 +1408,9 @@ func defaultScratchSessionPath(cwd string) (string, error) {
 	root, err := defaultDataRoot()
 	if err != nil {
 		return "", err
+	}
+	if configured := cleanPathFromEnv("TUKU_CACHE_DIR"); configured != "" {
+		root = configured
 	}
 	normalized := filepath.Clean(strings.TrimSpace(cwd))
 	sum := sha256.Sum256([]byte(normalized))

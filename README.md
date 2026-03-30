@@ -89,6 +89,14 @@ This manual daemon path remains useful for debugging and development. The primar
 Default local paths:
 - SQLite DB: `~/Library/Application Support/Tuku/tuku.db`
 - Unix socket: `~/Library/Application Support/Tuku/run/tukud.sock`
+- Scratch intake notes: `~/Library/Application Support/Tuku/scratch/`
+
+Optional runtime path overrides (recommended for isolated dev/test runs):
+- `TUKU_DATA_DIR=/absolute/path` (base for DB and default scratch storage)
+- `TUKU_RUN_DIR=/absolute/path` (base for unix socket when `TUKU_SOCKET_PATH` is not set)
+- `TUKU_CACHE_DIR=/absolute/path` (stores scratch notes when set)
+- `TUKU_DB_PATH=/absolute/path/tuku.db` (exact DB file override)
+- `TUKU_SOCKET_PATH=/absolute/path/tukud.sock` (exact socket file override)
 
 ## CLI Help
 ```bash
@@ -125,7 +133,7 @@ go run ./cmd/tuku chat --worker codex
 go run ./cmd/tuku chat --worker claude
 ```
 
-If the current directory is not inside a git repository, Tuku now opens a deliberate local scratch and intake prompt and says so directly instead of inventing task continuity. That no-repo mode is intentionally simpler than the repo-backed shell: normal terminal input, obvious `/help`, `/list`, and `/quit` commands, and one-line local scratch note capture. Scratch notes from that mode are stored locally under `~/Library/Application Support/Tuku/scratch/` and are not part of daemon-backed task state. When you later create the first repo-backed task in the same directory, Tuku can surface those notes as local intake context, stage them into a shell-local draft, edit that draft locally inside the shell, and then explicitly adopt them only when you send that draft through `task.message`. If the daemon cannot be started automatically for the repo-backed path, Tuku returns a direct local-daemon startup error instead of pretending the shell can continue.
+If the current directory is not inside a git repository, Tuku now opens a deliberate local scratch and intake prompt and says so directly instead of inventing task continuity. That no-repo mode is intentionally simpler than the repo-backed shell: normal terminal input, obvious `/help`, `/list`, and `/quit` commands, and one-line local scratch note capture. Scratch notes from that mode are stored locally under `~/Library/Application Support/Tuku/scratch/` by default (or under `TUKU_CACHE_DIR/scratch/` when `TUKU_CACHE_DIR` is set) and are not part of daemon-backed task state. When you later create the first repo-backed task in the same directory, Tuku can surface those notes as local intake context, stage them into a shell-local draft, edit that draft locally inside the shell, and then explicitly adopt them only when you send that draft through `task.message`. If the daemon cannot be started automatically for the repo-backed path, Tuku returns a direct local-daemon startup error instead of pretending the shell can continue.
 
 ## Terminal Shell
 Tuku now includes a worker-native terminal shell:

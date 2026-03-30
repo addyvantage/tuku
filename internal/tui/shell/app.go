@@ -284,14 +284,21 @@ func (a *App) Run(ctx context.Context) error {
 			clearFrame = true
 			forceImmediateRender = true
 		}
+		currentStatus := host.Status()
 		layout := computeShellLayout(lastWidth, lastHeight, ui)
 		currentHostDigest := hostVisibleDigest(host, layout)
 		if currentHostDigest != lastHostDigest {
-			needsRender = true
-			hostDrivenRender = true
+			if currentStatus.State == HostStateLive && currentStatus.InputLive && !ui.WorkerPromptPending {
+				// In idle live-input mode, suppress background host repaint churn.
+				// This prevents noisy worker output from forcing redraw loops while
+				// the operator is typing. Prompt-pending/running states still render.
+				lastHostDigest = currentHostDigest
+			} else {
+				needsRender = true
+				hostDrivenRender = true
+			}
 		}
 
-		currentStatus := host.Status()
 		captureHostLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, &ui, lastHostStatus, currentStatus)
 		if ui.WorkerPromptPending {
 			if currentStatus.State != HostStateLive {

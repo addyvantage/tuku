@@ -1,0 +1,6 @@
+# Local OS/editor artifacts
+.DS_Store
+
+# Local Tuku runtime/cache artifacts (when HOME is redirected for tests)
+/Library/
+/go/
