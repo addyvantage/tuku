@@ -128,7 +128,11 @@ func renderPanel(
 	innerH := max(1, height-frameH)
 
 	content := make([]string, 0, innerH)
-	content = append(content, joinLeftRight(theme.workspaceTitle.Render(ansiTruncate(strings.TrimSpace(title), innerW)), theme.workspaceSub.Render(ansiTruncate(strings.TrimSpace(subtitle), innerW)), innerW))
+	titleText := strings.TrimSpace(title)
+	if focused {
+		titleText = theme.workspaceFocus.Render("●") + " " + titleText
+	}
+	content = append(content, joinLeftRight(theme.workspaceTitle.Render(ansiTruncate(titleText, innerW)), theme.workspaceSub.Render(ansiTruncate(strings.TrimSpace(subtitle), innerW)), innerW))
 	content = append(content, strings.Repeat(" ", innerW))
 
 	bodyLimit := max(0, innerH-len(content))

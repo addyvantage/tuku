@@ -92,6 +92,9 @@ func TestExecuteCapturesRunnerResultAndPrompt(t *testing.T) {
 	if runner.spec.WorkingDir != req.RepoAnchor.WorktreePath {
 		t.Fatalf("expected working dir %q, got %q", req.RepoAnchor.WorktreePath, runner.spec.WorkingDir)
 	}
+	if got := strings.Join(runner.spec.Args, " "); got != "-lc cat >/dev/null exec --color never -" {
+		t.Fatalf("expected codex exec args to be appended for non-interactive runs, got %q", got)
+	}
 	if !strings.Contains(runner.spec.Stdin, "Task ID: tsk_test") {
 		t.Fatalf("expected bounded prompt to include task id, got: %q", runner.spec.Stdin)
 	}
@@ -104,6 +107,9 @@ func TestExecuteCapturesRunnerResultAndPrompt(t *testing.T) {
 	if res.Command != "sh" {
 		t.Fatalf("expected command sh, got %q", res.Command)
 	}
+	if got := strings.Join(res.Args, " "); got != "-lc cat >/dev/null exec --color never -" {
+		t.Fatalf("expected execution result args to reflect codex exec invocation, got %q", got)
+	}
 	if res.Summary == "" {
 		t.Fatal("expected summary in execution result")
 	}
@@ -112,6 +118,23 @@ func TestExecuteCapturesRunnerResultAndPrompt(t *testing.T) {
 	}
 	if res.ChangedFilesSemantics == "" {
 		t.Fatal("expected changed-file semantics to be populated")
+	}
+}
+
+func TestExecutePreservesExplicitSubcommandArgs(t *testing.T) {
+	runner := &fakeRunner{result: process.Result{ExitCode: 0, Stdout: "ok"}}
+	adapter := NewAdapterWithConfig(Config{
+		Binary:  "sh",
+		Args:    []string{"exec", "--json", "-"},
+		Timeout: 5 * time.Second,
+		Runner:  runner,
+	})
+
+	if _, err := adapter.Execute(context.Background(), testExecutionRequest(t), nil); err != nil {
+		t.Fatalf("unexpected execute error: %v", err)
+	}
+	if got := strings.Join(runner.spec.Args, " "); got != "exec --json -" {
+		t.Fatalf("expected explicit subcommand args to remain unchanged, got %q", got)
 	}
 }
 

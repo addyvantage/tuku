@@ -69,11 +69,12 @@ func (a *Adapter) Name() adapter_contract.WorkerKind {
 
 func (a *Adapter) Execute(ctx context.Context, req adapter_contract.ExecutionRequest, sink adapter_contract.WorkerEventSink) (adapter_contract.ExecutionResult, error) {
 	startedAt := time.Now().UTC()
+	commandArgs := a.commandArgs()
 	result := adapter_contract.ExecutionResult{
 		WorkerRunID: commonWorkerRunID(req.RunID),
 		StartedAt:   startedAt,
 		Command:     a.binary,
-		Args:        append([]string{}, a.args...),
+		Args:        append([]string{}, commandArgs...),
 	}
 
 	if _, err := exec.LookPath(a.binary); err != nil {
@@ -96,7 +97,7 @@ func (a *Adapter) Execute(ctx context.Context, req adapter_contract.ExecutionReq
 	defer cancel()
 	procRes, runErr := a.runner.Run(runCtx, process.Spec{
 		Command:    a.binary,
-		Args:       a.args,
+		Args:       commandArgs,
 		WorkingDir: req.RepoAnchor.WorktreePath,
 		Stdin:      prompt,
 	})
@@ -132,6 +133,17 @@ func (a *Adapter) Execute(ctx context.Context, req adapter_contract.ExecutionReq
 		_ = sink.OnWorkerEvent(ctx, adapter_contract.WorkerEvent{Type: adapter_contract.WorkerEventCompleted, RunID: req.RunID, Payload: fmt.Sprintf("exit_code=%d", result.ExitCode)})
 	}
 	return result, nil
+}
+
+func (a *Adapter) commandArgs() []string {
+	args := append([]string{}, a.args...)
+	for _, arg := range args {
+		switch strings.TrimSpace(strings.ToLower(arg)) {
+		case "exec", "help", "review", "resume":
+			return args
+		}
+	}
+	return append(args, "exec", "--color", "never", "-")
 }
 
 func buildPrompt(req adapter_contract.ExecutionRequest) string {

@@ -3,14 +3,12 @@ package shell
 import (
 	"context"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"os"
 	"strings"
 	"time"
-	"unicode/utf8"
 
-	"golang.org/x/sys/unix"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 type App struct {
@@ -47,7 +45,7 @@ func NewApp(taskID string, source SnapshotSource) *App {
 		FallbackHost:     NewTranscriptHost(),
 		Input:            os.Stdin,
 		Output:           os.Stdout,
-		RefreshInterval:  15 * time.Second,
+		RefreshInterval:  shellSnapshotTickInterval,
 	}
 }
 
@@ -61,32 +59,22 @@ func (a *App) Run(ctx context.Context) error {
 	if a.Output == nil {
 		a.Output = os.Stdout
 	}
+
 	snapshot, err := a.Source.Load(a.TaskID)
 	if err != nil {
 		return err
 	}
 
-	ui := initialUIState(time.Now().UTC(), a.WorkerPreference)
-	addSessionEvent(&ui.Session, ui.LastRefresh, SessionEventShellStarted, fmt.Sprintf("Shell session %s started.", shortTaskID(ui.Session.SessionID)))
+	now := time.Now().UTC()
+	ui := initialUIState(now, a.WorkerPreference)
+	addSessionEvent(&ui.Session, now, SessionEventShellStarted, fmt.Sprintf("Shell session %s started.", shortTaskID(ui.Session.SessionID)))
 	if prior := capturePriorPersistedShellOutcome(snapshot); prior != "" {
 		ui.Session.PriorPersistedSummary = prior
-		addSessionEvent(&ui.Session, ui.LastRefresh, SessionEventPriorPersistedProof, "Previous persisted shell outcome: "+prior)
+		addSessionEvent(&ui.Session, now, SessionEventPriorPersistedProof, "Previous persisted shell outcome: "+prior)
 	}
-
-	stdinFile, ok := a.Input.(*os.File)
-	if !ok {
-		return fmt.Errorf("shell input must be an *os.File")
+	if err := loadKnownShellSessions(a.RegistrySource, a.TaskID, &ui.Session); err != nil {
+		ui.LastError = "shell session registry read failed: " + err.Error()
 	}
-	stdoutFile, ok := a.Output.(*os.File)
-	if !ok {
-		return fmt.Errorf("shell output must be an *os.File")
-	}
-
-	restore, err := enterTerminalMode(stdinFile, stdoutFile)
-	if err != nil {
-		return err
-	}
-	defer restore()
 
 	preferredHost := a.Host
 	requestedPreference := a.WorkerPreference
@@ -94,9 +82,7 @@ func (a *App) Run(ctx context.Context) error {
 	if isScratchIntakeSnapshot(snapshot) {
 		resolvedWorker = WorkerPreferenceAuto
 	}
-	if err := loadKnownShellSessions(a.RegistrySource, a.TaskID, &ui.Session); err != nil {
-		ui.LastError = "shell session registry read failed: " + err.Error()
-	}
+
 	reattachTarget, shouldReattach, err := resolveReattachTarget(strings.TrimSpace(a.ReattachSessionID), ui.Session.KnownSessions)
 	if err != nil {
 		recordLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, PersistedLifecycleReattachFailed, HostStatus{
@@ -113,7 +99,7 @@ func (a *App) Run(ctx context.Context) error {
 		ui.Session.WorkerSessionID = reattachTarget.WorkerSessionID
 		ui.Session.WorkerSessionIDSource = reattachTarget.WorkerSessionIDSource
 		ui.Session.AttachCapability = WorkerAttachCapabilityAttachable
-		addSessionEvent(&ui.Session, ui.LastRefresh, SessionEventHostStartupAttempted, fmt.Sprintf("Requested reattach to prior worker session %s via shell session %s.", truncateWithEllipsis(reattachTarget.WorkerSessionID, 20), shortTaskID(reattachTarget.SessionID)))
+		addSessionEvent(&ui.Session, now, SessionEventHostStartupAttempted, fmt.Sprintf("Requested reattach to prior worker session %s via shell session %s.", truncateWithEllipsis(reattachTarget.WorkerSessionID, 20), shortTaskID(reattachTarget.SessionID)))
 		recordLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, PersistedLifecycleReattachRequested, HostStatus{
 			Mode:                  reattachTarget.HostMode,
 			State:                 reattachTarget.HostState,
@@ -122,6 +108,7 @@ func (a *App) Run(ctx context.Context) error {
 			WorkerSessionIDSource: reattachTarget.WorkerSessionIDSource,
 		}, &ui)
 	}
+
 	if preferredHost != nil {
 		if hostPreference := workerPreferenceFromHost(preferredHost); hostPreference != WorkerPreferenceAuto {
 			resolvedWorker = hostPreference
@@ -144,6 +131,7 @@ func (a *App) Run(ctx context.Context) error {
 		}, &ui)
 		return err
 	}
+
 	ui.Session.ResolvedWorker = resolvedWorker
 	reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, preferredHost.Status(), true, &ui)
 
@@ -154,306 +142,37 @@ func (a *App) Run(ctx context.Context) error {
 			startupLabel = label
 		}
 	}
-	addSessionEvent(&ui.Session, ui.LastRefresh, SessionEventHostStartupAttempted, fmt.Sprintf("Attempted %s host startup.", startupLabel))
+	addSessionEvent(&ui.Session, now, SessionEventHostStartupAttempted, fmt.Sprintf("Attempted %s host startup.", startupLabel))
 	if hostErr != "" {
 		ui.LastError = hostErr
 	}
-	defer reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, host.Status(), false, &ui)
-	defer func() {
-		_ = host.Stop()
-	}()
+	reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, host.Status(), true, &ui)
+	captureHostLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, &ui, HostStatus{}, host.Status())
 
-	lastWidth, lastHeight := terminalSize()
-	applyHostResize(host, lastWidth, lastHeight, ui)
-	initialStatus := host.Status()
-	reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, initialStatus, true, &ui)
-	captureHostLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, &ui, HostStatus{}, initialStatus)
+	model := newShellModel(ctx, a, snapshot, ui, host)
+	program := tea.NewProgram(
+		model,
+		tea.WithContext(ctx),
+		tea.WithInput(a.Input),
+		tea.WithOutput(a.Output),
+	)
 
-	keyCh := make(chan byte, 16)
-	go readKeys(stdinFile, keyCh)
-	primaryActionDoneCh := make(chan primaryActionExecutionResult, 1)
+	finalModel, runErr := program.Run()
 
-	hostPollTicker := time.NewTicker(shellHostPollInterval)
-	defer hostPollTicker.Stop()
-
-	tickerInterval := a.RefreshInterval
-	if tickerInterval <= 0 {
-		tickerInterval = 5 * time.Second
-	}
-	snapshotTicker := time.NewTicker(tickerInterval)
-	defer snapshotTicker.Stop()
-	registryTicker := time.NewTicker(shellSessionHeartbeatInterval)
-	defer registryTicker.Stop()
-	transcriptTicker := time.NewTicker(shellTranscriptFlushInterval)
-	defer transcriptTicker.Stop()
-	defer flushTranscriptEvidence(a.TaskID, ui.Session.SessionID, host, a.TranscriptSink, &ui)
-
-	ui.ObservedAt = time.Now().UTC()
-	lastRenderedFrame := ""
-	if err := renderShell(stdoutFile, snapshot, ui, host, true, &lastRenderedFrame); err != nil {
-		return err
-	}
-	lastRenderedAt := ui.ObservedAt
-
-	lastHostStatus := host.Status()
-	lastHostDigest := hostVisibleDigest(host, computeShellLayout(lastWidth, lastHeight, ui))
-
-	for {
-		needsRender := false
-		clearFrame := false
-		hostDrivenRender := false
-		forceImmediateRender := false
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case key, ok := <-keyCh:
-			if !ok {
-				return nil
-			}
-			if shouldQuit, renderNow, err := handleKeyAction(key, &ui, host, a, &snapshot, primaryActionDoneCh); err != nil {
-				ui.LastError = err.Error()
-				needsRender = true
-				forceImmediateRender = true
-			} else if shouldQuit {
-				return nil
-			} else if renderNow {
-				needsRender = true
-				forceImmediateRender = true
-			}
-			draining := true
-			for draining {
-				select {
-				case nextKey, ok := <-keyCh:
-					if !ok {
-						return nil
-					}
-					if shouldQuit, renderNow, err := handleKeyAction(nextKey, &ui, host, a, &snapshot, primaryActionDoneCh); err != nil {
-						ui.LastError = err.Error()
-						needsRender = true
-						forceImmediateRender = true
-					} else if shouldQuit {
-						return nil
-					} else if renderNow {
-						needsRender = true
-						forceImmediateRender = true
-					}
-				default:
-					draining = false
-				}
-			}
-		case result := <-primaryActionDoneCh:
-			if err := completePrimaryOperatorStepExecution(a.Source, a.TaskID, host, a.RegistrySource, &snapshot, &ui, result); err != nil {
-				ui.LastError = err.Error()
-			} else {
-				ui.LastError = ""
-			}
-			needsRender = true
-			forceImmediateRender = true
-		case <-snapshotTicker.C:
-			hostStatus := host.Status()
-			if hostStatus.State == HostStateLive && hostStatus.InputLive {
-				// Avoid interruptive periodic redraws while the live worker is actively interactive.
-				break
-			}
-			if loadErr := reloadShellSnapshot(a.Source, a.TaskID, host, a.RegistrySource, &snapshot, &ui, false); loadErr != nil {
-				ui.LastError = loadErr.Error()
-				needsRender = true
-				forceImmediateRender = true
-				break
-			}
-			ui.LastError = ""
-			needsRender = true
-			forceImmediateRender = true
-		case <-registryTicker.C:
-			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, host.Status(), true, &ui)
-		case <-transcriptTicker.C:
-			flushTranscriptEvidence(a.TaskID, ui.Session.SessionID, host, a.TranscriptSink, &ui)
-		case <-hostPollTicker.C:
-			// Poll host output/status at a controlled cadence.
-			// Rendering is still gated by state deltas below.
-		}
-
-		width, height := terminalSize()
-		if width != lastWidth || height != lastHeight {
-			if applyHostResize(host, width, height, ui) {
-				addSessionEvent(&ui.Session, time.Now().UTC(), SessionEventResizeApplied, fmt.Sprintf("Resized live worker pane to %dx%d.", host.Status().Width, host.Status().Height))
-			}
-			lastWidth = width
-			lastHeight = height
-			needsRender = true
-			clearFrame = true
-			forceImmediateRender = true
-		}
-		currentStatus := host.Status()
-		layout := computeShellLayout(lastWidth, lastHeight, ui)
-		currentHostDigest := hostVisibleDigest(host, layout)
-		if currentHostDigest != lastHostDigest {
-			if currentStatus.State == HostStateLive && currentStatus.InputLive && !ui.WorkerPromptPending {
-				// In idle live-input mode, suppress background host repaint churn.
-				// This prevents noisy worker output from forcing redraw loops while
-				// the operator is typing. Prompt-pending/running states still render.
-				lastHostDigest = currentHostDigest
-			} else {
-				needsRender = true
-				hostDrivenRender = true
-			}
-		}
-
-		captureHostLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, &ui, lastHostStatus, currentStatus)
-		if ui.WorkerPromptPending {
-			if currentStatus.State != HostStateLive {
-				ui.WorkerPromptPending = false
-				ui.LiveInputBuffer = ""
-				needsRender = true
-				forceImmediateRender = true
-			} else if !currentStatus.LastOutputAt.IsZero() && (ui.LastWorkerPromptAt.IsZero() || !currentStatus.LastOutputAt.Before(ui.LastWorkerPromptAt)) {
-				ui.WorkerPromptPending = false
-				needsRender = true
-				hostDrivenRender = false
-			}
-		}
-		if hostStatusChanged(lastHostStatus, currentStatus) {
-			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, currentStatus, true, &ui)
-			needsRender = true
-			forceImmediateRender = true
-		}
-		if nextHost, note, changed := transitionExitedHost(ctx, host, a.FallbackHost, snapshot); changed {
-			flushTranscriptEvidence(a.TaskID, ui.Session.SessionID, host, a.TranscriptSink, &ui)
-			host = nextHost
-			applyHostResize(host, lastWidth, lastHeight, ui)
-			if note != "" {
-				ui.LastError = note
-			}
-			captureHostLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, &ui, currentStatus, host.Status())
-			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, host.Status(), true, &ui)
-			currentHostDigest = hostVisibleDigest(host, computeShellLayout(lastWidth, lastHeight, ui))
-			needsRender = true
-			forceImmediateRender = true
-		}
-		lastHostStatus = host.Status()
-
-		if !needsRender {
-			continue
-		}
-		if hostDrivenRender && !forceImmediateRender {
-			now := time.Now().UTC()
-			if now.Sub(lastRenderedAt) < shellHostRenderMinInterval {
-				continue
-			}
-		}
-		ui.ObservedAt = time.Now().UTC()
-		if err := renderShell(stdoutFile, snapshot, ui, host, clearFrame, &lastRenderedFrame); err != nil {
-			return err
-		}
-		lastRenderedAt = ui.ObservedAt
-		lastHostDigest = currentHostDigest
-	}
-}
-
-const (
-	shellHostPollInterval      = 450 * time.Millisecond
-	shellHostRenderMinInterval = 1200 * time.Millisecond
-)
-
-func hostVisibleDigest(host WorkerHost, layout shellLayout) uint64 {
-	if host == nil {
-		return 0
-	}
-	width, height := layout.workerContentSize()
-	lines := host.Lines(height, width)
-	if len(lines) > 80 {
-		lines = lines[len(lines)-80:]
-	}
-	h := fnv.New64a()
-	_, _ = h.Write([]byte(host.Title()))
-	for _, line := range lines {
-		_, _ = h.Write([]byte(line))
-		_, _ = h.Write([]byte{'\n'})
-	}
-	return h.Sum64()
-}
-
-func handleKeyAction(
-	key byte,
-	ui *UIState,
-	host WorkerHost,
-	app *App,
-	snapshot *Snapshot,
-	primaryActionDoneCh chan<- primaryActionExecutionResult,
-) (bool, bool, error) {
-	if ui == nil || app == nil || snapshot == nil {
-		return false, false, fmt.Errorf("shell key handling state is unavailable")
+	activeHost := host
+	finalUI := ui
+	if finalState, ok := finalModel.(*shellModel); ok {
+		activeHost = finalState.host
+		finalUI = finalState.ui
 	}
 
-	action := routeKey(ui, host, key)
-	switch action {
-	case actionNone:
-		return false, false, nil
-	case actionUIUpdate:
-		return false, true, nil
-	case actionQuit:
-		return true, false, nil
-	case actionRefresh:
-		if loadErr := reloadShellSnapshot(app.Source, app.TaskID, host, app.RegistrySource, snapshot, ui, true); loadErr != nil {
-			return false, false, loadErr
-		}
-		ui.LastError = ""
-		return false, true, nil
-	case actionStageScratchAdoption:
-		if err := stagePendingTaskMessageFromLocalScratch(ui, *snapshot); err != nil {
-			return false, false, err
-		}
-		ui.LastError = ""
-		return false, true, nil
-	case actionEnterPendingTaskMessageEdit:
-		if err := enterPendingTaskMessageEditMode(ui); err != nil {
-			return false, false, err
-		}
-		ui.LastError = ""
-		return false, true, nil
-	case actionSavePendingTaskMessageEdit:
-		if err := savePendingTaskMessageEditMode(ui); err != nil {
-			return false, false, err
-		}
-		ui.LastError = ""
-		return false, true, nil
-	case actionCancelPendingTaskMessageEdit:
-		if err := cancelPendingTaskMessageEditMode(ui); err != nil {
-			return false, false, err
-		}
-		ui.LastError = ""
-		return false, true, nil
-	case actionSendPendingTaskMessage:
-		if err := sendPendingTaskMessage(app.MessageSender, app.TaskID, ui); err != nil {
-			return false, false, err
-		}
-		next, loadErr := app.Source.Load(app.TaskID)
-		if loadErr != nil {
-			ui.LastRefresh = time.Now().UTC()
-			return false, false, fmt.Errorf("task message sent, but shell refresh failed: %w", loadErr)
-		}
-		*snapshot = next
-		if host != nil {
-			host.UpdateSnapshot(next)
-		}
-		ui.LastRefresh = time.Now().UTC()
-		ui.LastError = ""
-		if err := loadKnownShellSessions(app.RegistrySource, app.TaskID, &ui.Session); err != nil {
-			return false, false, fmt.Errorf("shell session registry read failed: %w", err)
-		}
-		return false, true, nil
-	case actionClearPendingTaskMessage:
-		clearPendingTaskMessage(ui)
-		return false, true, nil
-	case actionExecutePrimaryOperatorStep:
-		if err := startPrimaryOperatorStepExecution(app.ActionExecutor, app.TaskID, *snapshot, ui, primaryActionDoneCh); err != nil {
-			return false, false, err
-		}
-		ui.LastError = ""
-		return false, true, nil
-	default:
-		return false, false, nil
+	if activeHost != nil {
+		flushTranscriptEvidence(a.TaskID, finalUI.Session.SessionID, activeHost, a.TranscriptSink, &finalUI)
+		reportShellSession(a.RegistrySink, a.TaskID, &finalUI.Session, activeHost.Status(), false, &finalUI)
+		_ = activeHost.Stop()
 	}
+
+	return runErr
 }
 
 func initialUIState(now time.Time, preference WorkerPreference) UIState {
@@ -467,216 +186,6 @@ func initialUIState(now time.Time, preference WorkerPreference) UIState {
 	}
 	ui.Session.WorkerPreference = preference
 	return ui
-}
-
-type keyAction int
-
-const (
-	actionNone keyAction = iota
-	actionUIUpdate
-	actionQuit
-	actionRefresh
-	actionStageScratchAdoption
-	actionEnterPendingTaskMessageEdit
-	actionSavePendingTaskMessageEdit
-	actionCancelPendingTaskMessageEdit
-	actionSendPendingTaskMessage
-	actionClearPendingTaskMessage
-	actionExecutePrimaryOperatorStep
-)
-
-func handleShellKey(ui *UIState, key byte) keyAction {
-	switch key {
-	case 'q', 'Q', 3:
-		return actionQuit
-	case 27:
-		ui.EscapePrefix = false
-		ui.ShowCommands = false
-		ui.ShowHelp = false
-		ui.ShowStatus = false
-		return actionUIUpdate
-	case '/':
-		ui.ShowCommands = !ui.ShowCommands
-		if ui.ShowCommands {
-			ui.ShowHelp = false
-			ui.ShowStatus = false
-		}
-		return actionUIUpdate
-	case '?':
-		ui.ShowHelp = !ui.ShowHelp
-		if ui.ShowHelp {
-			ui.ShowCommands = false
-			ui.ShowStatus = false
-		}
-		return actionUIUpdate
-	case 'i', 'I':
-		ui.ShowInspector = !ui.ShowInspector
-		if !ui.ShowInspector && ui.Focus == FocusInspector {
-			ui.Focus = FocusWorker
-		}
-		return actionUIUpdate
-	case 'p', 'P':
-		ui.ShowProof = !ui.ShowProof
-		if !ui.ShowProof && ui.Focus == FocusActivity {
-			ui.Focus = FocusWorker
-		}
-		return actionUIUpdate
-	case 'r', 'R':
-		return actionRefresh
-	case 'a', 'A':
-		return actionStageScratchAdoption
-	case 'e', 'E':
-		return actionEnterPendingTaskMessageEdit
-	case 'm', 'M':
-		return actionSendPendingTaskMessage
-	case 'n', 'N':
-		return actionExecutePrimaryOperatorStep
-	case 'x', 'X':
-		return actionClearPendingTaskMessage
-	case 'h', 'H':
-		ui.ShowHelp = !ui.ShowHelp
-		if ui.ShowHelp {
-			ui.ShowCommands = false
-			ui.ShowStatus = false
-		}
-		return actionUIUpdate
-	case 's', 'S':
-		ui.ShowStatus = !ui.ShowStatus
-		if ui.ShowStatus {
-			ui.ShowCommands = false
-			ui.ShowHelp = false
-		}
-		return actionUIUpdate
-	case '\t':
-		ui.Focus = nextFocus(*ui)
-		return actionUIUpdate
-	}
-	return actionNone
-}
-
-func routeKey(ui *UIState, host WorkerHost, key byte) keyAction {
-	if ui.PendingTaskMessageEditMode && ui.Focus == FocusWorker && !ui.ShowCommands && !ui.ShowHelp && !ui.ShowStatus {
-		return routePendingTaskMessageEditKey(ui, key)
-	}
-	if ui.ShowCommands || ui.ShowHelp || ui.ShowStatus {
-		ui.EscapePrefix = false
-		return handleShellKey(ui, key)
-	}
-	if host != nil && ui.Focus == FocusWorker {
-		if ui.EscapePrefix {
-			ui.EscapePrefix = false
-			return handleShellKey(ui, key)
-		}
-		if key == 0x07 {
-			ui.EscapePrefix = true
-			return actionNone
-		}
-		if host.CanAcceptInput() && host.WriteInput([]byte{key}) {
-			ui.LastError = ""
-			if submitted := trackLiveWorkerInput(ui, key); submitted {
-				return actionUIUpdate
-			}
-			return actionNone
-		}
-		action := handleShellKey(ui, key)
-		if action != actionNone {
-			return action
-		}
-		if isPrintableKey(key) {
-			ui.LastError = unavailableInputMessage(host.Status())
-			return actionNone
-		}
-	}
-	return handleShellKey(ui, key)
-}
-
-func trackLiveWorkerInput(ui *UIState, key byte) bool {
-	if ui == nil {
-		return false
-	}
-	switch key {
-	case '\r', '\n':
-		line := strings.TrimSpace(ui.LiveInputBuffer)
-		ui.LiveInputBuffer = ""
-		if line == "" {
-			return false
-		}
-		ui.LastWorkerPrompt = line
-		ui.LastWorkerPromptAt = time.Now().UTC()
-		ui.WorkerPromptPending = true
-		return true
-	case 0x7f, 0x08:
-		if ui.LiveInputBuffer == "" {
-			return false
-		}
-		_, size := utf8.DecodeLastRuneInString(ui.LiveInputBuffer)
-		if size <= 0 {
-			ui.LiveInputBuffer = ""
-			return false
-		}
-		ui.LiveInputBuffer = ui.LiveInputBuffer[:len(ui.LiveInputBuffer)-size]
-		return false
-	default:
-		if key >= 32 && key < 127 {
-			ui.LiveInputBuffer += string(key)
-		}
-		return false
-	}
-}
-
-func routePendingTaskMessageEditKey(ui *UIState, key byte) keyAction {
-	if ui.EscapePrefix {
-		ui.EscapePrefix = false
-		switch key {
-		case 's', 'S':
-			return actionSavePendingTaskMessageEdit
-		case 'c', 'C':
-			return actionCancelPendingTaskMessageEdit
-		default:
-			return handleShellKey(ui, key)
-		}
-	}
-	if key == 0x07 {
-		ui.EscapePrefix = true
-		return actionNone
-	}
-	if applyPendingTaskMessageEditInput(ui, key) {
-		ui.LastError = ""
-	}
-	return actionNone
-}
-
-func nextFocus(ui UIState) FocusPane {
-	order := []FocusPane{FocusWorker}
-	if ui.ShowInspector {
-		order = append(order, FocusInspector)
-	}
-	if ui.ShowProof {
-		order = append(order, FocusActivity)
-	}
-	for idx, pane := range order {
-		if pane == ui.Focus {
-			return order[(idx+1)%len(order)]
-		}
-	}
-	return FocusWorker
-}
-
-func renderShell(out io.Writer, snapshot Snapshot, ui UIState, host WorkerHost, forceClear bool, lastFrame *string) error {
-	width, height := terminalSize()
-	vm := BuildViewModel(snapshot, ui, host, width, height)
-	frame := Render(vm, width, height)
-	if forceClear {
-		frame = "\x1b[2J" + frame
-	}
-	if lastFrame != nil && *lastFrame == frame {
-		return nil
-	}
-	_, err := io.WriteString(out, frame)
-	if err == nil && lastFrame != nil {
-		*lastFrame = frame
-	}
-	return err
 }
 
 func reloadShellSnapshot(source SnapshotSource, taskID string, host WorkerHost, registrySource SessionRegistrySource, snapshot *Snapshot, ui *UIState, manual bool) error {
@@ -793,13 +302,15 @@ func executePrimaryOperatorStep(executor PrimaryActionExecutor, source SnapshotS
 	return completePrimaryOperatorStepExecution(source, taskID, host, registrySource, snapshot, ui, result)
 }
 
-func applyHostResize(host WorkerHost, width int, height int, ui UIState) bool {
+func applyHostResize(host WorkerHost, width int, height int, _ UIState) bool {
 	if host == nil {
 		return false
 	}
-	layout := computeShellLayout(width, height, ui)
-	paneWidth, paneHeight := layout.workerContentSize()
-	return host.Resize(paneWidth, paneHeight)
+	layout := shellSurfaceLayout{
+		contentWidth:   max(40, width-4),
+		viewportHeight: max(6, height-9),
+	}
+	return host.Resize(max(10, layout.contentWidth-4), max(4, layout.viewportHeight-2))
 }
 
 func unavailableInputMessage(status HostStatus) string {
@@ -820,10 +331,6 @@ func unavailableInputMessage(status HostStatus) string {
 	default:
 		return "worker input is unavailable"
 	}
-}
-
-func isPrintableKey(key byte) bool {
-	return key >= 32 && key < 127
 }
 
 func stagePendingTaskMessageFromLocalScratch(ui *UIState, snapshot Snapshot) error {
@@ -949,11 +456,8 @@ func applyPendingTaskMessageEditInput(ui *UIState, key byte) bool {
 		if ui.PendingTaskMessageEditBuffer == "" {
 			return true
 		}
-		_, size := utf8.DecodeLastRuneInString(ui.PendingTaskMessageEditBuffer)
-		if size <= 0 {
-			return true
-		}
-		ui.PendingTaskMessageEditBuffer = ui.PendingTaskMessageEditBuffer[:len(ui.PendingTaskMessageEditBuffer)-size]
+		runes := []rune(ui.PendingTaskMessageEditBuffer)
+		ui.PendingTaskMessageEditBuffer = string(runes[:len(runes)-1])
 		return true
 	default:
 		if key >= 32 {
@@ -1070,9 +574,10 @@ func recordLifecycle(ctx context.Context, sink LifecycleSink, taskID string, ses
 		}
 		status.WorkerSessionIDSource = normalizeWorkerSessionIDSource(status.WorkerSessionIDSource, status.WorkerSessionID)
 	}
-	if err := sink.Record(taskID, sessionID, kind, status); err != nil {
+	if err := sink.Record(taskID, sessionID, kind, status); err != nil && ui != nil {
 		ui.LastError = "shell lifecycle proof bridge failed: " + err.Error()
 	}
+	_ = ctx
 }
 
 func resolveReattachTarget(targetSessionID string, known []KnownShellSession) (KnownShellSession, bool, error) {
@@ -1133,74 +638,6 @@ func configureHostResumeSession(host WorkerHost, workerSessionID string) bool {
 	return true
 }
 
-func readKeys(in io.Reader, out chan<- byte) {
-	buf := make([]byte, 64)
-	pendingEscape := false
-	inCSI := false
-	inString := false
-	stringEsc := false
-	for {
-		n, err := in.Read(buf)
-		if err != nil || n == 0 {
-			close(out)
-			return
-		}
-		for _, key := range buf[:n] {
-			if inString {
-				if key == 0x07 {
-					inString = false
-					stringEsc = false
-					continue
-				}
-				if key == 0x9c {
-					inString = false
-					stringEsc = false
-					continue
-				}
-				if stringEsc {
-					if key == '\\' {
-						inString = false
-					}
-					stringEsc = key == 0x1b
-					continue
-				}
-				if key == 0x1b {
-					stringEsc = true
-				}
-				continue
-			}
-			if inCSI {
-				if key >= 0x40 && key <= 0x7e {
-					inCSI = false
-				}
-				continue
-			}
-			if pendingEscape {
-				pendingEscape = false
-				switch key {
-				case '[':
-					inCSI = true
-					continue
-				case ']', 'P', 'X', '^', '_':
-					inString = true
-					stringEsc = false
-					continue
-				case 'O':
-					inCSI = true
-					continue
-				default:
-					out <- 0x1b
-				}
-			}
-			if key == 0x1b {
-				pendingEscape = true
-				continue
-			}
-			out <- key
-		}
-	}
-}
-
 func flushTranscriptEvidence(taskID string, sessionID string, host WorkerHost, sink TranscriptSink, ui *UIState) {
 	if sink == nil || host == nil {
 		return
@@ -1216,38 +653,4 @@ func flushTranscriptEvidence(taskID string, sessionID string, host WorkerHost, s
 	if err := sink.Append(taskID, sessionID, chunks); err != nil && ui != nil {
 		ui.LastError = "shell transcript evidence append failed: " + err.Error()
 	}
-}
-
-func enterTerminalMode(stdin *os.File, stdout *os.File) (func(), error) {
-	fd := int(stdin.Fd())
-	termios, err := unix.IoctlGetTermios(fd, unix.TIOCGETA)
-	if err != nil {
-		return nil, fmt.Errorf("read terminal attrs: %w", err)
-	}
-	raw := *termios
-	raw.Iflag &^= unix.IGNBRK | unix.BRKINT | unix.PARMRK | unix.ISTRIP | unix.INLCR | unix.IGNCR | unix.ICRNL | unix.IXON
-	raw.Oflag &^= unix.OPOST
-	raw.Lflag &^= unix.ECHO | unix.ECHONL | unix.ICANON | unix.ISIG | unix.IEXTEN
-	raw.Cflag &^= unix.CSIZE | unix.PARENB
-	raw.Cflag |= unix.CS8
-	raw.Cc[unix.VMIN] = 1
-	raw.Cc[unix.VTIME] = 0
-	if err := unix.IoctlSetTermios(fd, unix.TIOCSETA, &raw); err != nil {
-		return nil, fmt.Errorf("set raw terminal attrs: %w", err)
-	}
-	if _, err := io.WriteString(stdout, "\x1b[?1049h\x1b[?25l"); err != nil {
-		return nil, err
-	}
-	return func() {
-		_ = unix.IoctlSetTermios(fd, unix.TIOCSETA, termios)
-		_, _ = io.WriteString(stdout, "\x1b[?25h\x1b[?1049l")
-	}, nil
-}
-
-func terminalSize() (int, int) {
-	ws, err := unix.IoctlGetWinsize(int(os.Stdout.Fd()), unix.TIOCGWINSZ)
-	if err != nil || ws.Col == 0 || ws.Row == 0 {
-		return 120, 32
-	}
-	return int(ws.Col), int(ws.Row)
 }

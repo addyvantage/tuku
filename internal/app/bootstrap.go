@@ -37,6 +37,7 @@ import (
 type CLIApplication struct {
 	openShellFn         func(ctx context.Context, socketPath string, taskID string, preference tukushell.WorkerPreference) error
 	openFallbackShellFn func(ctx context.Context, cwd string, preference tukushell.WorkerPreference) error
+	chooseWorkerFn      func(ctx context.Context, remembered tukushell.WorkerPreference) (tukushell.WorkerPreference, error)
 }
 
 type repoShellTaskResolution struct {
@@ -64,6 +65,9 @@ var (
 	resolveScratchPath     = defaultScratchSessionPath
 	daemonReadyTimeout     = 5 * time.Second
 	daemonRetryInterval    = 150 * time.Millisecond
+	loadPrimaryWorkerPref  = loadPrimaryWorkerPreference
+	savePrimaryWorkerPref  = savePrimaryWorkerPreference
+	clearPrimaryLauncherFn = clearPrimaryLauncherSurface
 )
 
 func (a *CLIApplication) Run(ctx context.Context, args []string) error {
@@ -82,6 +86,8 @@ func (a *CLIApplication) Run(ctx context.Context, args []string) error {
 	}
 
 	switch args[0] {
+	case "codex", "claude":
+		return a.runPrimaryEntry(ctx, socketPath, []string{args[0]})
 	case "chat":
 		return a.runPrimaryEntry(ctx, socketPath, args[1:])
 	case "ui":
@@ -872,7 +878,7 @@ func (a *CLIApplication) Run(ctx context.Context, args []string) error {
 }
 
 func cliUsage() string {
-	return "usage: tuku [chat] | tuku <ui|start|message|shell|shell-sessions|transition|incident|run|next|operator|continue|checkpoint|recovery|handoff-create|handoff-accept|handoff-launch|handoff-followthrough|handoff-resolve|status|inspect|intent|brief|help> [flags]\n       tuku ui [--worker auto|codex|claude]\n       tuku status --task <TASK_ID> [--human]\n       tuku inspect --task <TASK_ID> [--human]\n       tuku intent --task <TASK_ID>\n       tuku brief --task <TASK_ID> [--human]\n       tuku next --task <TASK_ID> [--human] [--ack-review-gap] [--ack-session <SHELL_SESSION_ID>] [--ack-kind missing_review_marker|stale_review|source_scoped_only|source_scoped_stale] [--ack-summary TEXT]\n       tuku run --task <TASK_ID> [--action start|complete|interrupt] [--mode real|noop] [--run-id <RUN_ID>] [--shell-session <SHELL_SESSION_ID>] [--simulate-interrupt] [--reason TEXT] [--human]\n       tuku shell-sessions --task <TASK_ID> [--human]\n       tuku continue --task <TASK_ID> [--human]\n       tuku checkpoint --task <TASK_ID> [--human]\n       tuku handoff-create --task <TASK_ID> [--target claude] [--mode resume|review|takeover] [--reason TEXT] [--note TEXT] [--human]\n       tuku handoff-accept --task <TASK_ID> --handoff <HANDOFF_ID> [--by claude] [--note TEXT] [--human]\n       tuku handoff-launch --task <TASK_ID> [--handoff <HANDOFF_ID>] [--target claude] [--human]\n       tuku handoff-followthrough --task <TASK_ID> --kind proof-of-life-observed|continuation-confirmed|continuation-unknown [--summary TEXT] [--note TEXT] [--human]\n       tuku handoff-resolve --task <TASK_ID> --kind superseded-by-local|completed-downstream|abandoned [--handoff <HANDOFF_ID>] [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery record --task <TASK_ID> --action <KIND> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery review-interrupted --task <TASK_ID> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery resume-interrupted --task <TASK_ID> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery continue --task <TASK_ID> [--human]\n       tuku recovery rebrief --task <TASK_ID> [--human]\n       tuku shell transcript --task <TASK_ID> --session <SHELL_SESSION_ID> [--limit N] [--before-seq SEQ] [--source worker_output|system_note|fallback_note]\n       tuku shell transcript review --task <TASK_ID> --session <SHELL_SESSION_ID> --up-to-seq <SEQ> [--source worker_output|system_note|fallback_note] [--summary TEXT]\n       tuku shell transcript history --task <TASK_ID> --session <SHELL_SESSION_ID> [--limit N] [--source worker_output|system_note|fallback_note]\n       tuku transition history --task <TASK_ID> [--limit N] [--before-receipt <RECEIPT_ID>] [--kind handoff_launch|handoff_resolution] [--handoff <HANDOFF_ID>]\n       tuku incident --task <TASK_ID> [--anchor-transition <RECEIPT_ID>] [--transitions N] [--runs N] [--recovery N] [--proofs N] [--acks N]\n       tuku incident triage --task <TASK_ID> [--anchor latest|receipt] [--receipt <RECEIPT_ID>] --posture triaged|needs_follow_up|deferred [--summary TEXT]\n       tuku incident triage history --task <TASK_ID> [--limit N] [--before-receipt <RECEIPT_ID>] [--anchor <TRANSITION_RECEIPT_ID>] [--posture triaged|needs_follow_up|deferred]\n       tuku incident followup --task <TASK_ID> [--anchor latest|receipt] [--receipt <TRANSITION_RECEIPT_ID>] [--triage-receipt <TRIAGE_RECEIPT_ID>] --action recorded_pending|progressed|closed|reopened [--summary TEXT]\n       tuku incident followup history --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>] [--anchor <TRANSITION_RECEIPT_ID>] [--triage-receipt <TRIAGE_RECEIPT_ID>] [--action recorded_pending|progressed|closed|reopened]\n       tuku incident closure --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>]\n       tuku incident risk --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>]\n       tuku operator acknowledge-review-gap --task <TASK_ID> [--session <SHELL_SESSION_ID>] [--kind missing_review_marker|stale_review|source_scoped_only|source_scoped_stale] [--summary TEXT]"
+	return "usage: tuku [chat|codex|claude] | tuku <ui|start|message|shell|shell-sessions|transition|incident|run|next|operator|continue|checkpoint|recovery|handoff-create|handoff-accept|handoff-launch|handoff-followthrough|handoff-resolve|status|inspect|intent|brief|help> [flags]\n       tuku chat [codex|claude] [--worker auto|codex|claude]\n       tuku ui [--worker auto|codex|claude]\n       tuku status --task <TASK_ID> [--human]\n       tuku inspect --task <TASK_ID> [--human]\n       tuku intent --task <TASK_ID>\n       tuku brief --task <TASK_ID> [--human]\n       tuku next --task <TASK_ID> [--human] [--ack-review-gap] [--ack-session <SHELL_SESSION_ID>] [--ack-kind missing_review_marker|stale_review|source_scoped_only|source_scoped_stale] [--ack-summary TEXT]\n       tuku run --task <TASK_ID> [--action start|complete|interrupt] [--mode real|noop] [--run-id <RUN_ID>] [--shell-session <SHELL_SESSION_ID>] [--simulate-interrupt] [--reason TEXT] [--human]\n       tuku shell-sessions --task <TASK_ID> [--human]\n       tuku continue --task <TASK_ID> [--human]\n       tuku checkpoint --task <TASK_ID> [--human]\n       tuku handoff-create --task <TASK_ID> [--target claude] [--mode resume|review|takeover] [--reason TEXT] [--note TEXT] [--human]\n       tuku handoff-accept --task <TASK_ID> --handoff <HANDOFF_ID> [--by claude] [--note TEXT] [--human]\n       tuku handoff-launch --task <TASK_ID> [--handoff <HANDOFF_ID>] [--target claude] [--human]\n       tuku handoff-followthrough --task <TASK_ID> --kind proof-of-life-observed|continuation-confirmed|continuation-unknown [--summary TEXT] [--note TEXT] [--human]\n       tuku handoff-resolve --task <TASK_ID> --kind superseded-by-local|completed-downstream|abandoned [--handoff <HANDOFF_ID>] [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery record --task <TASK_ID> --action <KIND> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery review-interrupted --task <TASK_ID> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery resume-interrupted --task <TASK_ID> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery continue --task <TASK_ID> [--human]\n       tuku recovery rebrief --task <TASK_ID> [--human]\n       tuku shell transcript --task <TASK_ID> --session <SHELL_SESSION_ID> [--limit N] [--before-seq SEQ] [--source worker_output|system_note|fallback_note]\n       tuku shell transcript review --task <TASK_ID> --session <SHELL_SESSION_ID> --up-to-seq <SEQ> [--source worker_output|system_note|fallback_note] [--summary TEXT]\n       tuku shell transcript history --task <TASK_ID> --session <SHELL_SESSION_ID> [--limit N] [--source worker_output|system_note|fallback_note]\n       tuku transition history --task <TASK_ID> [--limit N] [--before-receipt <RECEIPT_ID>] [--kind handoff_launch|handoff_resolution] [--handoff <HANDOFF_ID>]\n       tuku incident --task <TASK_ID> [--anchor-transition <RECEIPT_ID>] [--transitions N] [--runs N] [--recovery N] [--proofs N] [--acks N]\n       tuku incident triage --task <TASK_ID> [--anchor latest|receipt] [--receipt <RECEIPT_ID>] --posture triaged|needs_follow_up|deferred [--summary TEXT]\n       tuku incident triage history --task <TASK_ID> [--limit N] [--before-receipt <RECEIPT_ID>] [--anchor <TRANSITION_RECEIPT_ID>] [--posture triaged|needs_follow_up|deferred]\n       tuku incident followup --task <TASK_ID> [--anchor latest|receipt] [--receipt <TRANSITION_RECEIPT_ID>] [--triage-receipt <TRIAGE_RECEIPT_ID>] --action recorded_pending|progressed|closed|reopened [--summary TEXT]\n       tuku incident followup history --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>] [--anchor <TRANSITION_RECEIPT_ID>] [--triage-receipt <TRIAGE_RECEIPT_ID>] [--action recorded_pending|progressed|closed|reopened]\n       tuku incident closure --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>]\n       tuku incident risk --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>]\n       tuku operator acknowledge-review-gap --task <TASK_ID> [--session <SHELL_SESSION_ID>] [--kind missing_review_marker|stale_review|source_scoped_only|source_scoped_stale] [--summary TEXT]"
 }
 
 func parseRecoveryActionKind(value string) (recoveryaction.Kind, error) {
@@ -1040,17 +1046,28 @@ func requestID() string {
 }
 
 func (a *CLIApplication) runPrimaryEntry(ctx context.Context, socketPath string, args []string) error {
+	explicitWorkerArg := ""
+	if len(args) > 0 && !strings.HasPrefix(strings.TrimSpace(args[0]), "-") {
+		explicitWorkerArg = strings.TrimSpace(args[0])
+		args = args[1:]
+	}
 	fs := flag.NewFlagSet("chat", flag.ContinueOnError)
 	worker := fs.String("worker", "auto", "worker preference: auto|codex|claude")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	preference, err := parseShellWorkerPreference(*worker)
-	if err != nil {
-		return err
+	if len(fs.Args()) > 0 {
+		return fmt.Errorf("unexpected primary entry argument %q", fs.Args()[0])
 	}
 	cwd, repoRoot, repoDetected, err := resolvePrimaryEntryContext(ctx)
 	if err != nil {
+		return err
+	}
+	preference, explicit, launcherUsed, err := resolvePrimaryEntryWorkerPreference(ctx, a, explicitWorkerArg, *worker, repoDetected)
+	if err != nil {
+		if errors.Is(err, errPrimaryWorkerSelectionCancelled) {
+			return nil
+		}
 		return err
 	}
 	if !repoDetected {
@@ -1060,9 +1077,17 @@ func (a *CLIApplication) runPrimaryEntry(ctx context.Context, socketPath string,
 		}
 		return openFallback(ctx, cwd, preference)
 	}
+	if explicit {
+		_ = savePrimaryWorkerPref(preference)
+	}
 	resolution, err := resolveShellTaskForRepoWithDaemonBootstrap(ctx, socketPath, repoRoot, orchestrator.DefaultRepoContinueGoal)
 	if err != nil {
 		return err
+	}
+	if launcherUsed {
+		if err := clearPrimaryLauncherFn(os.Stdout); err != nil {
+			return err
+		}
 	}
 	if a.openShellFn != nil {
 		return a.openShellFn(ctx, socketPath, string(resolution.TaskID), preference)
@@ -1072,6 +1097,43 @@ func (a *CLIApplication) runPrimaryEntry(ctx context.Context, socketPath string,
 		return err
 	}
 	return a.openShellWithSource(ctx, string(resolution.TaskID), preference, "", source)
+}
+
+func resolvePrimaryEntryWorkerPreference(ctx context.Context, app *CLIApplication, positional string, flagValue string, repoDetected bool) (tukushell.WorkerPreference, bool, bool, error) {
+	if raw := strings.TrimSpace(positional); raw != "" {
+		preference, err := parseShellWorkerPreference(raw)
+		if err != nil {
+			return "", false, false, err
+		}
+		return preference, true, false, nil
+	}
+	preference, err := parseShellWorkerPreference(flagValue)
+	if err != nil {
+		return "", false, false, err
+	}
+	if preference != tukushell.WorkerPreferenceAuto {
+		return preference, true, false, nil
+	}
+	if !repoDetected {
+		return tukushell.WorkerPreferenceAuto, false, false, nil
+	}
+	remembered, err := loadPrimaryWorkerPref()
+	if err != nil {
+		remembered = tukushell.WorkerPreferenceAuto
+	}
+	chooser := runPrimaryWorkerLauncher
+	if app != nil && app.chooseWorkerFn != nil {
+		chooser = app.chooseWorkerFn
+	}
+	chosen, err := chooser(ctx, remembered)
+	if err != nil {
+		return "", false, true, err
+	}
+	if chosen == tukushell.WorkerPreferenceAuto {
+		chosen = tukushell.WorkerPreferenceCodex
+	}
+	_ = savePrimaryWorkerPref(chosen)
+	return chosen, true, true, nil
 }
 
 func (a *CLIApplication) runPrimaryBubbleEntry(ctx context.Context, socketPath string, args []string) error {

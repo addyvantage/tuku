@@ -8,9 +8,9 @@ import (
 )
 
 type TranscriptHost struct {
-	snapshot Snapshot
-	status   HostStatus
-	activity []string
+	snapshot          Snapshot
+	status            HostStatus
+	activity          []string
 	transcriptPending []TranscriptEvidenceChunk
 }
 
@@ -105,19 +105,23 @@ func (h *TranscriptHost) Lines(height int, width int) []string {
 			lines = append(lines, wrapText(summary, width)...)
 		}
 		for _, chunk := range h.snapshot.RecentShellTranscript {
-			prefix := "evidence> "
+			prefix := "Evidence "
 			if strings.TrimSpace(chunk.Source) == "worker_output" {
-				prefix = "worker> "
+				prefix = "Worker   "
 			}
 			lines = append(lines, wrapPrefixedOutput(prefix, chunk.Content, width)...)
 		}
 		lines = append(lines, "")
 	}
 	if len(h.snapshot.RecentConversation) == 0 {
-		lines = append(lines, wrapText("No transcript is attached yet.", width)...)
+		lines = append(lines, wrapText("No transcript evidence is available yet.", width)...)
 		return fitBottom(lines, height)
 	}
 	for _, msg := range h.snapshot.RecentConversation {
+		role := strings.TrimSpace(msg.Role)
+		if role != "user" && role != "worker" {
+			continue
+		}
 		prefix := transcriptPrefix(msg.Role)
 		body := strings.TrimSpace(msg.Body)
 		if body == "" {
@@ -205,24 +209,24 @@ func (h *TranscriptHost) enqueueTranscriptNote(note string) {
 func transcriptPrefix(role string) string {
 	switch role {
 	case "user":
-		return "you> "
+		return "You      "
 	case "worker":
-		return "worker> "
+		return "Worker   "
 	default:
-		return "tuku> "
+		return "Tuku     "
 	}
 }
 
 func transcriptBannerLines(status HostStatus, width int) []string {
 	switch status.State {
 	case HostStateFallback:
-		lines := wrapText("Live input is unavailable in this pane.", width)
+		lines := wrapText("Live worker input is unavailable in this shell.", width)
 		if note := strings.TrimSpace(status.Note); note != "" {
 			lines = append(lines, wrapText(note, width)...)
 		}
 		return lines
 	case HostStateTranscriptOnly:
-		lines := wrapText("No live worker is attached to this pane.", width)
+		lines := wrapText("Showing bounded transcript evidence in a read-only shell.", width)
 		if note := strings.TrimSpace(status.Note); note != "" {
 			lines = append(lines, wrapText(note, width)...)
 		}

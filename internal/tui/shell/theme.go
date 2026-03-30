@@ -39,6 +39,7 @@ type shellTheme struct {
 	workspaceBase    lipgloss.Style
 	workspaceFocused lipgloss.Style
 	workspaceTitle   lipgloss.Style
+	workspaceFocus   lipgloss.Style
 	workspaceSub     lipgloss.Style
 	workspaceBody    lipgloss.Style
 
@@ -64,6 +65,8 @@ type shellTheme struct {
 	footerText  lipgloss.Style
 	footerMuted lipgloss.Style
 	footerRule  lipgloss.Style
+	keycap      lipgloss.Style
+	keyLabel    lipgloss.Style
 
 	overlayBase  lipgloss.Style
 	overlayTitle lipgloss.Style
@@ -79,123 +82,135 @@ func newShellTheme(layout shellLayout) shellTheme {
 		panelGap:     panelGap,
 
 		rootBackground: lipgloss.NewStyle().
-			Background(lipgloss.Color("#090C12")).
-			Foreground(lipgloss.Color("#E8EDF4")),
+			Background(lipgloss.Color("#070C14")).
+			Foreground(lipgloss.Color("#E6EDF8")),
 
 		headerKicker: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#97AFC9")).
+			Foreground(lipgloss.Color("#8EC7FF")).
 			Bold(true),
 		headerTitle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#F3F7FD")).
+			Foreground(lipgloss.Color("#F4F8FF")).
 			Bold(true),
 		headerSubtext: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#93A1B5")),
+			Foreground(lipgloss.Color("#8EA0BA")),
 		headerRule: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#1A2533")),
+			Foreground(lipgloss.Color("#1A273A")),
 
 		chipBase: lipgloss.NewStyle().
 			Padding(0, 1),
 		chipNeutral: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#C7D2E1")).
-			Background(lipgloss.Color("#182231")),
+			Foreground(lipgloss.Color("#D0DBEA")).
+			Background(lipgloss.Color("#1A2A3F")),
 		chipAccent: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFDCC5")).
-			Background(lipgloss.Color("#553626")),
+			Foreground(lipgloss.Color("#FEE5D2")).
+			Background(lipgloss.Color("#5E3A26")),
 		chipPositive: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D6F3E5")).
-			Background(lipgloss.Color("#1D4938")),
+			Foreground(lipgloss.Color("#D9F5E6")).
+			Background(lipgloss.Color("#1D503B")),
 		chipCaution: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#F5E4CC")).
-			Background(lipgloss.Color("#594527")),
+			Foreground(lipgloss.Color("#F8E6CC")).
+			Background(lipgloss.Color("#5E4B2A")),
 		chipDanger: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FAD7D7")).
-			Background(lipgloss.Color("#5A2D2D")),
+			Foreground(lipgloss.Color("#FCDADA")).
+			Background(lipgloss.Color("#5D2D2D")),
 		chipMuted: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#AEBBCF")).
-			Background(lipgloss.Color("#17202D")),
+			Foreground(lipgloss.Color("#AABACF")).
+			Background(lipgloss.Color("#172336")),
 
 		workspaceBase: lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder(), true, false, true, false).
-			BorderForeground(lipgloss.Color("#293444")).
-			Background(lipgloss.Color("#0D121A")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#293B53")).
+			Background(lipgloss.Color("#0C141F")).
 			Padding(0, 1),
 		workspaceFocused: lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder(), true, false, true, false).
-			BorderForeground(lipgloss.Color("#57759A")).
-			Background(lipgloss.Color("#0D121A")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#4E83BF")).
+			Background(lipgloss.Color("#0E1725")).
 			Padding(0, 1),
 		workspaceTitle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#ECF2FA")).
+			Foreground(lipgloss.Color("#EDF4FF")).
+			Bold(true),
+		workspaceFocus: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8EC7FF")).
 			Bold(true),
 		workspaceSub: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#8F9EB3")),
+			Foreground(lipgloss.Color("#89A0BE")),
 		workspaceBody: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#E0E7F1")),
+			Foreground(lipgloss.Color("#DCE6F4")),
 
 		railBase: lipgloss.NewStyle().
-			Background(lipgloss.Color("#0B1017")).
+			Background(lipgloss.Color("#0A111B")).
 			Padding(0, 0),
 		railTitle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#A2B4CB")).
+			Foreground(lipgloss.Color("#B0C3DB")).
 			Bold(true),
 		railHint: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7888A0")),
+			Foreground(lipgloss.Color("#7D93AE")),
 		railCard: lipgloss.NewStyle().
-			Background(lipgloss.Color("#101724")).
+			Background(lipgloss.Color("#101C2C")).
 			Padding(0, 1).
 			MarginBottom(1),
 		railCardTitle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#BFCDE0")).
+			Foreground(lipgloss.Color("#C8D8EE")).
 			Bold(true),
 		railCardBody: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D1DCEB")),
+			Foreground(lipgloss.Color("#D6E2F2")),
 
 		activityBase: lipgloss.NewStyle().
-			Background(lipgloss.Color("#0C1118")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#263A52")).
+			Background(lipgloss.Color("#0C1420")).
 			Padding(0, 1),
 		activityTitle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#A5B7CF")).
+			Foreground(lipgloss.Color("#B5C9E2")).
 			Bold(true),
 		activityBody: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#C8D6E8")),
+			Foreground(lipgloss.Color("#D2DEEE")),
 
 		dockBase: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#2D3A4D")).
-			Background(lipgloss.Color("#0F151E")).
+			BorderForeground(lipgloss.Color("#2F4560")).
+			Background(lipgloss.Color("#0F1826")).
 			Padding(0, 1),
 		dockTitle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#E9F0FA")).
+			Foreground(lipgloss.Color("#EAF2FF")).
 			Bold(true),
 		dockStatus: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#97ABC4")),
+			Foreground(lipgloss.Color("#A4BAD4")),
 		dockPrompt: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#F3F7FD")).
+			Foreground(lipgloss.Color("#F4F8FF")).
 			Bold(true),
 		dockPlaceholder: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#9FB0C6")),
+			Foreground(lipgloss.Color("#A7BCD6")),
 		dockHint: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#8597B0")),
+			Foreground(lipgloss.Color("#8FA4BF")),
 		dockReadOnly: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D8C5A8")),
+			Foreground(lipgloss.Color("#D8C9B1")),
 
 		footerText: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#8D9CB2")),
+			Foreground(lipgloss.Color("#93A6C0")),
 		footerMuted: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#6F7F98")),
+			Foreground(lipgloss.Color("#7287A4")),
 		footerRule: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#192433")),
+			Foreground(lipgloss.Color("#192A3E")),
+		keycap: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#EAF3FF")).
+			Background(lipgloss.Color("#27405D")).
+			Bold(true).
+			Padding(0, 1),
+		keyLabel: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8FA5C0")),
 
 		overlayBase: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#5A6E89")).
-			Background(lipgloss.Color("#0D121A")).
+			BorderForeground(lipgloss.Color("#5F7CA1")).
+			Background(lipgloss.Color("#0D1726")).
 			Padding(1, 2),
 		overlayTitle: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#E9F0FA")).
+			Foreground(lipgloss.Color("#ECF3FF")).
 			Bold(true),
 		overlayText: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D6E0EE")),
+			Foreground(lipgloss.Color("#D8E4F4")),
 	}
 }
 
@@ -236,4 +251,17 @@ func toneForStatus(value string) shellTone {
 	default:
 		return shellToneNeutral
 	}
+}
+
+func (t shellTheme) keyHint(key string, label string) string {
+	key = strings.TrimSpace(key)
+	label = strings.TrimSpace(label)
+	if key == "" && label == "" {
+		return ""
+	}
+	keyToken := t.keycap.Render(strings.ToUpper(nonEmpty(key, "•")))
+	if label == "" {
+		return keyToken
+	}
+	return keyToken + " " + t.keyLabel.Render(label)
 }

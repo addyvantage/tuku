@@ -12,11 +12,12 @@ func TestTranscriptHostFallbackLinesExplainReadOnlyMode(t *testing.T) {
 	host.UpdateSnapshot(Snapshot{
 		RecentConversation: []ConversationItem{
 			{Role: "system", Body: "Canonical response."},
+			{Role: "worker", Body: "Worker answer."},
 		},
 	})
 
 	lines := strings.Join(host.Lines(12, 80), "\n")
-	if !strings.Contains(lines, "Live input is unavailable in this pane.") {
+	if !strings.Contains(lines, "Live worker input is unavailable in this shell.") {
 		t.Fatalf("expected fallback banner, got %q", lines)
 	}
 	if !strings.Contains(lines, "live worker exited; switched to transcript fallback") {
@@ -25,8 +26,31 @@ func TestTranscriptHostFallbackLinesExplainReadOnlyMode(t *testing.T) {
 	if strings.Contains(lines, "historical transcript only") {
 		t.Fatalf("expected fallback banner to avoid repeating transcript-summary wording, got %q", lines)
 	}
-	if !strings.Contains(lines, "tuku> Canonical response.") {
-		t.Fatalf("expected transcript content, got %q", lines)
+	if strings.Contains(lines, "Canonical response.") {
+		t.Fatalf("expected system narration to stay out of transcript fallback body, got %q", lines)
+	}
+	if !strings.Contains(lines, "Worker   Worker answer.") {
+		t.Fatalf("expected worker transcript content to remain, got %q", lines)
+	}
+}
+
+func TestTranscriptHostSuppressesSystemNarrationFromConversationBody(t *testing.T) {
+	host := NewTranscriptHost()
+	host.markTranscriptOnly("")
+	host.UpdateSnapshot(Snapshot{
+		RecentConversation: []ConversationItem{
+			{Role: "system", Body: "Tuku task initialized. Repo anchor captured."},
+			{Role: "user", Body: "Help me build the TUI properly"},
+			{Role: "worker", Body: "I can help with that."},
+		},
+	})
+
+	lines := strings.Join(host.Lines(16, 80), "\n")
+	if strings.Contains(lines, "Tuku task initialized.") {
+		t.Fatalf("expected startup narration to stay out of transcript body, got %q", lines)
+	}
+	if !strings.Contains(lines, "You      Help me build the TUI properly") || !strings.Contains(lines, "Worker   I can help with that.") {
+		t.Fatalf("expected user and worker turns to remain visible, got %q", lines)
 	}
 }
 
@@ -44,7 +68,7 @@ func TestTranscriptHostTranscriptOnlyLinesExplainHistoricalMode(t *testing.T) {
 	host.markTranscriptOnly("")
 
 	lines := strings.Join(host.Lines(8, 80), "\n")
-	if !strings.Contains(lines, "No live worker is attached to this pane.") {
+	if !strings.Contains(lines, "Showing bounded transcript evidence in a read-only shell.") {
 		t.Fatalf("expected historical transcript banner, got %q", lines)
 	}
 }
@@ -75,10 +99,10 @@ func TestTranscriptHostRendersDurableTranscriptEvidenceChunks(t *testing.T) {
 	if !strings.Contains(lines, "transcript-only partial evidence: 40 retained, 12 dropped by bounded retention") {
 		t.Fatalf("expected bounded transcript summary line, got %q", lines)
 	}
-	if !strings.Contains(lines, "worker> first durable line") {
+	if !strings.Contains(lines, "Worker   first durable line") {
 		t.Fatalf("expected worker evidence transcript line, got %q", lines)
 	}
-	if !strings.Contains(lines, "evidence> fallback reason persisted") {
+	if !strings.Contains(lines, "Evidence fallback reason persisted") {
 		t.Fatalf("expected fallback evidence transcript line, got %q", lines)
 	}
 }

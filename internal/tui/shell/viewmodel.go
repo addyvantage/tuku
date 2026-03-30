@@ -2585,28 +2585,6 @@ func sessionPriorLine(session SessionState) string {
 	return "previous shell outcome " + truncateWithEllipsis(session.PriorPersistedSummary, 48)
 }
 
-func nonEmpty(value string, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
-	}
-	return value
-}
-
-func yesNo(v bool) string {
-	if v {
-		return "yes"
-	}
-	return "no"
-}
-
-func humanizeConstant(value string) string {
-	value = strings.TrimSpace(strings.ToLower(value))
-	if value == "" {
-		return ""
-	}
-	return strings.ReplaceAll(value, "_", " ")
-}
-
 func footerOperatorCue(snapshot Snapshot) string {
 	if snapshot.Recovery == nil || isScratchIntakeSnapshot(snapshot) {
 		return ""
@@ -2616,31 +2594,6 @@ func footerOperatorCue(snapshot Snapshot) string {
 		return ""
 	}
 	return "next " + action
-}
-
-func truncateWithEllipsis(value string, limit int) string {
-	value = strings.TrimSpace(value)
-	if limit <= 0 || len(value) <= limit {
-		return value
-	}
-	if limit <= 3 {
-		return value[:limit]
-	}
-	return value[:limit-3] + "..."
-}
-
-func min(a int, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a int, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func pendingTaskMessageEditorLines(ui UIState, height int, width int) []string {

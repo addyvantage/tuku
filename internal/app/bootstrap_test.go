@@ -2736,6 +2736,8 @@ func TestRunPrimaryEntryStartsDaemonAndOpensShell(t *testing.T) {
 	origResolveRepo := resolveRepoRootFromDir
 	origTimeout := daemonReadyTimeout
 	origInterval := daemonRetryInterval
+	origLoadWorker := loadPrimaryWorkerPref
+	origSaveWorker := savePrimaryWorkerPref
 	defer func() {
 		ipcCall = origCall
 		startLocalDaemon = origStart
@@ -2743,12 +2745,16 @@ func TestRunPrimaryEntryStartsDaemonAndOpensShell(t *testing.T) {
 		resolveRepoRootFromDir = origResolveRepo
 		daemonReadyTimeout = origTimeout
 		daemonRetryInterval = origInterval
+		loadPrimaryWorkerPref = origLoadWorker
+		savePrimaryWorkerPref = origSaveWorker
 	}()
 
 	getWorkingDir = func() (string, error) { return "/tmp/repo", nil }
 	resolveRepoRootFromDir = func(_ context.Context, dir string) (string, error) { return dir, nil }
 	daemonReadyTimeout = 50 * time.Millisecond
 	daemonRetryInterval = 0
+	loadPrimaryWorkerPref = func() (tukushell.WorkerPreference, error) { return tukushell.WorkerPreferenceAuto, nil }
+	savePrimaryWorkerPref = func(preference tukushell.WorkerPreference) error { return nil }
 
 	var calls int
 	ipcCall = func(_ context.Context, _ string, req ipc.Request) (ipc.Response, error) {
@@ -2768,6 +2774,9 @@ func TestRunPrimaryEntryStartsDaemonAndOpensShell(t *testing.T) {
 
 	var openedTaskID string
 	app := &CLIApplication{
+		chooseWorkerFn: func(_ context.Context, _ tukushell.WorkerPreference) (tukushell.WorkerPreference, error) {
+			return tukushell.WorkerPreferenceCodex, nil
+		},
 		openShellFn: func(_ context.Context, _ string, taskID string, _ tukushell.WorkerPreference) error {
 			openedTaskID = taskID
 			return nil

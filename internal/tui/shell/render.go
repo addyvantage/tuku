@@ -126,25 +126,29 @@ func renderMainWorkspace(theme shellTheme, vm ViewModel, layout shellLayout) []s
 
 func renderActivityStrip(theme shellTheme, strip StripView, layout shellLayout) []string {
 	title, subtitle := splitPaneTitle(strip.Title)
-	innerWidth := max(1, layout.contentWidth)
-	lines := make([]string, 0, layout.proofHeight)
+	frameW := theme.activityBase.GetHorizontalFrameSize()
+	frameH := theme.activityBase.GetVerticalFrameSize()
+	innerWidth := max(1, layout.contentWidth-frameW)
+	innerHeight := max(1, layout.proofHeight-frameH)
+
+	lines := make([]string, 0, innerHeight)
 	lines = append(lines, joinLeftRight(theme.activityTitle.Render(strings.ToUpper(title)), theme.railHint.Render(strings.ToLower(nonEmpty(subtitle, "activity stream"))), innerWidth))
 	for _, line := range strip.Lines {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
 		lines = append(lines, "• "+line)
-		if len(lines) >= layout.proofHeight {
+		if len(lines) >= innerHeight {
 			break
 		}
 	}
-	for len(lines) < layout.proofHeight {
+	for len(lines) < innerHeight {
 		lines = append(lines, "")
 	}
 	for i := range lines {
 		lines[i] = theme.activityBody.Render(ansiPadToWidth(ansiTruncate(lines[i], innerWidth), innerWidth))
 	}
-	block := theme.activityBase.Width(innerWidth).Render(strings.Join(lines, "\n"))
+	block := theme.activityBase.Render(strings.Join(lines, "\n"))
 	return applyOuterPadding(splitLines(block), layout.outerPadding)
 }
 
@@ -231,17 +235,32 @@ func renderFooterBlock(theme shellTheme, footer string, layout shellLayout) []st
 	left := strings.Join(primary, " · ")
 	left = truncateWithEllipsis(left, max(20, innerWidth-22))
 	line := joinLeftRight(theme.footerText.Render(left), theme.footerMuted.Render(refresh), innerWidth)
+	keyLine := ""
+	if strings.TrimSpace(keys) != "" {
+		keyLine = renderFooterKeyHints(theme, keys, innerWidth)
+	}
 
-	lines := []string{
-		theme.footerRule.Render(strings.Repeat("─", innerWidth)),
-		line,
-	}
-	if strings.TrimSpace(keys) != "" && layout.footerHeight > 2 {
-		lines = append(lines, theme.footerMuted.Render(ansiTruncate(keys, innerWidth)))
-	}
-	if layout.footerHeight <= 1 {
+	lines := make([]string, 0, max(1, layout.footerHeight))
+	switch {
+	case layout.footerHeight <= 1:
 		lines = []string{line}
-	} else if len(lines) > layout.footerHeight {
+	case layout.footerHeight == 2:
+		lines = append(lines, line)
+		if keyLine != "" {
+			lines = append(lines, keyLine)
+		} else {
+			lines = append(lines, theme.footerRule.Render(strings.Repeat("─", innerWidth)))
+		}
+	default:
+		lines = append(lines,
+			theme.footerRule.Render(strings.Repeat("─", innerWidth)),
+			line,
+		)
+		if keyLine != "" {
+			lines = append(lines, keyLine)
+		}
+	}
+	if len(lines) > layout.footerHeight {
 		lines = lines[:layout.footerHeight]
 	}
 	for len(lines) < layout.footerHeight {
@@ -251,6 +270,51 @@ func renderFooterBlock(theme shellTheme, footer string, layout shellLayout) []st
 		lines[i] = ansiPadToWidth(lines[i], innerWidth)
 	}
 	return applyOuterPadding(lines, layout.outerPadding)
+}
+
+func renderFooterKeyHints(theme shellTheme, keyPart string, width int) string {
+	hints := parseFooterKeyHints(keyPart)
+	if len(hints) == 0 {
+		return ""
+	}
+	tokens := make([]string, 0, len(hints))
+	for _, hint := range hints {
+		tokens = append(tokens, theme.keyHint(hint[0], hint[1]))
+	}
+	wrapped := wrapTokens(tokens, width, 2)
+	if len(wrapped) == 0 {
+		return ""
+	}
+	return theme.footerMuted.Render(ansiPadToWidth(ansiTruncate(wrapped[0], width), width))
+}
+
+func parseFooterKeyHints(keysPart string) [][2]string {
+	keysPart = strings.TrimSpace(keysPart)
+	if keysPart == "" {
+		return nil
+	}
+	lower := strings.ToLower(keysPart)
+	if strings.HasPrefix(lower, "keys ") {
+		keysPart = strings.TrimSpace(keysPart[len("keys "):])
+	}
+	fields := strings.Fields(keysPart)
+	if len(fields) == 0 {
+		return nil
+	}
+
+	hints := make([][2]string, 0, len(fields)/2)
+	for i := 0; i < len(fields); {
+		key := fields[i]
+		label := ""
+		if i+1 < len(fields) {
+			label = fields[i+1]
+			i += 2
+		} else {
+			i++
+		}
+		hints = append(hints, [2]string{key, label})
+	}
+	return hints
 }
 
 func renderOverlay(theme shellTheme, overlay OverlayView, width int, height int) string {
@@ -437,118 +501,6 @@ func fitHeaderLines(lines []string, target int) []string {
 
 func lipColor(v string) lipgloss.TerminalColor {
 	return lipgloss.Color(v)
-}
-
-func wrapText(text string, width int) []string {
-	if width <= 0 {
-		return []string{text}
-	}
-	text = strings.ReplaceAll(text, "\t", "  ")
-	parts := strings.Split(text, "\n")
-	lines := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimRight(part, " ")
-		if part == "" {
-			lines = append(lines, "")
-			continue
-		}
-		words := strings.Fields(part)
-		if len(words) == 0 {
-			lines = append(lines, "")
-			continue
-		}
-		current := ""
-		for _, segment := range wrapLongToken(words[0], width) {
-			if current == "" {
-				current = segment
-				continue
-			}
-			lines = append(lines, current)
-			current = segment
-		}
-		for _, word := range words[1:] {
-			for _, segment := range wrapLongToken(word, width) {
-				if current == "" {
-					current = segment
-					continue
-				}
-				if runeLen(current)+1+runeLen(segment) <= width {
-					current += " " + segment
-					continue
-				}
-				lines = append(lines, current)
-				current = segment
-			}
-		}
-		if current != "" {
-			lines = append(lines, current)
-		}
-	}
-	return lines
-}
-
-func wrapOutputLine(text string, width int) []string {
-	if width <= 0 {
-		return []string{text}
-	}
-	text = strings.ReplaceAll(text, "\t", "  ")
-	if text == "" {
-		return []string{""}
-	}
-	runes := []rune(text)
-	lines := make([]string, 0, (len(runes)/width)+1)
-	for len(runes) > 0 {
-		chunk := min(width, len(runes))
-		lines = append(lines, string(runes[:chunk]))
-		runes = runes[chunk:]
-	}
-	return lines
-}
-
-func wrapPrefixedOutput(prefix string, text string, width int) []string {
-	if width <= 0 {
-		return []string{prefix + text}
-	}
-	text = strings.ReplaceAll(text, "\t", "  ")
-	indent := strings.Repeat(" ", runeLen(prefix))
-	available := max(1, width-runeLen(prefix))
-	parts := strings.Split(text, "\n")
-	lines := make([]string, 0, len(parts))
-	for _, part := range parts {
-		wrapped := wrapOutputLine(part, available)
-		for idx, segment := range wrapped {
-			if idx == 0 {
-				lines = append(lines, prefix+segment)
-				continue
-			}
-			lines = append(lines, indent+segment)
-		}
-	}
-	return lines
-}
-
-func wrapLongToken(token string, width int) []string {
-	if width <= 0 || runeLen(token) <= width {
-		return []string{token}
-	}
-	runes := []rune(token)
-	lines := make([]string, 0, (len(runes)/width)+1)
-	for len(runes) > 0 {
-		chunk := min(width, len(runes))
-		lines = append(lines, string(runes[:chunk]))
-		runes = runes[chunk:]
-	}
-	return lines
-}
-
-func fitBottom(lines []string, height int) []string {
-	if height <= 0 {
-		return nil
-	}
-	if len(lines) <= height {
-		return lines
-	}
-	return lines[len(lines)-height:]
 }
 
 func joinAndPad(parts []string, sep string, width int) string {

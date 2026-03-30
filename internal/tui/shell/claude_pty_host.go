@@ -258,7 +258,7 @@ func (h *ClaudePTYHost) Lines(height int, width int) []string {
 
 	_ = partial
 	partialLine := sanitizeRenderedLine(partial)
-	if partialLine != "" && !isLikelyCursorNoiseLine(partialLine) && !isLikelyFrameNoiseLine(partialLine) {
+	if len(lines) > 0 && partialLine != "" && !isLikelyCursorNoiseLine(partialLine) && !isLikelyFrameNoiseLine(partialLine) {
 		lines = append(lines, partialLine)
 	}
 	if len(lines) == 0 {

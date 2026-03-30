@@ -124,11 +124,11 @@ func (l shellLayout) workerContentSize() (int, int) {
 func layoutDensity(width int) (outerPadding int, panelGap int, headerHeight int, dockHeight int, footerHeight int) {
 	switch {
 	case width >= 160:
-		return 3, 3, 4, 6, 1
+		return 3, 3, 4, 6, 2
 	case width >= 132:
-		return 2, 2, 4, 5, 1
+		return 2, 2, 4, 5, 2
 	case width >= 108:
-		return 1, 2, 3, 5, 1
+		return 1, 2, 3, 5, 2
 	case width >= 86:
 		return 1, 1, 3, 4, 1
 	default:

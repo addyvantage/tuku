@@ -124,15 +124,22 @@ func TestCodexPTYHostAppendOutputFiltersCursorNoiseRunes(t *testing.T) {
 	}
 }
 
-func TestCodexPTYHostLinesIncludeVisiblePartialOutput(t *testing.T) {
+func TestCodexPTYHostLinesSuppressLeadingPartialUntilCommittedOutputExists(t *testing.T) {
 	host := NewDefaultCodexPTYHost()
 	host.status.State = HostStateLive
 	host.partial = "working on runtime stabilization"
 
 	lines := host.Lines(10, 80)
 	joined := strings.Join(lines, "\n")
+	if strings.Contains(joined, "working on runtime stabilization") {
+		t.Fatalf("expected leading partial output to stay hidden, got %q", joined)
+	}
+
+	host.lines = []string{"confirmed output"}
+	lines = host.Lines(10, 80)
+	joined = strings.Join(lines, "\n")
 	if !strings.Contains(joined, "working on runtime stabilization") {
-		t.Fatalf("expected partial output to be visible, got %q", joined)
+		t.Fatalf("expected partial output to appear once committed output exists, got %q", joined)
 	}
 }
 

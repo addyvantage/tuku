@@ -310,7 +310,7 @@ func (h *CodexPTYHost) Lines(height int, width int) []string {
 
 	_ = partial
 	partialLine := sanitizeRenderedLine(partial)
-	if partialLine != "" && !isLikelyCursorNoiseLine(partialLine) && !isLikelyFrameNoiseLine(partialLine) {
+	if len(lines) > 0 && partialLine != "" && !isLikelyCursorNoiseLine(partialLine) && !isLikelyFrameNoiseLine(partialLine) {
 		lines = append(lines, partialLine)
 	}
 	if len(lines) == 0 {
@@ -505,7 +505,6 @@ func (h *CodexPTYHost) writeInputExec(data []byte) bool {
 	}
 
 	h.recordActivity("codex prompt submitted")
-	h.appendExecOutputLine("tuku> " + prompt)
 	go h.runExecPrompt(prompt)
 	return true
 }
@@ -629,7 +628,7 @@ func (h *CodexPTYHost) runExecPrompt(prompt string) {
 	sawOutput := outputSeen
 	outputSeenMu.Unlock()
 	if !sawOutput {
-		h.appendExecOutputLine("tuku> Codex returned no visible assistant message.")
+		h.appendExecOutputLine("Codex returned no visible assistant message.")
 	}
 	h.finishExecPrompt(err, sawOutput)
 }
