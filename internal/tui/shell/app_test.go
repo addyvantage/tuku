@@ -650,6 +650,36 @@ func TestRouteKeyForwardsInputToLiveWorkerHost(t *testing.T) {
 	}
 }
 
+func TestRouteKeyCapturesSubmittedLiveWorkerPrompt(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live"},
+	}
+	ui := UIState{Focus: FocusWorker}
+
+	for _, b := range []byte("Fix Tuku TUI") {
+		if action := routeKey(&ui, host, b); action != actionNone {
+			t.Fatalf("expected live typing to stay in worker mode, got %v for byte %q", action, b)
+		}
+	}
+	if action := routeKey(&ui, host, '\n'); action != actionUIUpdate {
+		t.Fatalf("expected submitted prompt to trigger ui refresh, got %v", action)
+	}
+
+	if !ui.WorkerPromptPending {
+		t.Fatal("expected pending worker prompt marker")
+	}
+	if ui.LastWorkerPrompt != "Fix Tuku TUI" {
+		t.Fatalf("expected captured worker prompt, got %q", ui.LastWorkerPrompt)
+	}
+	if ui.LiveInputBuffer != "" {
+		t.Fatalf("expected live input buffer reset after submit, got %q", ui.LiveInputBuffer)
+	}
+	if len(host.writes) != len("Fix Tuku TUI")+1 {
+		t.Fatalf("expected every key to reach worker, got %d writes", len(host.writes))
+	}
+}
+
 func TestRouteKeyUsesPrefixedScratchAdoptionCommand(t *testing.T) {
 	host := &stubHost{
 		canInput: true,

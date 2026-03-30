@@ -2521,3 +2521,31 @@ func TestBuildViewModelLiveDockHintsIncludeCommandDiscovery(t *testing.T) {
 		t.Fatalf("expected dock hint to include command discovery, got %q", vm.InputDock.Hint)
 	}
 }
+
+func TestBuildViewModelShowsRunningPromptAfterLiveSubmit(t *testing.T) {
+	host := &stubHost{
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+		canInput: true,
+		lines:    []string{"codex> waiting"},
+	}
+	vm := BuildViewModel(Snapshot{
+		TaskID: "tsk_live_prompt",
+		Phase:  "EXECUTING",
+		Status: "ACTIVE",
+	}, UIState{
+		Focus:               FocusWorker,
+		WorkerPromptPending: true,
+		LastWorkerPrompt:    "Fix Tuku TUI",
+	}, host, 120, 32)
+
+	if vm.InputDock.Status != "worker running" {
+		t.Fatalf("expected running dock status, got %q", vm.InputDock.Status)
+	}
+	if !strings.Contains(vm.InputDock.Placeholder, "working on: Fix Tuku TUI") {
+		t.Fatalf("expected running prompt in dock placeholder, got %q", vm.InputDock.Placeholder)
+	}
+	joinedPane := strings.Join(vm.WorkerPane.Lines, "\n")
+	if !strings.Contains(joinedPane, "working on: Fix Tuku TUI") {
+		t.Fatalf("expected running prompt summary in worker pane, got %q", joinedPane)
+	}
+}

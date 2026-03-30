@@ -284,6 +284,9 @@ func isLikelyFrameNoiseLine(line string) bool {
 	if isPureBorderLine(trimmed) {
 		return true
 	}
+	if isMostlyBorderNoiseLine(trimmed) {
+		return true
+	}
 
 	return false
 }
@@ -299,11 +302,50 @@ func hasEdgeRailsWithBlankInterior(line string) bool {
 	}
 	mid := line[firstSize : len(line)-utf8.RuneLen(last)]
 	for _, r := range mid {
-		if r != ' ' && r != '\t' {
+		if !unicode.IsSpace(r) {
 			return false
 		}
 	}
 	return true
+}
+
+func isMostlyBorderNoiseLine(line string) bool {
+	if line == "" {
+		return false
+	}
+	var (
+		borderCount  int
+		spaceCount   int
+		alphaNum     int
+		otherVisible int
+	)
+	for _, r := range line {
+		switch {
+		case unicode.IsSpace(r):
+			spaceCount++
+		case isBorderRune(r):
+			borderCount++
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			alphaNum++
+		case unicode.IsPunct(r) || unicode.IsSymbol(r):
+			otherVisible++
+		default:
+			otherVisible++
+		}
+	}
+	total := borderCount + spaceCount + alphaNum + otherVisible
+	if total == 0 {
+		return false
+	}
+	if borderCount < 2 {
+		return false
+	}
+	// Keep lines that clearly contain substantial text.
+	if alphaNum >= 5 {
+		return false
+	}
+	noiseRunes := borderCount + spaceCount
+	return noiseRunes*100/total >= 92
 }
 
 func isPureBorderLine(line string) bool {
@@ -326,7 +368,7 @@ func isPureBorderLine(line string) bool {
 
 func isVerticalBorderRune(r rune) bool {
 	switch r {
-	case '|', '│', '┃', '║':
+	case '|', '│', '┃', '║', '┆', '┊', '┇', '┋', '╎', '╏', '▏', '▕':
 		return true
 	default:
 		return false
@@ -336,7 +378,7 @@ func isVerticalBorderRune(r rune) bool {
 func isBorderRune(r rune) bool {
 	switch r {
 	case '-', '=', '|', '+',
-		'─', '━', '│', '┃', '║',
+		'─', '━', '│', '┃', '║', '┆', '┊', '┇', '┋', '╎', '╏', '▏', '▕',
 		'┌', '┐', '└', '┘',
 		'├', '┤', '┬', '┴', '┼',
 		'╭', '╮', '╰', '╯',

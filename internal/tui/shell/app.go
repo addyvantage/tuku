@@ -293,6 +293,18 @@ func (a *App) Run(ctx context.Context) error {
 
 		currentStatus := host.Status()
 		captureHostLifecycle(ctx, a.LifecycleSink, a.TaskID, ui.Session.SessionID, &ui, lastHostStatus, currentStatus)
+		if ui.WorkerPromptPending {
+			if currentStatus.State != HostStateLive {
+				ui.WorkerPromptPending = false
+				ui.LiveInputBuffer = ""
+				needsRender = true
+				forceImmediateRender = true
+			} else if !currentStatus.LastOutputAt.IsZero() && (ui.LastWorkerPromptAt.IsZero() || !currentStatus.LastOutputAt.Before(ui.LastWorkerPromptAt)) {
+				ui.WorkerPromptPending = false
+				needsRender = true
+				hostDrivenRender = false
+			}
+		}
 		if hostStatusChanged(lastHostStatus, currentStatus) {
 			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, currentStatus, true, &ui)
 			needsRender = true
@@ -554,6 +566,9 @@ func routeKey(ui *UIState, host WorkerHost, key byte) keyAction {
 		}
 		if host.CanAcceptInput() && host.WriteInput([]byte{key}) {
 			ui.LastError = ""
+			if submitted := trackLiveWorkerInput(ui, key); submitted {
+				return actionUIUpdate
+			}
 			return actionNone
 		}
 		action := handleShellKey(ui, key)
@@ -566,6 +581,40 @@ func routeKey(ui *UIState, host WorkerHost, key byte) keyAction {
 		}
 	}
 	return handleShellKey(ui, key)
+}
+
+func trackLiveWorkerInput(ui *UIState, key byte) bool {
+	if ui == nil {
+		return false
+	}
+	switch key {
+	case '\r', '\n':
+		line := strings.TrimSpace(ui.LiveInputBuffer)
+		ui.LiveInputBuffer = ""
+		if line == "" {
+			return false
+		}
+		ui.LastWorkerPrompt = line
+		ui.LastWorkerPromptAt = time.Now().UTC()
+		ui.WorkerPromptPending = true
+		return true
+	case 0x7f, 0x08:
+		if ui.LiveInputBuffer == "" {
+			return false
+		}
+		_, size := utf8.DecodeLastRuneInString(ui.LiveInputBuffer)
+		if size <= 0 {
+			ui.LiveInputBuffer = ""
+			return false
+		}
+		ui.LiveInputBuffer = ui.LiveInputBuffer[:len(ui.LiveInputBuffer)-size]
+		return false
+	default:
+		if key >= 32 && key < 127 {
+			ui.LiveInputBuffer += string(key)
+		}
+		return false
+	}
 }
 
 func routePendingTaskMessageEditKey(ui *UIState, key byte) keyAction {

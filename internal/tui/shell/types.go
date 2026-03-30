@@ -821,6 +821,10 @@ type UIState struct {
 	ShowStatus                     bool
 	Focus                          FocusPane
 	EscapePrefix                   bool
+	LiveInputBuffer                string
+	LastWorkerPrompt               string
+	LastWorkerPromptAt             time.Time
+	WorkerPromptPending            bool
 	PendingTaskMessage             string
 	PendingTaskMessageSource       string
 	PendingTaskMessageEditMode     bool

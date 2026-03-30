@@ -2162,7 +2162,12 @@ func buildInputDock(snapshot Snapshot, ui UIState, host WorkerHost) InputDockVie
 	if status.InputLive {
 		dock.Status = "worker live input"
 		dock.ReadOnly = false
-		dock.Placeholder = "Input goes directly to worker. Prefix Ctrl-G for Tuku shell actions."
+		if pending := pendingWorkerPromptLine(ui, 110); pending != "" {
+			dock.Status = "worker running"
+			dock.Placeholder = pending
+		} else {
+			dock.Placeholder = "Input goes directly to worker. Prefix Ctrl-G for Tuku shell actions."
+		}
 		if cue := footerExecutePrimaryCue(snapshot, ui, host); cue != "" {
 			dock.Hint = cue + " · ctrl-g / commands · ctrl-g ? shortcuts · ctrl-g i inspector · ctrl-g p activity"
 		}
@@ -2276,7 +2281,7 @@ func workerPaneSummaryLine(snapshot Snapshot, ui UIState, host WorkerHost) strin
 	status := host.Status()
 	label := nonEmpty(strings.TrimSpace(status.Label), strings.TrimSpace(string(status.Mode)))
 	now := observedAt(ui)
-	cue := workerPanePrimaryCue(snapshot, status, now)
+	cue := workerPanePrimaryCue(snapshot, ui, status, now)
 	operatorCue := operatorPaneCue(snapshot)
 	if operatorCue == "" {
 		if cue == "" {
@@ -2290,9 +2295,12 @@ func workerPaneSummaryLine(snapshot Snapshot, ui UIState, host WorkerHost) strin
 	return operatorCue + " | " + label + " | " + cue
 }
 
-func workerPanePrimaryCue(snapshot Snapshot, status HostStatus, now time.Time) string {
+func workerPanePrimaryCue(snapshot Snapshot, ui UIState, status HostStatus, now time.Time) string {
 	switch status.State {
 	case HostStateLive:
+		if pending := pendingWorkerPromptLine(ui, 72); pending != "" {
+			return pending
+		}
 		if status.LastOutputAt.IsZero() {
 			return "awaiting visible output"
 		}
@@ -2337,6 +2345,11 @@ func inactivePaneCue(status HostStatus) string {
 
 func footerHostCue(snapshot Snapshot, ui UIState, status HostStatus) string {
 	now := observedAt(ui)
+	if status.State == HostStateLive {
+		if pending := pendingWorkerPromptLine(ui, 42); pending != "" {
+			return pending
+		}
+	}
 	switch status.State {
 	case HostStateLive:
 		if status.LastOutputAt.IsZero() {
@@ -2428,6 +2441,20 @@ func transcriptStateDetailLine(session KnownShellSession) string {
 	default:
 		return ""
 	}
+}
+
+func pendingWorkerPromptLine(ui UIState, maxRunes int) string {
+	if !ui.WorkerPromptPending {
+		return ""
+	}
+	prompt := strings.TrimSpace(ui.LastWorkerPrompt)
+	if prompt == "" {
+		return "working on latest prompt"
+	}
+	if maxRunes <= 0 {
+		maxRunes = 72
+	}
+	return "working on: " + truncateWithEllipsis(prompt, maxRunes)
 }
 
 func transcriptReviewStatusLine(session SessionState) string {
