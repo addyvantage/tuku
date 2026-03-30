@@ -193,6 +193,7 @@ func (a *App) Run(ctx context.Context) error {
 	if err := renderShell(stdoutFile, snapshot, ui, host, true, &lastRenderedFrame); err != nil {
 		return err
 	}
+	lastRenderedAt := ui.ObservedAt
 
 	lastHostStatus := host.Status()
 	lastHostDigest := hostVisibleDigest(host, computeShellLayout(lastWidth, lastHeight, ui))
@@ -200,6 +201,8 @@ func (a *App) Run(ctx context.Context) error {
 	for {
 		needsRender := false
 		clearFrame := false
+		hostDrivenRender := false
+		forceImmediateRender := false
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -210,10 +213,12 @@ func (a *App) Run(ctx context.Context) error {
 			if shouldQuit, renderNow, err := handleKeyAction(key, &ui, host, a, &snapshot, primaryActionDoneCh); err != nil {
 				ui.LastError = err.Error()
 				needsRender = true
+				forceImmediateRender = true
 			} else if shouldQuit {
 				return nil
 			} else if renderNow {
 				needsRender = true
+				forceImmediateRender = true
 			}
 			draining := true
 			for draining {
@@ -225,10 +230,12 @@ func (a *App) Run(ctx context.Context) error {
 					if shouldQuit, renderNow, err := handleKeyAction(nextKey, &ui, host, a, &snapshot, primaryActionDoneCh); err != nil {
 						ui.LastError = err.Error()
 						needsRender = true
+						forceImmediateRender = true
 					} else if shouldQuit {
 						return nil
 					} else if renderNow {
 						needsRender = true
+						forceImmediateRender = true
 					}
 				default:
 					draining = false
@@ -241,6 +248,7 @@ func (a *App) Run(ctx context.Context) error {
 				ui.LastError = ""
 			}
 			needsRender = true
+			forceImmediateRender = true
 		case <-snapshotTicker.C:
 			hostStatus := host.Status()
 			if hostStatus.State == HostStateLive && hostStatus.InputLive {
@@ -250,10 +258,12 @@ func (a *App) Run(ctx context.Context) error {
 			if loadErr := reloadShellSnapshot(a.Source, a.TaskID, host, a.RegistrySource, &snapshot, &ui, false); loadErr != nil {
 				ui.LastError = loadErr.Error()
 				needsRender = true
+				forceImmediateRender = true
 				break
 			}
 			ui.LastError = ""
 			needsRender = true
+			forceImmediateRender = true
 		case <-registryTicker.C:
 			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, host.Status(), true, &ui)
 		case <-transcriptTicker.C:
@@ -272,11 +282,13 @@ func (a *App) Run(ctx context.Context) error {
 			lastHeight = height
 			needsRender = true
 			clearFrame = true
+			forceImmediateRender = true
 		}
 		layout := computeShellLayout(lastWidth, lastHeight, ui)
 		currentHostDigest := hostVisibleDigest(host, layout)
 		if currentHostDigest != lastHostDigest {
 			needsRender = true
+			hostDrivenRender = true
 		}
 
 		currentStatus := host.Status()
@@ -284,6 +296,7 @@ func (a *App) Run(ctx context.Context) error {
 		if hostStatusChanged(lastHostStatus, currentStatus) {
 			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, currentStatus, true, &ui)
 			needsRender = true
+			forceImmediateRender = true
 		}
 		if nextHost, note, changed := transitionExitedHost(ctx, host, a.FallbackHost, snapshot); changed {
 			flushTranscriptEvidence(a.TaskID, ui.Session.SessionID, host, a.TranscriptSink, &ui)
@@ -296,21 +309,32 @@ func (a *App) Run(ctx context.Context) error {
 			reportShellSession(a.RegistrySink, a.TaskID, &ui.Session, host.Status(), true, &ui)
 			currentHostDigest = hostVisibleDigest(host, computeShellLayout(lastWidth, lastHeight, ui))
 			needsRender = true
+			forceImmediateRender = true
 		}
 		lastHostStatus = host.Status()
 
 		if !needsRender {
 			continue
 		}
+		if hostDrivenRender && !forceImmediateRender {
+			now := time.Now().UTC()
+			if now.Sub(lastRenderedAt) < shellHostRenderMinInterval {
+				continue
+			}
+		}
 		ui.ObservedAt = time.Now().UTC()
 		if err := renderShell(stdoutFile, snapshot, ui, host, clearFrame, &lastRenderedFrame); err != nil {
 			return err
 		}
+		lastRenderedAt = ui.ObservedAt
 		lastHostDigest = currentHostDigest
 	}
 }
 
-const shellHostPollInterval = 300 * time.Millisecond
+const (
+	shellHostPollInterval      = 450 * time.Millisecond
+	shellHostRenderMinInterval = 1200 * time.Millisecond
+)
 
 func hostVisibleDigest(host WorkerHost, layout shellLayout) uint64 {
 	if host == nil {

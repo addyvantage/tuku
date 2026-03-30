@@ -256,9 +256,7 @@ func (h *ClaudePTYHost) Lines(height int, width int) []string {
 		StateChangedAt: stateChangedAt,
 	}
 
-	if cleaned := sanitizeRenderedLine(partial); cleaned != "" && !isLikelyCursorNoiseLine(cleaned) {
-		lines = append(lines, cleaned)
-	}
+	_ = partial
 	if len(lines) == 0 {
 		switch state {
 		case HostStateStarting:
@@ -381,9 +379,6 @@ func (h *ClaudePTYHost) appendOutput(chunk []byte) {
 	if detected, source := detectWorkerSessionIDWithSource(result.partial); detected != "" && strings.TrimSpace(h.status.WorkerSessionID) == "" {
 		h.status.WorkerSessionID = detected
 		h.status.WorkerSessionIDSource = source
-	}
-	if partial := sanitizeRenderedLine(result.partial); partial != "" && !isLikelyCursorNoiseLine(partial) {
-		visibleOutput = true
 	}
 	if visibleOutput {
 		h.status.LastOutputAt = time.Now().UTC()
