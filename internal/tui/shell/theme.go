@@ -115,12 +115,12 @@ func newShellTheme(layout shellLayout) shellTheme {
 			Background(lipgloss.Color("#17202D")),
 
 		workspaceBase: lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
+			Border(lipgloss.NormalBorder(), true, false, true, false).
 			BorderForeground(lipgloss.Color("#293444")).
 			Background(lipgloss.Color("#0D121A")).
 			Padding(0, 1),
 		workspaceFocused: lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
+			Border(lipgloss.NormalBorder(), true, false, true, false).
 			BorderForeground(lipgloss.Color("#57759A")).
 			Background(lipgloss.Color("#0D121A")).
 			Padding(0, 1),
