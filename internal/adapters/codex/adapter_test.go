@@ -162,6 +162,8 @@ func TestBuildPromptIncludesPromptIREvidence(t *testing.T) {
 		NormalizedTaskType: "BUG_FIX",
 		Objective:          "Implement bounded change",
 		Operation:          "apply brief",
+		RepoIndexID:        common.RepoIndexID("ridx_123"),
+		RepoIndexSummary:   "files=24 symbols=19 components=4 routes=2 tests=6",
 		RankedTargets: []promptir.Target{
 			{Path: "internal/orchestrator/service.go", Kind: promptir.TargetFile, Score: 100},
 			{Path: "internal/orchestrator/compiled_brief.go", Kind: promptir.TargetFile, Score: 95},
@@ -181,6 +183,9 @@ func TestBuildPromptIncludesPromptIREvidence(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Prompt IR targets: internal/orchestrator/service.go, internal/orchestrator/compiled_brief.go") {
 		t.Fatalf("expected prompt ir targets in prompt, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Prompt IR repo index: id=ridx_123 summary=files=24 symbols=19 components=4 routes=2 tests=6") {
+		t.Fatalf("expected prompt ir repo index in prompt, got %q", prompt)
 	}
 	if !strings.Contains(prompt, "Prompt IR validators: go test ./internal/orchestrator | gofmt -l internal/orchestrator/service.go") {
 		t.Fatalf("expected prompt ir validators in prompt, got %q", prompt)

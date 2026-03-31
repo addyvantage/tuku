@@ -10,6 +10,7 @@ type BriefID string
 type EventID string
 type CheckpointID string
 type ContextPackID string
+type RepoIndexID string
 type MemoryID string
 type DecisionID string
 type BenchmarkID string

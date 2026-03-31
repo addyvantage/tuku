@@ -3,11 +3,9 @@ package orchestrator
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"tuku/internal/domain/benchmark"
 	"tuku/internal/domain/brief"
@@ -28,13 +26,13 @@ func (c *Coordinator) buildPromptIRAndBenchmark(
 	memory taskmemory.Snapshot,
 	rawPrompt string,
 ) (promptir.Packet, repoindex.Snapshot, benchmark.Run, error) {
-	paths := dedupeNonEmpty(append(append(append([]string{}, input.ScopeHints...), input.PromptTriage.CandidateFiles...), pack.IncludedFiles...), 12)
-	index, err := buildLightweightRepoIndex(caps.RepoRoot, caps.HeadSHA, paths, c.clock())
+	searchTerms := dedupeNonEmpty(append(append([]string{}, input.PromptTriage.SearchTerms...), promptTriageTermsFromText(strings.ToLower(rawPrompt))...), 16)
+	index, err := c.resolveRepoIndex(caps.RepoRoot, caps.HeadSHA, caps.WorkingTreeDirty)
 	if err != nil {
 		return promptir.Packet{}, repoindex.Snapshot{}, benchmark.Run{}, err
 	}
-	targets := promptIRTargetsFromIndex(index, input.PromptTriage.CandidateFiles)
-	validatorPlan := plannedValidatorPlan(caps.RepoRoot, input.Posture, targets)
+	targets := promptIRTargetsFromIndex(index, input.PromptTriage.CandidateFiles, searchTerms)
+	validatorPlan := plannedValidatorPlan(caps.RepoRoot, input.Posture, index, targets)
 	confidence := promptIRConfidence(intentState, input, memory, targets, validatorPlan)
 	packet := promptir.Packet{
 		Version:            1,
@@ -55,8 +53,10 @@ func (c *Coordinator) buildPromptIRAndBenchmark(
 			"do not widen scope without concrete repo evidence",
 			"do not claim completion without validation evidence",
 		}, 4),
-		ValidatorPlan: validatorPlan,
-		MemoryDigest:  strings.TrimSpace(memory.Summary),
+		ValidatorPlan:    validatorPlan,
+		MemoryDigest:     strings.TrimSpace(memory.Summary),
+		RepoIndexID:      index.RepoIndexID,
+		RepoIndexSummary: repoIndexSummary(index),
 		OutputContract: []string{
 			"return concise implementation summary",
 			"list validators run and outcomes",
@@ -110,46 +110,18 @@ func (c *Coordinator) buildPromptIRAndBenchmark(
 	return packet, index, bench, nil
 }
 
-func buildLightweightRepoIndex(repoRoot string, headSHA string, paths []string, now time.Time) (repoindex.Snapshot, error) {
-	repoRoot = strings.TrimSpace(repoRoot)
-	if repoRoot == "" {
-		repoRoot = "."
-	}
-	files := make([]repoindex.File, 0, len(paths))
-	for _, rel := range dedupeNonEmpty(paths, 16) {
-		abs := filepath.Join(repoRoot, filepath.FromSlash(rel))
-		data, err := os.ReadFile(abs)
-		if err != nil {
-			continue
-		}
-		text := string(data)
-		files = append(files, repoindex.File{
-			Path:          rel,
-			TokenEstimate: estimateTextTokens(text),
-			Kinds:         inferIndexedKinds(rel, text),
-			Symbols:       inferIndexedSymbols(text),
-		})
-	}
-	sort.SliceStable(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	return repoindex.Snapshot{
-		RepoRoot: repoRoot,
-		HeadSHA:  strings.TrimSpace(headSHA),
-		Files:    files,
-		BuiltAt:  now,
-	}, nil
-}
-
 func inferIndexedKinds(path string, text string) []string {
 	lowerPath := strings.ToLower(strings.TrimSpace(path))
 	lowerText := strings.ToLower(text)
 	kinds := []string{"file"}
-	switch {
-	case strings.Contains(lowerPath, "/pages/"), strings.Contains(lowerPath, "/routes/"), strings.Contains(lowerPath, "router"), strings.Contains(lowerText, "httprouter"), strings.Contains(lowerText, "mux.router"):
+	isTest := strings.HasSuffix(lowerPath, "_test.go") || strings.Contains(lowerPath, ".test.") || strings.Contains(lowerPath, ".spec.")
+	if !isTest && (strings.Contains(lowerPath, "/pages/") || strings.Contains(lowerPath, "/routes/") || strings.Contains(lowerPath, "router") || strings.Contains(lowerText, "httprouter") || strings.Contains(lowerText, "mux.router")) {
 		kinds = append(kinds, "route")
-	case strings.Contains(lowerPath, "component"), strings.HasSuffix(lowerPath, ".tsx"), strings.HasSuffix(lowerPath, ".jsx"), strings.Contains(lowerText, "export function "), strings.Contains(lowerText, "export default function"):
+	}
+	if !isTest && (strings.Contains(lowerPath, "component") || strings.HasSuffix(lowerPath, ".tsx") || strings.HasSuffix(lowerPath, ".jsx") || strings.Contains(lowerText, "export function ") || strings.Contains(lowerText, "export default function")) {
 		kinds = append(kinds, "component")
 	}
-	if strings.HasSuffix(lowerPath, "_test.go") || strings.Contains(lowerPath, ".test.") || strings.Contains(lowerPath, ".spec.") {
+	if isTest {
 		kinds = append(kinds, "test")
 	}
 	return dedupeNonEmpty(kinds, 4)
@@ -189,18 +161,16 @@ func extractIdentifierAfter(line string, prefix string) string {
 	return strings.TrimSpace(value)
 }
 
-func promptIRTargetsFromIndex(index repoindex.Snapshot, preferred []string) []promptir.Target {
+func promptIRTargetsFromIndex(index repoindex.Snapshot, preferred []string, searchTerms []string) []promptir.Target {
 	preferredSet := map[string]int{}
 	for idx, path := range dedupeNonEmpty(preferred, 12) {
 		preferredSet[strings.ToLower(path)] = idx
 	}
 	targets := make([]promptir.Target, 0, len(index.Files)*2)
 	for _, file := range index.Files {
-		score := 40
-		reasons := []string{"selected from bounded repo index"}
-		if idx, ok := preferredSet[strings.ToLower(file.Path)]; ok {
-			score = 100 - idx*5
-			reasons = append(reasons, "ranked by prompt triage")
+		score, reasons := scorePromptIRIndexTarget(file, preferredSet, searchTerms)
+		if score <= 0 {
+			continue
 		}
 		targetKind := promptir.TargetFile
 		if containsFold(file.Kinds, "component") {
@@ -236,6 +206,37 @@ func promptIRTargetsFromIndex(index repoindex.Snapshot, preferred []string) []pr
 		return targets[i].Score > targets[j].Score
 	})
 	return dedupePromptTargets(targets, 10)
+}
+
+func scorePromptIRIndexTarget(file repoindex.File, preferredSet map[string]int, searchTerms []string) (int, []string) {
+	pathLower := strings.ToLower(filepath.ToSlash(file.Path))
+	score := 0
+	reasons := []string{"selected from persistent repo index"}
+	if idx, ok := preferredSet[pathLower]; ok {
+		score = 100 - idx*5
+		reasons = append(reasons, "ranked by prompt triage")
+	}
+	for _, term := range dedupeNonEmpty(searchTerms, 16) {
+		if term == "" {
+			continue
+		}
+		switch {
+		case containsPathToken(pathLower, term):
+			score += 10
+			reasons = append(reasons, "path token matched search term")
+		case strings.Contains(pathLower, term):
+			score += 5
+			reasons = append(reasons, "path matched search term")
+		}
+		if stringSliceContainsFold(file.SearchTerms, term) || stringSliceContainsFold(file.Symbols, term) {
+			score += 4
+			reasons = append(reasons, "indexed symbol or search term matched")
+		}
+	}
+	if score == 0 && len(searchTerms) == 0 && len(preferredSet) == 0 {
+		score = 25
+	}
+	return score, dedupeNonEmpty(reasons, 5)
 }
 
 func dedupePromptTargets(targets []promptir.Target, limit int) []promptir.Target {
@@ -278,7 +279,7 @@ func promptIRTargetLabels(targets []promptir.Target, limit int) []string {
 	return out
 }
 
-func plannedValidatorPlan(repoRoot string, posture brief.Posture, targets []promptir.Target) promptir.ValidatorPlan {
+func plannedValidatorPlan(repoRoot string, posture brief.Posture, index repoindex.Snapshot, targets []promptir.Target) promptir.ValidatorPlan {
 	targetFiles := make([]string, 0, len(targets))
 	for _, target := range targets {
 		if strings.TrimSpace(target.Path) != "" {
@@ -287,7 +288,7 @@ func plannedValidatorPlan(repoRoot string, posture brief.Posture, targets []prom
 	}
 	targetFiles = uniqueStrings(targetFiles)
 	evidence := []string{"changed files summary"}
-	commands := plannedValidatorCommands(repoRoot, posture, targetFiles)
+	commands := plannedValidatorCommands(repoRoot, posture, index, targetFiles)
 	evidence = append(evidence, "validator output")
 	summary := "manual review only"
 	strategy := "manual_review"

@@ -3931,13 +3931,17 @@ func briefHumanLines(compiled *ipc.TaskCompiledBriefSummary, includeDetails bool
 		lines = append(lines, fmt.Sprintf("  task memory yes | history tokens %d | resume tokens %d | compaction %.2fx", memory.FullHistoryTokenEstimate, memory.ResumePromptTokenEstimate, memory.MemoryCompactionRatio))
 	}
 	if promptIR := compiled.PromptIR; promptIR != nil && (len(promptIR.RankedTargets) > 0 || len(promptIR.ValidatorPlan.Commands) > 0) {
-		lines = append(lines, fmt.Sprintf(
+		headline := fmt.Sprintf(
 			"  prompt ir yes | targets %d | validators %d | confidence %s %.2f",
 			len(promptIR.RankedTargets),
 			len(promptIR.ValidatorPlan.Commands),
 			nonEmpty(promptIR.Confidence.Level, "unknown"),
 			promptIR.Confidence.Value,
-		))
+		)
+		if summary := strings.TrimSpace(promptIR.RepoIndexSummary); summary != "" {
+			headline += " | repo index " + summary
+		}
+		lines = append(lines, headline)
 	}
 	detail := strings.TrimSpace(compiled.Advisory)
 	if detail != "" {
@@ -4009,6 +4013,13 @@ func briefHumanLines(compiled *ipc.TaskCompiledBriefSummary, includeDetails bool
 		if promptIR := compiled.PromptIR; promptIR != nil {
 			if taskType := strings.TrimSpace(promptIR.NormalizedTaskType); taskType != "" {
 				lines = append(lines, "  prompt ir type "+taskType)
+			}
+			if repoIndexID := strings.TrimSpace(string(promptIR.RepoIndexID)); repoIndexID != "" || strings.TrimSpace(promptIR.RepoIndexSummary) != "" {
+				repoIndexLine := "  prompt ir repo index " + nonEmpty(repoIndexID, "unknown")
+				if summary := strings.TrimSpace(promptIR.RepoIndexSummary); summary != "" {
+					repoIndexLine += " | " + summary
+				}
+				lines = append(lines, repoIndexLine)
 			}
 			if len(promptIR.RankedTargets) > 0 {
 				targets := make([]string, 0, min(len(promptIR.RankedTargets), 5))

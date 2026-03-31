@@ -1,6 +1,10 @@
 package promptir
 
-import "time"
+import (
+	"time"
+
+	"tuku/internal/domain/common"
+)
 
 type SerializerKind string
 
@@ -44,23 +48,25 @@ type ConfidenceScore struct {
 type Packet struct {
 	Version int `json:"version"`
 
-	UserGoal              string          `json:"user_goal,omitempty"`
-	NormalizedTaskType    string          `json:"normalized_task_type,omitempty"`
-	Objective             string          `json:"objective,omitempty"`
-	Operation             string          `json:"operation,omitempty"`
-	ScopeSummary          string          `json:"scope_summary,omitempty"`
-	RankedTargets         []Target        `json:"ranked_targets,omitempty"`
-	OperationPlan         []string        `json:"operation_plan,omitempty"`
-	Constraints           []string        `json:"constraints,omitempty"`
-	NonGoals              []string        `json:"non_goals,omitempty"`
-	ValidatorPlan         ValidatorPlan   `json:"validator_plan,omitempty"`
-	MemoryDigest          string          `json:"memory_digest,omitempty"`
-	OutputContract        []string        `json:"output_contract,omitempty"`
-	Confidence            ConfidenceScore `json:"confidence,omitempty"`
-	EvidenceRequirements  []string        `json:"evidence_requirements,omitempty"`
-	NaturalLanguageTokens int             `json:"natural_language_tokens,omitempty"`
-	StructuredTokens      int             `json:"structured_tokens,omitempty"`
-	StructuredCheaper     bool            `json:"structured_cheaper,omitempty"`
-	DefaultSerializer     SerializerKind  `json:"default_serializer,omitempty"`
-	CompiledAt            time.Time       `json:"compiled_at,omitempty"`
+	UserGoal              string             `json:"user_goal,omitempty"`
+	NormalizedTaskType    string             `json:"normalized_task_type,omitempty"`
+	Objective             string             `json:"objective,omitempty"`
+	Operation             string             `json:"operation,omitempty"`
+	ScopeSummary          string             `json:"scope_summary,omitempty"`
+	RankedTargets         []Target           `json:"ranked_targets,omitempty"`
+	OperationPlan         []string           `json:"operation_plan,omitempty"`
+	Constraints           []string           `json:"constraints,omitempty"`
+	NonGoals              []string           `json:"non_goals,omitempty"`
+	ValidatorPlan         ValidatorPlan      `json:"validator_plan,omitempty"`
+	MemoryDigest          string             `json:"memory_digest,omitempty"`
+	RepoIndexID           common.RepoIndexID `json:"repo_index_id,omitempty"`
+	RepoIndexSummary      string             `json:"repo_index_summary,omitempty"`
+	OutputContract        []string           `json:"output_contract,omitempty"`
+	Confidence            ConfidenceScore    `json:"confidence,omitempty"`
+	EvidenceRequirements  []string           `json:"evidence_requirements,omitempty"`
+	NaturalLanguageTokens int                `json:"natural_language_tokens,omitempty"`
+	StructuredTokens      int                `json:"structured_tokens,omitempty"`
+	StructuredCheaper     bool               `json:"structured_cheaper,omitempty"`
+	DefaultSerializer     SerializerKind     `json:"default_serializer,omitempty"`
+	CompiledAt            time.Time          `json:"compiled_at,omitempty"`
 }

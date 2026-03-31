@@ -171,6 +171,16 @@ func TestMessageTaskPromptTriageSharpensVagueBugRequest(t *testing.T) {
 	if gotBrief.PromptIR.NormalizedTaskType == "" || len(gotBrief.PromptIR.RankedTargets) == 0 || strings.TrimSpace(gotBrief.PromptIR.Confidence.Level) == "" {
 		t.Fatalf("expected prompt ir packet on brief, got %+v", gotBrief.PromptIR)
 	}
+	if gotBrief.PromptIR.RepoIndexID == "" || strings.TrimSpace(gotBrief.PromptIR.RepoIndexSummary) == "" {
+		t.Fatalf("expected prompt ir repo index metadata, got %+v", gotBrief.PromptIR)
+	}
+	repoIndexSnapshot, err := store.RepoIndexes().Get(gotBrief.PromptIR.RepoIndexID)
+	if err != nil {
+		t.Fatalf("get repo index: %v", err)
+	}
+	if repoIndexSnapshot.RepoRoot != repoRoot || repoIndexSnapshot.HeadSHA != "head-ui" || repoIndexSnapshot.FileCount < 2 {
+		t.Fatalf("unexpected repo index snapshot: %+v", repoIndexSnapshot)
+	}
 
 	taskMemory, err := store.TaskMemories().Get(gotBrief.TaskMemoryID)
 	if err != nil {
@@ -4336,6 +4346,10 @@ func (s *faultInjectedStore) ContextPacks() storage.ContextPackStore {
 	return s.base.ContextPacks()
 }
 
+func (s *faultInjectedStore) RepoIndexes() storage.RepoIndexStore {
+	return s.base.RepoIndexes()
+}
+
 func (s *faultInjectedStore) TaskMemories() storage.TaskMemoryStore {
 	return s.base.TaskMemories()
 }
@@ -4413,6 +4427,10 @@ func (s *txCountingStore) RecoveryActions() storage.RecoveryActionStore {
 
 func (s *txCountingStore) ContextPacks() storage.ContextPackStore {
 	return s.base.ContextPacks()
+}
+
+func (s *txCountingStore) RepoIndexes() storage.RepoIndexStore {
+	return s.base.RepoIndexes()
 }
 
 func (s *txCountingStore) TaskMemories() storage.TaskMemoryStore {

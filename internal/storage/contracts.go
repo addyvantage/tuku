@@ -17,6 +17,7 @@ import (
 	"tuku/internal/domain/policy"
 	"tuku/internal/domain/proof"
 	"tuku/internal/domain/recoveryaction"
+	"tuku/internal/domain/repoindex"
 	"tuku/internal/domain/run"
 	"tuku/internal/domain/taskmemory"
 	"tuku/internal/domain/transition"
@@ -134,6 +135,13 @@ type TaskMemoryStore interface {
 	LatestByTask(taskID common.TaskID) (taskmemory.Snapshot, error)
 }
 
+type RepoIndexStore interface {
+	Save(snapshot repoindex.Snapshot) error
+	Get(repoIndexID common.RepoIndexID) (repoindex.Snapshot, error)
+	GetByRepoHead(repoRoot string, headSHA string) (repoindex.Snapshot, error)
+	LatestByRepo(repoRoot string) (repoindex.Snapshot, error)
+}
+
 type BenchmarkStore interface {
 	Save(run benchmark.Run) error
 	Get(benchmarkID common.BenchmarkID) (benchmark.Run, error)
@@ -160,6 +168,7 @@ type Store interface {
 	IncidentTriages() IncidentTriageStore
 	IncidentFollowUps() IncidentFollowUpStore
 	ContextPacks() ContextPackStore
+	RepoIndexes() RepoIndexStore
 	TaskMemories() TaskMemoryStore
 	Benchmarks() BenchmarkStore
 	PolicyDecisions() PolicyDecisionStore

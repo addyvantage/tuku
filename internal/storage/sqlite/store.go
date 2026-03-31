@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"tuku/internal/domain/policy"
 	"tuku/internal/domain/promptir"
 	"tuku/internal/domain/proof"
+	"tuku/internal/domain/repoindex"
 	"tuku/internal/domain/run"
 	"tuku/internal/domain/taskmemory"
 	"tuku/internal/storage"
@@ -116,6 +118,10 @@ func (s *Store) ContextPacks() storage.ContextPackStore {
 	return &contextPackRepo{q: s.db}
 }
 
+func (s *Store) RepoIndexes() storage.RepoIndexStore {
+	return &repoIndexRepo{q: s.db}
+}
+
 func (s *Store) TaskMemories() storage.TaskMemoryStore {
 	return &taskMemoryRepo{q: s.db}
 }
@@ -199,6 +205,10 @@ func (s *txStore) IncidentFollowUps() storage.IncidentFollowUpStore {
 
 func (s *txStore) ContextPacks() storage.ContextPackStore {
 	return &contextPackRepo{q: s.tx}
+}
+
+func (s *txStore) RepoIndexes() storage.RepoIndexStore {
+	return &repoIndexRepo{q: s.tx}
 }
 
 func (s *txStore) TaskMemories() storage.TaskMemoryStore {
@@ -508,6 +518,9 @@ CREATE INDEX IF NOT EXISTS idx_policy_decisions_task_requested
 	if err := ensureContextPackSchema(db); err != nil {
 		return err
 	}
+	if err := ensureRepoIndexSchema(db); err != nil {
+		return err
+	}
 	if err := ensureTaskMemorySchema(db); err != nil {
 		return err
 	}
@@ -683,6 +696,32 @@ func ensureContextPackSchema(db *sql.DB) error {
 	return nil
 }
 
+func ensureRepoIndexSchema(db *sql.DB) error {
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS repo_indexes (
+	repo_index_id TEXT PRIMARY KEY,
+	repo_root TEXT NOT NULL,
+	head_sha TEXT NOT NULL,
+	file_count INTEGER NOT NULL DEFAULT 0,
+	symbol_count INTEGER NOT NULL DEFAULT 0,
+	route_count INTEGER NOT NULL DEFAULT 0,
+	component_count INTEGER NOT NULL DEFAULT 0,
+	test_count INTEGER NOT NULL DEFAULT 0,
+	total_token_estimate INTEGER NOT NULL DEFAULT 0,
+	files_json TEXT NOT NULL DEFAULT '[]',
+	created_at TEXT NOT NULL DEFAULT ''
+)`); err != nil {
+		return fmt.Errorf("ensure repo_indexes table: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_repo_indexes_repo_head ON repo_indexes(repo_root, head_sha, created_at DESC)`); err != nil {
+		return fmt.Errorf("create idx_repo_indexes_repo_head: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_repo_indexes_repo_created ON repo_indexes(repo_root, created_at DESC)`); err != nil {
+		return fmt.Errorf("create idx_repo_indexes_repo_created: %w", err)
+	}
+	return nil
+}
+
 func ensureTaskMemorySchema(db *sql.DB) error {
 	type colDef struct {
 		Name string
@@ -850,6 +889,8 @@ type runRepo struct{ q queryable }
 type checkpointRepo struct{ q queryable }
 
 type contextPackRepo struct{ q queryable }
+
+type repoIndexRepo struct{ q queryable }
 
 type taskMemoryRepo struct{ q queryable }
 
@@ -1542,6 +1583,60 @@ WHERE context_pack_id = ?
 	return pack, nil
 }
 
+func (r *repoIndexRepo) Save(snapshot repoindex.Snapshot) error {
+	filesJSON, err := marshalRepoIndexFiles(snapshot.Files)
+	if err != nil {
+		return err
+	}
+	_, err = r.q.Exec(`
+INSERT OR REPLACE INTO repo_indexes(
+	repo_index_id, repo_root, head_sha, file_count, symbol_count, route_count, component_count, test_count,
+	total_token_estimate, files_json, created_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+`,
+		string(snapshot.RepoIndexID), snapshot.RepoRoot, snapshot.HeadSHA, snapshot.FileCount, snapshot.SymbolCount, snapshot.RouteCount,
+		snapshot.ComponentCount, snapshot.TestCount, snapshot.TotalTokenEstimate, filesJSON, snapshot.BuiltAt.Format(sqliteTimestampLayout),
+	)
+	if err != nil {
+		return fmt.Errorf("save repo index: %w", err)
+	}
+	return nil
+}
+
+func (r *repoIndexRepo) Get(repoIndexID common.RepoIndexID) (repoindex.Snapshot, error) {
+	row := r.q.QueryRow(`
+SELECT repo_index_id, repo_root, head_sha, file_count, symbol_count, route_count, component_count, test_count,
+	total_token_estimate, files_json, created_at
+FROM repo_indexes
+WHERE repo_index_id = ?
+`, string(repoIndexID))
+	return scanRepoIndex(row)
+}
+
+func (r *repoIndexRepo) GetByRepoHead(repoRoot string, headSHA string) (repoindex.Snapshot, error) {
+	row := r.q.QueryRow(`
+SELECT repo_index_id, repo_root, head_sha, file_count, symbol_count, route_count, component_count, test_count,
+	total_token_estimate, files_json, created_at
+FROM repo_indexes
+WHERE repo_root = ? AND head_sha = ?
+ORDER BY created_at DESC, repo_index_id DESC
+LIMIT 1
+`, filepath.Clean(strings.TrimSpace(repoRoot)), strings.TrimSpace(headSHA))
+	return scanRepoIndex(row)
+}
+
+func (r *repoIndexRepo) LatestByRepo(repoRoot string) (repoindex.Snapshot, error) {
+	row := r.q.QueryRow(`
+SELECT repo_index_id, repo_root, head_sha, file_count, symbol_count, route_count, component_count, test_count,
+	total_token_estimate, files_json, created_at
+FROM repo_indexes
+WHERE repo_root = ?
+ORDER BY created_at DESC, repo_index_id DESC
+LIMIT 1
+`, filepath.Clean(strings.TrimSpace(repoRoot)))
+	return scanRepoIndex(row)
+}
+
 func (r *taskMemoryRepo) Save(snapshot taskmemory.Snapshot) error {
 	confirmedFactsJSON, err := marshalStringSlice(snapshot.ConfirmedFacts)
 	if err != nil {
@@ -1956,6 +2051,50 @@ func unmarshalPromptIR(value string) (promptir.Packet, error) {
 	var out promptir.Packet
 	if err := json.Unmarshal([]byte(value), &out); err != nil {
 		return promptir.Packet{}, fmt.Errorf("unmarshal prompt ir: %w", err)
+	}
+	return out, nil
+}
+
+func marshalRepoIndexFiles(value []repoindex.File) (string, error) {
+	if value == nil {
+		value = []repoindex.File{}
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("marshal repo index files: %w", err)
+	}
+	return string(raw), nil
+}
+
+func unmarshalRepoIndexFiles(value string) ([]repoindex.File, error) {
+	if strings.TrimSpace(value) == "" {
+		return []repoindex.File{}, nil
+	}
+	var out []repoindex.File
+	if err := json.Unmarshal([]byte(value), &out); err != nil {
+		return nil, fmt.Errorf("unmarshal repo index files: %w", err)
+	}
+	return out, nil
+}
+
+func scanRepoIndex(row *sql.Row) (repoindex.Snapshot, error) {
+	var out repoindex.Snapshot
+	var filesJSON string
+	var createdAt string
+	err := row.Scan(
+		&out.RepoIndexID, &out.RepoRoot, &out.HeadSHA, &out.FileCount, &out.SymbolCount, &out.RouteCount,
+		&out.ComponentCount, &out.TestCount, &out.TotalTokenEstimate, &filesJSON, &createdAt,
+	)
+	if err != nil {
+		return repoindex.Snapshot{}, err
+	}
+	out.Files, err = unmarshalRepoIndexFiles(filesJSON)
+	if err != nil {
+		return repoindex.Snapshot{}, err
+	}
+	out.BuiltAt, err = time.Parse(sqliteTimestampLayout, createdAt)
+	if err != nil {
+		return repoindex.Snapshot{}, err
 	}
 	return out, nil
 }

@@ -11,6 +11,7 @@ import (
 	contextdomain "tuku/internal/domain/context"
 	"tuku/internal/domain/policy"
 	"tuku/internal/domain/promptir"
+	"tuku/internal/domain/repoindex"
 	"tuku/internal/domain/taskmemory"
 )
 
@@ -117,6 +118,8 @@ func TestExecutionBriefPromptTriageRoundTrip(t *testing.T) {
 			NormalizedTaskType: "BUG_FIX",
 			Objective:          "Repair the UI defect",
 			Operation:          "investigate and repair",
+			RepoIndexID:        common.RepoIndexID("ridx_prompt_triage"),
+			RepoIndexSummary:   "files=8 symbols=5 components=2 routes=1 tests=1",
 			ScopeSummary:       "bounded repair scope inferred from repo-local triage",
 			RankedTargets: []promptir.Target{
 				{Path: "web/src/pages/Dashboard.tsx", Kind: promptir.TargetComponent, Score: 100},
@@ -151,6 +154,66 @@ func TestExecutionBriefPromptTriageRoundTrip(t *testing.T) {
 	}
 	if got.BenchmarkID != b.BenchmarkID || got.PromptIR.Confidence.Level != "high" || len(got.PromptIR.RankedTargets) != 2 {
 		t.Fatalf("unexpected prompt ir / benchmark round-trip: %+v", got)
+	}
+	if got.PromptIR.RepoIndexID != common.RepoIndexID("ridx_prompt_triage") || got.PromptIR.RepoIndexSummary != "files=8 symbols=5 components=2 routes=1 tests=1" {
+		t.Fatalf("expected prompt ir repo index round-trip, got %+v", got.PromptIR)
+	}
+}
+
+func TestRepoIndexRepoRoundTrip(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "repo-index.db")
+	store, err := NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("new sqlite store: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Unix(1713700350, 0).UTC()
+	snapshot := repoindex.Snapshot{
+		RepoIndexID:        common.RepoIndexID("ridx_roundtrip"),
+		RepoRoot:           "/tmp/tuku-repo",
+		HeadSHA:            "abc123",
+		FileCount:          2,
+		SymbolCount:        3,
+		RouteCount:         1,
+		ComponentCount:     1,
+		TestCount:          1,
+		TotalTokenEstimate: 180,
+		Files: []repoindex.File{
+			{Path: "web/src/pages/Landing.tsx", TokenEstimate: 90, Kinds: []string{"file", "component"}, Symbols: []string{"Landing"}, SearchTerms: []string{"landing", "page"}},
+			{Path: "web/src/pages/Landing.test.tsx", TokenEstimate: 90, Kinds: []string{"file", "test"}, Symbols: []string{"Landing"}, SearchTerms: []string{"landing", "test"}},
+		},
+		BuiltAt: now,
+	}
+	if err := store.RepoIndexes().Save(snapshot); err != nil {
+		t.Fatalf("save repo index: %v", err)
+	}
+
+	got, err := store.RepoIndexes().Get(snapshot.RepoIndexID)
+	if err != nil {
+		t.Fatalf("get repo index: %v", err)
+	}
+	if got.RepoIndexID != snapshot.RepoIndexID || got.HeadSHA != snapshot.HeadSHA || len(got.Files) != 2 {
+		t.Fatalf("unexpected repo index round-trip: %+v", got)
+	}
+	if len(got.Files[0].SearchTerms) == 0 {
+		t.Fatalf("expected repo index search terms in round-trip, got %+v", got.Files[0])
+	}
+
+	byHead, err := store.RepoIndexes().GetByRepoHead(snapshot.RepoRoot, snapshot.HeadSHA)
+	if err != nil {
+		t.Fatalf("repo index by repo/head: %v", err)
+	}
+	if byHead.RepoIndexID != snapshot.RepoIndexID {
+		t.Fatalf("expected repo index by head, got %+v", byHead)
+	}
+
+	latest, err := store.RepoIndexes().LatestByRepo(snapshot.RepoRoot)
+	if err != nil {
+		t.Fatalf("latest repo index by repo: %v", err)
+	}
+	if latest.RepoIndexID != snapshot.RepoIndexID {
+		t.Fatalf("expected latest repo index, got %+v", latest)
 	}
 }
 

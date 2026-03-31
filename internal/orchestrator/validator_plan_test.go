@@ -10,6 +10,7 @@ import (
 	"tuku/internal/domain/brief"
 	"tuku/internal/domain/capsule"
 	"tuku/internal/domain/promptir"
+	"tuku/internal/domain/repoindex"
 )
 
 func TestPlannedValidatorPlanIncludesRepoCheckAndTypeScriptValidator(t *testing.T) {
@@ -27,7 +28,7 @@ func TestPlannedValidatorPlanIncludesRepoCheckAndTypeScriptValidator(t *testing.
 		t.Fatalf("write tsc shim: %v", err)
 	}
 
-	plan := plannedValidatorPlan(repoRoot, brief.PostureExecutionReady, []promptir.Target{
+	plan := plannedValidatorPlan(repoRoot, brief.PostureExecutionReady, repoindex.Snapshot{}, []promptir.Target{
 		{Path: "web/src/pages/Landing.tsx", Kind: promptir.TargetComponent},
 	})
 
@@ -36,6 +37,42 @@ func TestPlannedValidatorPlanIncludesRepoCheckAndTypeScriptValidator(t *testing.
 	}
 	if !containsSubstring(plan.Commands, "tsc --noemit --pretty false") {
 		t.Fatalf("expected typescript validator in %v", plan.Commands)
+	}
+}
+
+func TestPlannedValidatorPlanUsesRelatedFrontendTestsFromRepoIndex(t *testing.T) {
+	repoRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "vitest.config.ts"), []byte("export default {}\n"), 0o644); err != nil {
+		t.Fatalf("write vitest config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, "node_modules", ".bin"), 0o755); err != nil {
+		t.Fatalf("mkdir node_modules/.bin: %v", err)
+	}
+	localVitest := filepath.Join(repoRoot, "node_modules", ".bin", "vitest")
+	if err := os.WriteFile(localVitest, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write vitest shim: %v", err)
+	}
+
+	index := repoindex.Snapshot{
+		Files: []repoindex.File{
+			{Path: "web/src/pages/Landing.tsx", Kinds: []string{"file", "component"}},
+			{Path: "web/src/pages/Landing.test.tsx", Kinds: []string{"file", "test"}},
+		},
+	}
+	deriveRepoIndexCounts(&index)
+
+	plan := plannedValidatorPlan(repoRoot, brief.PostureExecutionReady, index, []promptir.Target{
+		{Path: "web/src/pages/Landing.tsx", Kind: promptir.TargetComponent},
+	})
+
+	if !containsFold(plan.Commands, "git diff --check") {
+		t.Fatalf("expected git diff validator in %v", plan.Commands)
+	}
+	if !containsSubstring(plan.Commands, "vitest run web/src/pages/landing.test.tsx") {
+		t.Fatalf("expected related frontend test validator in %v", plan.Commands)
 	}
 }
 
@@ -67,7 +104,9 @@ func TestValidationCommandsForRunFallsBackToPromptIRTargets(t *testing.T) {
 		Capsule: capsule.WorkCapsule{RepoRoot: repoRoot},
 	}
 
-	specs := validationCommandsForRun(prepared, adapter_contract.ExecutionResult{})
+	store := newTestStore(t)
+	c := newTestCoordinator(t, store, defaultAnchor(), newFakeAdapterSuccess())
+	specs := c.validationCommandsForRun(prepared, adapter_contract.ExecutionResult{})
 	joined := make([]string, 0, len(specs))
 	for _, spec := range specs {
 		joined = append(joined, strings.Join(append([]string{spec.Command}, spec.Args...), " "))

@@ -53,9 +53,18 @@ func (c *Coordinator) sharpenPromptTriage(caps capsule.WorkCapsule, st intent.St
 	if repoRoot == "" {
 		repoRoot = "."
 	}
-	candidates, filesScanned, scannedTokenEstimate, err := rankPromptTriageCandidates(repoRoot, searchTerms, st.Class)
-	if err != nil {
-		return result, err
+	candidates := []promptTriageCandidate{}
+	filesScanned := 0
+	scannedTokenEstimate := 0
+	index, indexErr := c.resolveRepoIndex(repoRoot, caps.HeadSHA, caps.WorkingTreeDirty)
+	if indexErr == nil {
+		candidates, filesScanned, scannedTokenEstimate = rankPromptTriageCandidatesFromIndex(index, searchTerms, st.Class)
+	} else {
+		var err error
+		candidates, filesScanned, scannedTokenEstimate, err = rankPromptTriageCandidates(repoRoot, searchTerms, st.Class)
+		if err != nil {
+			return result, err
+		}
 	}
 	if len(candidates) == 0 {
 		return result, nil

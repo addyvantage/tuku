@@ -1720,6 +1720,8 @@ func TestCLIBriefCommandHumanIncludesPromptTriageMetrics(t *testing.T) {
 				},
 				PromptIR: &promptir.Packet{
 					NormalizedTaskType: "BUG_FIX",
+					RepoIndexID:        common.RepoIndexID("ridx_brief"),
+					RepoIndexSummary:   "files=21 symbols=13 components=4 routes=1 tests=5",
 					RankedTargets: []promptir.Target{
 						{Path: "web/src/pages/Dashboard.tsx"},
 						{Path: "web/src/components/ProfileCard.tsx"},
@@ -1749,8 +1751,11 @@ func TestCLIBriefCommandHumanIncludesPromptTriageMetrics(t *testing.T) {
 	if !strings.Contains(output, "search ui, component, page") || !strings.Contains(output, "token estimate raw=4 rewritten=31 search-space=620 selected-context=180 saved=440") {
 		t.Fatalf("expected prompt triage details in human output, got %q", output)
 	}
-	if !strings.Contains(output, "prompt ir yes | targets 2 | validators 1 | confidence high 0.82") {
+	if !strings.Contains(output, "prompt ir yes | targets 2 | validators 1 | confidence high 0.82 | repo index files=21 symbols=13 components=4 routes=1 tests=5") {
 		t.Fatalf("expected prompt ir headline in human output, got %q", output)
+	}
+	if !strings.Contains(output, "prompt ir repo index ridx_brief | files=21 symbols=13 components=4 routes=1 tests=5") {
+		t.Fatalf("expected prompt ir repo index detail in human output, got %q", output)
 	}
 	if !strings.Contains(output, "serializer default=natural_language natural=112 structured=97 structured-cheaper=true") {
 		t.Fatalf("expected prompt ir serializer metrics in human output, got %q", output)

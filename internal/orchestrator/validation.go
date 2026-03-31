@@ -13,6 +13,7 @@ import (
 
 	"tuku/internal/adapters/adapter_contract"
 	"tuku/internal/domain/brief"
+	"tuku/internal/domain/repoindex"
 	gitdiff "tuku/internal/git/diff"
 	gitworktree "tuku/internal/git/worktree"
 	"tuku/internal/runtime/process"
@@ -53,7 +54,7 @@ func (c *Coordinator) enrichExecutionResultWithRepoEvidence(prepared *preparedRe
 }
 
 func (c *Coordinator) runPostExecutionValidation(ctx context.Context, prepared *preparedRealRun, execResult adapter_contract.ExecutionResult) validationOutcome {
-	commands := validationCommandsForRun(prepared, execResult)
+	commands := c.validationCommandsForRun(prepared, execResult)
 	if len(commands) == 0 {
 		return validationOutcome{signals: []string{"no automatic validator matched the current bounded run evidence"}}
 	}
@@ -97,10 +98,14 @@ func (c *Coordinator) runPostExecutionValidation(ctx context.Context, prepared *
 	return validationOutcome{signals: signals, artifactRef: artifactRef}
 }
 
-func validationCommandsForRun(prepared *preparedRealRun, execResult adapter_contract.ExecutionResult) []process.Spec {
+func (c *Coordinator) validationCommandsForRun(prepared *preparedRealRun, execResult adapter_contract.ExecutionResult) []process.Spec {
 	repoRoot := normalizedRepoRoot(prepared.Capsule.RepoRoot)
 	targetFiles := validationTargetFiles(prepared, execResult)
-	return plannedValidationSpecs(repoRoot, prepared.Brief.Posture, targetFiles)
+	index, err := c.resolveRepoIndex(prepared.Capsule.RepoRoot, prepared.Capsule.HeadSHA, prepared.Capsule.WorkingTreeDirty)
+	if err != nil {
+		index = repoindex.Snapshot{}
+	}
+	return plannedValidationSpecs(repoRoot, prepared.Brief.Posture, index, targetFiles)
 }
 
 func signalsFromValidationResult(result validationCommandResult) []string {
@@ -406,7 +411,7 @@ func validationTargetFiles(prepared *preparedRealRun, execResult adapter_contrac
 	return uniqueStrings(prepared.ContextPack.IncludedFiles)
 }
 
-func plannedValidatorCommands(repoRoot string, posture brief.Posture, files []string) []string {
+func plannedValidatorCommands(repoRoot string, posture brief.Posture, index repoindex.Snapshot, files []string) []string {
 	repoRoot = normalizedRepoRoot(repoRoot)
 	files = uniqueStrings(files)
 	commands := []string{}
@@ -433,8 +438,15 @@ func plannedValidatorCommands(repoRoot string, posture brief.Posture, files []st
 			commands = append(commands, "node --check "+file)
 		}
 	}
+	if eslintCommand, args, ok := eslintValidationSpec(repoRoot, files); ok {
+		commands = append(commands, strings.Join(append([]string{friendlyCommandName(eslintCommand)}, args...), " "))
+	}
 	if tscCommand, ok := typeScriptValidatorCommand(repoRoot, files); ok {
 		commands = append(commands, tscCommand)
+	}
+	relatedTests := relatedIndexTestFiles(index, files, 4)
+	if testCommand, args, ok := frontendTestValidationSpec(repoRoot, relatedTests); ok {
+		commands = append(commands, strings.Join(append([]string{friendlyCommandName(testCommand)}, args...), " "))
 	}
 	for _, file := range uniqueStrings(filterSuffix(files, ".json")) {
 		commands = append(commands, "json parse "+file)
@@ -445,7 +457,7 @@ func plannedValidatorCommands(repoRoot string, posture brief.Posture, files []st
 	return dedupeNonEmpty(commands, 8)
 }
 
-func plannedValidationSpecs(repoRoot string, posture brief.Posture, files []string) []process.Spec {
+func plannedValidationSpecs(repoRoot string, posture brief.Posture, index repoindex.Snapshot, files []string) []process.Spec {
 	repoRoot = normalizedRepoRoot(repoRoot)
 	files = uniqueStrings(files)
 	commands := []process.Spec{}
@@ -467,7 +479,13 @@ func plannedValidationSpecs(repoRoot string, posture brief.Posture, files []stri
 			commands = append(commands, process.Spec{Command: "node", Args: []string{"--check", file}, WorkingDir: repoRoot})
 		}
 	}
+	if command, args, ok := eslintValidationSpec(repoRoot, files); ok {
+		commands = append(commands, process.Spec{Command: command, Args: args, WorkingDir: repoRoot})
+	}
 	if command, args, ok := typeScriptValidationSpec(repoRoot, files); ok {
+		commands = append(commands, process.Spec{Command: command, Args: args, WorkingDir: repoRoot})
+	}
+	if command, args, ok := frontendTestValidationSpec(repoRoot, relatedIndexTestFiles(index, files, 4)); ok {
 		commands = append(commands, process.Spec{Command: command, Args: args, WorkingDir: repoRoot})
 	}
 
@@ -487,6 +505,37 @@ func plannedValidationSpecs(repoRoot string, posture brief.Posture, files []stri
 	return commands
 }
 
+func eslintValidationSpec(repoRoot string, files []string) (string, []string, bool) {
+	candidates := uniqueStrings(append(filterJSSourceFiles(files), filterTypeScriptSourceFiles(files)...))
+	if len(candidates) == 0 || !hasESLintConfig(repoRoot) {
+		return "", nil, false
+	}
+	command := resolveRepoExecutable(repoRoot, "eslint")
+	if command == "" {
+		return "", nil, false
+	}
+	args := append([]string{"--max-warnings", "0"}, candidates...)
+	return command, args, true
+}
+
+func frontendTestValidationSpec(repoRoot string, testFiles []string) (string, []string, bool) {
+	testFiles = uniqueStrings(testFiles)
+	if len(testFiles) == 0 {
+		return "", nil, false
+	}
+	if hasVitestConfig(repoRoot) {
+		if command := resolveRepoExecutable(repoRoot, "vitest"); command != "" {
+			return command, append([]string{"run"}, testFiles...), true
+		}
+	}
+	if hasJestConfig(repoRoot) {
+		if command := resolveRepoExecutable(repoRoot, "jest"); command != "" {
+			return command, append([]string{"--runInBand"}, testFiles...), true
+		}
+	}
+	return "", nil, false
+}
+
 func typeScriptValidatorCommand(repoRoot string, files []string) (string, bool) {
 	command, args, ok := typeScriptValidationSpec(repoRoot, files)
 	if !ok {
@@ -499,12 +548,8 @@ func typeScriptValidationSpec(repoRoot string, files []string) (string, []string
 	if len(filterTypeScriptSourceFiles(files)) == 0 || !hasTypeScriptConfig(repoRoot) {
 		return "", nil, false
 	}
-	localTSC := filepath.Join(repoRoot, "node_modules", ".bin", "tsc")
-	if fileExists(localTSC) {
-		return localTSC, []string{"--noEmit", "--pretty", "false"}, true
-	}
-	if commandOnPath("tsc") {
-		return "tsc", []string{"--noEmit", "--pretty", "false"}, true
+	if command := resolveRepoExecutable(repoRoot, "tsc"); command != "" {
+		return command, []string{"--noEmit", "--pretty", "false"}, true
 	}
 	return "", nil, false
 }
@@ -515,6 +560,69 @@ func hasTypeScriptConfig(repoRoot string) bool {
 	}
 	matches, err := filepath.Glob(filepath.Join(repoRoot, "tsconfig*.json"))
 	return err == nil && len(matches) > 0
+}
+
+func hasESLintConfig(repoRoot string) bool {
+	for _, name := range []string{"eslint.config.js", "eslint.config.mjs", "eslint.config.cjs", ".eslintrc", ".eslintrc.js", ".eslintrc.cjs", ".eslintrc.json", ".eslintrc.yaml", ".eslintrc.yml"} {
+		if pathExists(filepath.Join(repoRoot, name)) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasVitestConfig(repoRoot string) bool {
+	for _, pattern := range []string{"vitest.config.*", "vite.config.*"} {
+		matches, err := filepath.Glob(filepath.Join(repoRoot, pattern))
+		if err == nil && len(matches) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasJestConfig(repoRoot string) bool {
+	for _, pattern := range []string{"jest.config.*", "jest.*.config.*"} {
+		matches, err := filepath.Glob(filepath.Join(repoRoot, pattern))
+		if err == nil && len(matches) > 0 {
+			return true
+		}
+	}
+	for _, name := range []string{"package.json"} {
+		if pathExists(filepath.Join(repoRoot, name)) {
+			raw, err := os.ReadFile(filepath.Join(repoRoot, name))
+			if err == nil && strings.Contains(strings.ToLower(string(raw)), "jest") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func resolveRepoExecutable(repoRoot string, name string) string {
+	if strings.TrimSpace(name) == "" {
+		return ""
+	}
+	local := filepath.Join(repoRoot, "node_modules", ".bin", name)
+	if fileExists(local) {
+		return local
+	}
+	if commandOnPath(name) {
+		return name
+	}
+	return ""
+}
+
+func friendlyCommandName(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	base := filepath.Base(command)
+	if base == "." || base == string(filepath.Separator) {
+		return command
+	}
+	return base
 }
 
 func fileExists(path string) bool {
