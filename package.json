@@ -1,6 +1,6 @@
 {
   "name": "tukuai",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Tuku CLI launcher that installs native binaries and runs Tuku from your terminal.",
   "license": "UNLICENSED",
   "type": "commonjs",
@@ -10,6 +10,7 @@
   "files": [
     "cmd/",
     "internal/",
+    "npm-binaries/",
     "go.mod",
     "go.sum",
     "scripts/",
@@ -19,6 +20,8 @@
     "node": ">=18"
   },
   "scripts": {
+    "prepack": "node scripts/build-bundled-binaries.js",
+    "postpack": "node scripts/clean-bundled-binaries.js",
     "postinstall": "node scripts/postinstall.js"
   },
   "config": {

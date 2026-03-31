@@ -5,6 +5,9 @@ const os = require("os");
 const path = require("path");
 const https = require("https");
 const cp = require("child_process");
+const zlib = require("zlib");
+
+let packageManifestCache = null;
 
 function isWindows() {
   return process.platform === "win32";
@@ -34,6 +37,10 @@ function releaseRepo() {
   const fromNpmConfig = (process.env.npm_package_config_releaseRepo || "").trim();
   if (fromNpmConfig) return fromNpmConfig;
 
+  const manifest = readPackageManifest();
+  if (manifest.config && typeof manifest.config.releaseRepo === "string" && manifest.config.releaseRepo.trim()) {
+    return manifest.config.releaseRepo.trim();
+  }
   return "addyvantage/tuku";
 }
 
@@ -44,6 +51,10 @@ function assetPrefix() {
   const fromNpmConfig = (process.env.npm_package_config_assetPrefix || "").trim();
   if (fromNpmConfig) return fromNpmConfig;
 
+  const manifest = readPackageManifest();
+  if (manifest.config && typeof manifest.config.assetPrefix === "string" && manifest.config.assetPrefix.trim()) {
+    return manifest.config.assetPrefix.trim();
+  }
   return "tuku";
 }
 
@@ -52,6 +63,10 @@ function releaseVersion() {
   if (fromEnv) return fromEnv;
   const pkgVersion = (process.env.npm_package_version || "").trim();
   if (pkgVersion) return pkgVersion;
+  const manifest = readPackageManifest();
+  if (typeof manifest.version === "string" && manifest.version.trim()) {
+    return manifest.version.trim();
+  }
   return "latest";
 }
 
@@ -179,6 +194,10 @@ async function ensureBinary(baseName, options = {}) {
   }
 
   mkdirp(installBinDir());
+  if (hasPackagedBinary(baseName)) {
+    return installPackagedBinary(baseName, target, options);
+  }
+
   const urls = binaryUrls(baseName);
   let lastErr = null;
   for (const url of urls) {
@@ -197,6 +216,49 @@ async function ensureBinary(baseName, options = {}) {
 
 function packageRoot() {
   return path.resolve(__dirname, "..", "..");
+}
+
+function readPackageManifest() {
+  if (packageManifestCache !== null) {
+    return packageManifestCache;
+  }
+  try {
+    packageManifestCache = JSON.parse(fs.readFileSync(path.join(packageRoot(), "package.json"), "utf8"));
+  } catch (_err) {
+    packageManifestCache = {};
+  }
+  return packageManifestCache;
+}
+
+function packagedBinaryArchivePath(baseName) {
+  return path.join(packageRoot(), "npm-binaries", `${resolvePlatform()}-${resolveArch()}`, `${executableName(baseName)}.gz`);
+}
+
+function hasPackagedBinary(baseName) {
+  try {
+    return fs.existsSync(packagedBinaryArchivePath(baseName));
+  } catch (_err) {
+    return false;
+  }
+}
+
+function installPackagedBinary(baseName, dest, options = {}) {
+  const archive = packagedBinaryArchivePath(baseName);
+  if (!fs.existsSync(archive)) {
+    throw new Error(`packaged binary missing for ${baseName}`);
+  }
+  if (!options.silent) {
+    process.stderr.write(`[tuku] installing bundled ${baseName} binary for ${resolvePlatform()}-${resolveArch()}\n`);
+  }
+  const tmp = `${dest}.tmp-${Date.now()}`;
+  const compressed = fs.readFileSync(archive);
+  const binary = zlib.gunzipSync(compressed);
+  fs.writeFileSync(tmp, binary, { mode: 0o755 });
+  fs.renameSync(tmp, dest);
+  if (!isWindows()) {
+    fs.chmodSync(dest, 0o755);
+  }
+  return dest;
 }
 
 function canBuildFromPackageSource() {

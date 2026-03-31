@@ -55,11 +55,13 @@ tuku
 
 How it works:
 - the npm `tuku` command is a thin Node launcher
-- on install/first run it downloads native `tuku` and `tukud` binaries into `~/.tukuai/bin`
-- if release binaries are unavailable, it falls back to building binaries from bundled Go source automatically (requires `go` on PATH)
+- the published npm tarball bundles native `tuku` and `tukud` binaries for supported macOS and Linux targets
+- on install/first run it installs those bundled binaries into `~/.tukuai/bin`
+- if a bundled binary is unavailable for the current machine, it falls back to GitHub release download
+- if release binaries are unavailable too, it finally falls back to building from bundled Go source automatically (requires `go` on PATH)
 - then it executes native `tuku` and ensures `tukud` is on PATH for daemon bootstrap
 
-Release asset naming convention expected by the launcher:
+Release asset naming convention expected by the fallback downloader:
 - `tuku-tuku-darwin-arm64`
 - `tuku-tukud-darwin-arm64`
 - `tuku-tuku-darwin-amd64`
