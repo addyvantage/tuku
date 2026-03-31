@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	hostMaxLines    = 500
-	hostMaxActivity = 40
+	hostMaxLines                   = 500
+	hostMaxActivity                = 40
+	codexSafeReasoningEffortConfig = `model_reasoning_effort="high"`
 )
 
 type CodexPTYHost struct {
@@ -94,6 +95,7 @@ func (h *CodexPTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 		args = append(args, "resume", sessionID)
 	}
 	args = append(args, h.extraArgs...)
+	args = ensureCodexReasoningEffortArgs(args)
 
 	cmd := exec.CommandContext(ctx, codexBin, args...)
 	cmd.Dir = snapshot.Repo.RepoRoot
@@ -237,6 +239,64 @@ func (h *CodexPTYHost) CanAcceptInput() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.status.State == HostStateLive && h.ptyFile != nil && h.status.InputLive
+}
+
+func (h *CodexPTYHost) CanInterrupt() bool {
+	if h.useExecMode() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.status.State == HostStateLive && h.execRunning && h.execCancel != nil
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.status.State == HostStateLive && h.status.InputLive && h.ptyFile != nil
+}
+
+func (h *CodexPTYHost) Interrupt() bool {
+	if h.useExecMode() {
+		h.mu.Lock()
+		cancel := h.execCancel
+		running := h.status.State == HostStateLive && h.execRunning
+		if running {
+			h.status.Note = "interrupt requested for codex prompt"
+			h.status.StateChangedAt = time.Now().UTC()
+		}
+		h.mu.Unlock()
+		if !running || cancel == nil {
+			return false
+		}
+		cancel()
+		h.recordActivity("worker interrupt requested")
+		return true
+	}
+
+	h.mu.Lock()
+	ptmx := h.ptyFile
+	live := h.status.State == HostStateLive && h.status.InputLive
+	if live {
+		h.status.Note = "interrupt signal sent to codex"
+		h.status.StateChangedAt = time.Now().UTC()
+	}
+	h.mu.Unlock()
+	if !live || ptmx == nil {
+		return false
+	}
+	if _, err := ptmx.Write([]byte{3}); err != nil {
+		h.recordActivity("worker interrupt failed")
+		return false
+	}
+	h.recordActivity("worker interrupt signal sent")
+	return true
+}
+
+func (h *CodexPTYHost) WorkerTurnActive() bool {
+	if !h.useExecMode() {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.status.State == HostStateLive && h.execRunning
 }
 
 func (h *CodexPTYHost) WriteInput(data []byte) bool {
@@ -628,7 +688,7 @@ func (h *CodexPTYHost) runExecPrompt(prompt string) {
 	sawOutput := outputSeen
 	outputSeenMu.Unlock()
 	if !sawOutput {
-		h.appendExecOutputLine("Codex returned no visible assistant message.")
+		h.appendExecOutputLine("The worker completed without a visible assistant message.")
 	}
 	h.finishExecPrompt(err, sawOutput)
 }
@@ -644,10 +704,32 @@ func (h *CodexPTYHost) execArgsForPrompt(prompt string) []string {
 	}
 	if threadID != "" {
 		args = append(args, "exec", "resume", threadID, "--json", prompt)
-		return args
+		return ensureCodexReasoningEffortArgs(args)
 	}
 	args = append(args, "exec", "--json", prompt)
-	return args
+	return ensureCodexReasoningEffortArgs(args)
+}
+
+func ensureCodexReasoningEffortArgs(args []string) []string {
+	if hasCodexReasoningEffortOverride(args) {
+		return append([]string{}, args...)
+	}
+	return append([]string{"-c", codexSafeReasoningEffortConfig}, args...)
+}
+
+func hasCodexReasoningEffortOverride(args []string) bool {
+	for idx, arg := range args {
+		lower := strings.ToLower(strings.TrimSpace(arg))
+		if strings.Contains(lower, "model_reasoning_effort") {
+			return true
+		}
+		if (lower == "-c" || lower == "--config") && idx+1 < len(args) {
+			if strings.Contains(strings.ToLower(strings.TrimSpace(args[idx+1])), "model_reasoning_effort") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (h *CodexPTYHost) handleExecJSONLine(line string) bool {
@@ -708,7 +790,11 @@ func (h *CodexPTYHost) finishExecPrompt(execErr error, outputSeen bool) {
 	h.status.InputLive = true
 	h.status.ExitCode = nil
 	if execErr != nil {
-		h.status.Note = "last codex prompt failed"
+		if execErr == context.Canceled {
+			h.status.Note = "codex prompt interrupted"
+		} else {
+			h.status.Note = "last codex prompt failed"
+		}
 	} else if outputSeen {
 		h.status.Note = "codex response received"
 	} else {
@@ -718,7 +804,11 @@ func (h *CodexPTYHost) finishExecPrompt(execErr error, outputSeen bool) {
 	h.mu.Unlock()
 
 	if execErr != nil {
-		h.recordActivity("codex prompt failed")
+		if execErr == context.Canceled {
+			h.recordActivity("codex prompt interrupted")
+		} else {
+			h.recordActivity("codex prompt failed")
+		}
 	} else {
 		h.recordActivity("codex prompt completed")
 	}

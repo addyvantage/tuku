@@ -1,6 +1,10 @@
 package shell
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 func nonEmpty(value string, fallback string) string {
 	if strings.TrimSpace(value) == "" {
@@ -68,7 +72,7 @@ func wrapText(text string, width int) []string {
 					current = segment
 					continue
 				}
-				if runeLen(current)+1+runeLen(segment) <= width {
+				if lipgloss.Width(current)+1+lipgloss.Width(segment) <= width {
 					current += " " + segment
 					continue
 				}
@@ -106,8 +110,9 @@ func wrapPrefixedOutput(prefix string, text string, width int) []string {
 		return []string{prefix + text}
 	}
 	text = strings.ReplaceAll(text, "\t", "  ")
-	indent := strings.Repeat(" ", runeLen(prefix))
-	available := max(1, width-runeLen(prefix))
+	prefixWidth := lipgloss.Width(prefix)
+	indent := strings.Repeat(" ", prefixWidth)
+	available := max(1, width-prefixWidth)
 	parts := strings.Split(text, "\n")
 	lines := make([]string, 0, len(parts))
 	for _, part := range parts {
@@ -124,7 +129,7 @@ func wrapPrefixedOutput(prefix string, text string, width int) []string {
 }
 
 func wrapLongToken(token string, width int) []string {
-	if width <= 0 || runeLen(token) <= width {
+	if width <= 0 || lipgloss.Width(token) <= width {
 		return []string{token}
 	}
 	runes := []rune(token)

@@ -13,10 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"tuku/internal/domain/benchmark"
+	"tuku/internal/domain/brief"
 	"tuku/internal/domain/common"
 	"tuku/internal/domain/handoff"
+	"tuku/internal/domain/promptir"
 	"tuku/internal/domain/recoveryaction"
 	"tuku/internal/domain/run"
+	"tuku/internal/domain/taskmemory"
 	"tuku/internal/ipc"
 	tukushell "tuku/internal/tui/shell"
 )
@@ -1685,6 +1689,291 @@ func TestCLIStatusCommandHumanIncludesCompiledBriefAdvisory(t *testing.T) {
 	}
 }
 
+func TestCLIBriefCommandHumanIncludesPromptTriageMetrics(t *testing.T) {
+	origCall := ipcCall
+	defer func() { ipcCall = origCall }()
+
+	ipcCall = func(_ context.Context, _ string, req ipc.Request) (ipc.Response, error) {
+		if req.Method != ipc.MethodTaskBrief {
+			t.Fatalf("expected task.brief method, got %s", req.Method)
+		}
+		payload, _ := json.Marshal(ipc.TaskBriefResponse{
+			TaskID:         common.TaskID("tsk_brief_triage"),
+			CurrentBriefID: common.BriefID("brf_triage"),
+			Bounded:        true,
+			CompiledBrief: &ipc.TaskCompiledBriefSummary{
+				Posture:                 "EXECUTION_READY",
+				BoundedEvidenceMessages: 3,
+				Digest:                  "execution-ready brief posture in bounded recent evidence",
+				Advisory:                "Brief is execution-ready within bounded recent evidence.",
+				PromptTriage: &brief.PromptTriage{
+					Applied:                      true,
+					Summary:                      "searched 21 repo-local file(s) and narrowed repair context to 3 ranked candidate(s)",
+					SearchTerms:                  []string{"ui", "component", "page"},
+					CandidateFiles:               []string{"web/src/pages/Dashboard.tsx", "web/src/components/ProfileCard.tsx"},
+					FilesScanned:                 21,
+					RawPromptTokenEstimate:       4,
+					RewrittenPromptTokenEstimate: 31,
+					SearchSpaceTokenEstimate:     620,
+					SelectedContextTokenEstimate: 180,
+					ContextTokenSavingsEstimate:  440,
+				},
+				PromptIR: &promptir.Packet{
+					NormalizedTaskType: "BUG_FIX",
+					RankedTargets: []promptir.Target{
+						{Path: "web/src/pages/Dashboard.tsx"},
+						{Path: "web/src/components/ProfileCard.tsx"},
+					},
+					ValidatorPlan:         promptir.ValidatorPlan{Commands: []string{"npm test -- Dashboard"}},
+					Confidence:            promptir.ConfidenceScore{Level: "high", Value: 0.82},
+					DefaultSerializer:     promptir.SerializerNaturalLanguage,
+					NaturalLanguageTokens: 112,
+					StructuredTokens:      97,
+					StructuredCheaper:     true,
+				},
+			},
+		})
+		return ipc.Response{OK: true, Payload: payload}, nil
+	}
+
+	app := NewCLIApplication()
+	stdout := captureCLIStdout(t)
+	if err := app.Run(context.Background(), []string{"brief", "--task", "tsk_brief_triage", "--human"}); err != nil {
+		t.Fatalf("run brief --human command: %v", err)
+	}
+	stdout.restore()
+	output := stdout.buffer.String()
+	if !strings.Contains(output, "prompt sharpened yes | files scanned 21 | candidates 2 | saved context tokens 440") {
+		t.Fatalf("expected prompt triage headline in human output, got %q", output)
+	}
+	if !strings.Contains(output, "search ui, component, page") || !strings.Contains(output, "token estimate raw=4 rewritten=31 search-space=620 selected-context=180 saved=440") {
+		t.Fatalf("expected prompt triage details in human output, got %q", output)
+	}
+	if !strings.Contains(output, "prompt ir yes | targets 2 | validators 1 | confidence high 0.82") {
+		t.Fatalf("expected prompt ir headline in human output, got %q", output)
+	}
+	if !strings.Contains(output, "serializer default=natural_language natural=112 structured=97 structured-cheaper=true") {
+		t.Fatalf("expected prompt ir serializer metrics in human output, got %q", output)
+	}
+	if !strings.Contains(output, "worker routing") || !strings.Contains(output, "recommended Codex") {
+		t.Fatalf("expected worker routing guidance in brief human output, got %q", output)
+	}
+}
+
+func TestCLIPlanCommandHumanIncludesRoutingAndBenchmark(t *testing.T) {
+	origCall := ipcCall
+	defer func() { ipcCall = origCall }()
+
+	ipcCall = func(_ context.Context, _ string, req ipc.Request) (ipc.Response, error) {
+		if req.Method != ipc.MethodTaskStatus {
+			t.Fatalf("expected task.status method, got %s", req.Method)
+		}
+		payload, _ := json.Marshal(ipc.TaskStatusResponse{
+			TaskID:          common.TaskID("tsk_plan"),
+			Phase:           "BRIEF_READY",
+			Status:          "ACTIVE",
+			LatestRunStatus: run.Status("RUNNING"),
+			CompiledBrief: &ipc.TaskCompiledBriefSummary{
+				Posture:               "EXECUTION_READY",
+				RequiresClarification: false,
+				PromptIR: &promptir.Packet{
+					NormalizedTaskType: "BUG_FIX",
+					RankedTargets: []promptir.Target{
+						{Path: "web/src/pages/Landing.tsx"},
+						{Path: "web/src/components/HeroButton.tsx"},
+					},
+					ValidatorPlan:         promptir.ValidatorPlan{Commands: []string{"npm test -- landing-page"}},
+					Confidence:            promptir.ConfidenceScore{Level: "high", Value: 0.88, Reason: "targets=2 validators=1 ambiguity=0"},
+					DefaultSerializer:     promptir.SerializerNaturalLanguage,
+					NaturalLanguageTokens: 124,
+					StructuredTokens:      101,
+					StructuredCheaper:     true,
+				},
+			},
+			CurrentBenchmarkID:                     common.BenchmarkID("bmk_plan"),
+			CurrentBenchmarkSource:                 "brief_compiled",
+			CurrentBenchmarkSummary:                "ranked 2 targets, planned 1 validator, estimated pre-dispatch savings 260 token(s)",
+			CurrentBenchmarkDispatchPromptTokens:   124,
+			CurrentBenchmarkStructuredPromptTokens: 101,
+			CurrentBenchmarkEstimatedTokenSavings:  260,
+			CurrentBenchmarkFilesScanned:           14,
+			CurrentBenchmarkRankedTargetCount:      2,
+			CurrentBenchmarkConfidenceLevel:        "high",
+			CurrentBenchmarkConfidenceValue:        0.88,
+			CurrentBenchmarkDefaultSerializer:      "natural_language",
+			CurrentBenchmarkStructuredCheaper:      true,
+		})
+		return ipc.Response{OK: true, Payload: payload}, nil
+	}
+
+	app := NewCLIApplication()
+	stdout := captureCLIStdout(t)
+	if err := app.Run(context.Background(), []string{"plan", "--task", "tsk_plan", "--human"}); err != nil {
+		t.Fatalf("run plan --human command: %v", err)
+	}
+	stdout.restore()
+	output := stdout.buffer.String()
+	if !strings.Contains(output, "plan advisory") || !strings.Contains(output, "recommended Codex") {
+		t.Fatalf("expected routing section in plan human output, got %q", output)
+	}
+	if !strings.Contains(output, "benchmark") || !strings.Contains(output, "saved=260") {
+		t.Fatalf("expected benchmark savings in plan human output, got %q", output)
+	}
+}
+
+func TestCLIBenchmarkCommandHumanIncludesSavingsAndConfidence(t *testing.T) {
+	origCall := ipcCall
+	defer func() { ipcCall = origCall }()
+
+	ipcCall = func(_ context.Context, _ string, req ipc.Request) (ipc.Response, error) {
+		if req.Method != ipc.MethodTaskBenchmark {
+			t.Fatalf("expected task.benchmark method, got %s", req.Method)
+		}
+		payload, _ := json.Marshal(ipc.TaskBenchmarkResponse{
+			TaskID: common.TaskID("tsk_benchmark"),
+			Benchmark: &benchmark.Run{
+				BenchmarkID:                   common.BenchmarkID("bmk_123"),
+				Source:                        "brief_compiled",
+				Summary:                       "ranked 4 targets and saved 380 tokens",
+				RawPromptTokenEstimate:        5,
+				DispatchPromptTokenEstimate:   118,
+				StructuredPromptTokenEstimate: 99,
+				SelectedContextTokenEstimate:  144,
+				EstimatedTokenSavings:         380,
+				FilesScanned:                  21,
+				RankedTargetCount:             4,
+				CandidateRecallAt3:            0.67,
+				DefaultSerializer:             "natural_language",
+				StructuredCheaper:             true,
+				ConfidenceLevel:               "high",
+				ConfidenceValue:               0.82,
+			},
+		})
+		return ipc.Response{OK: true, Payload: payload}, nil
+	}
+
+	app := NewCLIApplication()
+	stdout := captureCLIStdout(t)
+	if err := app.Run(context.Background(), []string{"benchmark", "--task", "tsk_benchmark", "--human"}); err != nil {
+		t.Fatalf("run benchmark --human command: %v", err)
+	}
+	stdout.restore()
+	output := stdout.buffer.String()
+	if !strings.Contains(output, "tokens raw=5 dispatch=118 structured=99 selected-context=144 saved=380") {
+		t.Fatalf("expected benchmark token metrics in human output, got %q", output)
+	}
+	if !strings.Contains(output, "targeting files-scanned=21 ranked-targets=4 recall@3=0.67") {
+		t.Fatalf("expected benchmark targeting metrics in human output, got %q", output)
+	}
+	if !strings.Contains(output, "serializer natural_language | structured-cheaper=true | confidence high 0.82") {
+		t.Fatalf("expected benchmark serializer/confidence metrics in human output, got %q", output)
+	}
+}
+
+func TestCLIBriefCommandHumanIncludesTaskMemoryMetrics(t *testing.T) {
+	origCall := ipcCall
+	defer func() { ipcCall = origCall }()
+
+	ipcCall = func(_ context.Context, _ string, req ipc.Request) (ipc.Response, error) {
+		if req.Method != ipc.MethodTaskBrief {
+			t.Fatalf("expected task.brief method, got %s", req.Method)
+		}
+		payload, _ := json.Marshal(ipc.TaskBriefResponse{
+			TaskID:         common.TaskID("tsk_brief_memory"),
+			CurrentBriefID: common.BriefID("brf_memory"),
+			Bounded:        true,
+			CompiledBrief: &ipc.TaskCompiledBriefSummary{
+				Posture:                 "EXECUTION_READY",
+				BoundedEvidenceMessages: 4,
+				Digest:                  "execution-ready brief posture in bounded recent evidence",
+				Advisory:                "Brief is execution-ready within bounded recent evidence.",
+				MemoryCompression: &brief.MemoryCompression{
+					Applied:                   true,
+					Summary:                   "phase=planning; action=repair ui bug; files=web/src/App.tsx; next=run validation",
+					FullHistoryTokenEstimate:  420,
+					ResumePromptTokenEstimate: 120,
+					MemoryCompactionRatio:     3.5,
+					ConfirmedFactsCount:       4,
+					TouchedFilesCount:         1,
+					ValidatorsRunCount:        1,
+					CandidateFilesCount:       2,
+					RejectedHypothesesCount:   1,
+					UnknownsCount:             1,
+				},
+			},
+		})
+		return ipc.Response{OK: true, Payload: payload}, nil
+	}
+
+	app := NewCLIApplication()
+	stdout := captureCLIStdout(t)
+	if err := app.Run(context.Background(), []string{"brief", "--task", "tsk_brief_memory", "--human"}); err != nil {
+		t.Fatalf("run brief --human command: %v", err)
+	}
+	stdout.restore()
+	output := stdout.buffer.String()
+	if !strings.Contains(output, "task memory yes | history tokens 420 | resume tokens 120 | compaction 3.50x") {
+		t.Fatalf("expected task memory headline in human output, got %q", output)
+	}
+	if !strings.Contains(output, "memory phase=planning; action=repair ui bug; files=web/src/App.tsx; next=run validation") || !strings.Contains(output, "memory tokens history=420 resume=120 compaction=3.50x facts=4 touched=1 validators=1 candidates=2 rejected=1 unknowns=1") {
+		t.Fatalf("expected task memory details in human output, got %q", output)
+	}
+}
+
+func TestCLIStatusCommandHumanIncludesContextPolicyAndValidationDetails(t *testing.T) {
+	origCall := ipcCall
+	defer func() { ipcCall = origCall }()
+
+	ipcCall = func(_ context.Context, _ string, req ipc.Request) (ipc.Response, error) {
+		if req.Method != ipc.MethodTaskStatus {
+			t.Fatalf("expected task.status method, got %s", req.Method)
+		}
+		payload, _ := json.Marshal(ipc.TaskStatusResponse{
+			TaskID:                         common.TaskID("tsk_status_rich_human"),
+			Phase:                          "VALIDATING",
+			Status:                         "ACTIVE",
+			RequiredNextOperatorAction:     "REVIEW_VALIDATION_STATE",
+			CurrentContextPackID:           common.ContextPackID("ctx_123"),
+			CurrentContextPackMode:         "standard",
+			CurrentContextPackFileCount:    4,
+			CurrentContextPackHash:         "hash_ctx",
+			LatestPolicyDecisionID:         common.DecisionID("pdec_123"),
+			LatestPolicyDecisionStatus:     "APPROVED",
+			LatestPolicyDecisionRiskLevel:  "MEDIUM",
+			LatestPolicyDecisionReason:     "approved against a dirty worktree because Tuku captured repo anchor and bounded context before execution",
+			LatestRunID:                    common.RunID("run_123"),
+			LatestRunStatus:                "COMPLETED",
+			LatestRunChangedFiles:          []string{"internal/orchestrator/service.go"},
+			LatestRunChangedFilesSemantics: "hint: paths became newly dirty compared with pre-run dirty baseline",
+			LatestRunRepoDiffSummary:       "git diff relative to HEAD: 1 file(s), +10/-2",
+			LatestRunWorktreeSummary:       "worktree dirty: 1 path(s) [modified=1 added=0 deleted=0 renamed=0 untracked=0]",
+			LatestRunValidationSignals:     []string{"validation: gofmt reported no formatting drift", "validation: go test passed"},
+			LatestRunOutputArtifactRef:     "/tmp/validation.txt",
+		})
+		return ipc.Response{OK: true, Payload: payload}, nil
+	}
+
+	app := NewCLIApplication()
+	stdout := captureCLIStdout(t)
+	if err := app.Run(context.Background(), []string{"status", "--task", "tsk_status_rich_human", "--human"}); err != nil {
+		t.Fatalf("run status --human command: %v", err)
+	}
+	stdout.restore()
+	output := stdout.buffer.String()
+	if !strings.Contains(output, "context-pack ctx_123 | mode standard | files 4") {
+		t.Fatalf("expected context pack line in status human output, got %q", output)
+	}
+	if !strings.Contains(output, "policy pdec_123 | status APPROVED | risk MEDIUM") {
+		t.Fatalf("expected policy line in status human output, got %q", output)
+	}
+	if !strings.Contains(output, "repo diff git diff relative to HEAD: 1 file(s), +10/-2") {
+		t.Fatalf("expected repo diff line in status human output, got %q", output)
+	}
+	if !strings.Contains(output, "artifact /tmp/validation.txt") {
+		t.Fatalf("expected validation artifact line in status human output, got %q", output)
+	}
+}
+
 func TestCLIInspectCommandHumanIncludesCompiledIntentDetails(t *testing.T) {
 	origCall := ipcCall
 	defer func() { ipcCall = origCall }()
@@ -1787,6 +2076,43 @@ func TestCLIInspectCommandHumanIncludesCompiledBriefDetails(t *testing.T) {
 	}
 	if strings.Contains(output, "task completed") || strings.Contains(output, "safe to continue") {
 		t.Fatalf("inspect human brief cues must remain conservative, got %q", output)
+	}
+}
+
+func TestCLIInspectCommandHumanIncludesTaskMemoryDetails(t *testing.T) {
+	origCall := ipcCall
+	defer func() { ipcCall = origCall }()
+
+	ipcCall = func(_ context.Context, _ string, req ipc.Request) (ipc.Response, error) {
+		if req.Method != ipc.MethodTaskInspect {
+			t.Fatalf("expected task.inspect method, got %s", req.Method)
+		}
+		payload, _ := json.Marshal(ipc.TaskInspectResponse{
+			TaskID: common.TaskID("tsk_inspect_memory"),
+			TaskMemory: &taskmemory.Snapshot{
+				MemoryID:                  common.MemoryID("mem_123"),
+				Source:                    "run_completed",
+				Summary:                   "phase=validation; action=repair ui bug; files=web/src/App.tsx; validators=go test; next=review validation",
+				FullHistoryTokenEstimate:  510,
+				ResumePromptTokenEstimate: 150,
+				MemoryCompactionRatio:     3.4,
+			},
+		})
+		return ipc.Response{OK: true, Payload: payload}, nil
+	}
+
+	app := NewCLIApplication()
+	stdout := captureCLIStdout(t)
+	if err := app.Run(context.Background(), []string{"inspect", "--task", "tsk_inspect_memory", "--human"}); err != nil {
+		t.Fatalf("run inspect --human command: %v", err)
+	}
+	stdout.restore()
+	output := stdout.buffer.String()
+	if !strings.Contains(output, "task memory") || !strings.Contains(output, "id mem_123 | source run_completed") {
+		t.Fatalf("expected task memory identity lines in inspect human output, got %q", output)
+	}
+	if !strings.Contains(output, "history tokens 510 | resume tokens 150 | compaction 3.40x") || !strings.Contains(output, "summary phase=validation; action=repair ui bug; files=web/src/App.tsx; validators=go test; next=review validation") {
+		t.Fatalf("expected task memory details in inspect human output, got %q", output)
 	}
 }
 
@@ -2762,10 +3088,15 @@ func TestRunPrimaryEntryStartsDaemonAndOpensShell(t *testing.T) {
 		if calls <= 2 {
 			return ipc.Response{}, daemonUnavailableErr()
 		}
-		if req.Method != ipc.MethodResolveShellTaskForRepo {
-			t.Fatalf("expected resolve shell task request, got %s", req.Method)
+		switch req.Method {
+		case ipc.MethodResolveShellTaskForRepo:
+			return mustResolveShellTaskResponse(t, "tsk_primary"), nil
+		case ipc.MethodTaskShellSnapshot:
+			return mustShellSnapshotResponse(t, "tsk_primary"), nil
+		default:
+			t.Fatalf("expected resolve/shell snapshot request, got %s", req.Method)
+			return ipc.Response{}, nil
 		}
-		return mustResolveShellTaskResponse(t, "tsk_primary"), nil
 	}
 	startLocalDaemon = func() (<-chan error, error) {
 		ch := make(chan error)
@@ -2774,7 +3105,7 @@ func TestRunPrimaryEntryStartsDaemonAndOpensShell(t *testing.T) {
 
 	var openedTaskID string
 	app := &CLIApplication{
-		chooseWorkerFn: func(_ context.Context, _ tukushell.WorkerPreference) (tukushell.WorkerPreference, error) {
+		chooseWorkerFn: func(_ context.Context, _ primaryWorkerSelectionContext) (tukushell.WorkerPreference, error) {
 			return tukushell.WorkerPreferenceCodex, nil
 		},
 		openShellFn: func(_ context.Context, _ string, taskID string, _ tukushell.WorkerPreference) error {
@@ -2961,6 +3292,31 @@ func mustResolveShellTaskResponse(t *testing.T, taskID common.TaskID) ipc.Respon
 	})
 	if err != nil {
 		t.Fatalf("marshal resolve shell task response: %v", err)
+	}
+	return ipc.Response{OK: true, Payload: payload}
+}
+
+func mustShellSnapshotResponse(t *testing.T, taskID common.TaskID) ipc.Response {
+	t.Helper()
+	payload, err := json.Marshal(ipc.TaskShellSnapshotResponse{
+		TaskID: taskID,
+		Goal:   "fix the ui bug",
+		Phase:  "BRIEF_READY",
+		Status: "ACTIVE",
+		Brief: &ipc.TaskShellBrief{
+			Posture:               "EXECUTION_READY",
+			RequiresClarification: false,
+			PromptTargets:         []string{"web/src/App.tsx", "web/src/components/Button.tsx"},
+			ValidatorCommands:     []string{"npm test -- landing-page"},
+			ConfidenceLevel:       "high",
+			EstimatedTokenSavings: 220,
+		},
+		CompiledIntent: &ipc.TaskCompiledIntentSummary{
+			Class: "BUG_FIX",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal shell snapshot response: %v", err)
 	}
 	return ipc.Response{OK: true, Payload: payload}
 }

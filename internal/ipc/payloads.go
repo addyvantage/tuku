@@ -3,13 +3,16 @@ package ipc
 import (
 	"time"
 
+	"tuku/internal/domain/benchmark"
 	"tuku/internal/domain/brief"
 	"tuku/internal/domain/checkpoint"
 	"tuku/internal/domain/common"
 	"tuku/internal/domain/handoff"
 	"tuku/internal/domain/intent"
 	"tuku/internal/domain/phase"
+	"tuku/internal/domain/promptir"
 	"tuku/internal/domain/run"
+	"tuku/internal/domain/taskmemory"
 )
 
 type RepoAnchor struct {
@@ -86,23 +89,26 @@ type TaskCompiledIntentSummary struct {
 }
 
 type TaskCompiledBriefSummary struct {
-	BriefID                 common.BriefID  `json:"brief_id,omitempty"`
-	IntentID                common.IntentID `json:"intent_id,omitempty"`
-	Posture                 string          `json:"posture,omitempty"`
-	Objective               string          `json:"objective,omitempty"`
-	RequestedOutcome        string          `json:"requested_outcome,omitempty"`
-	NormalizedAction        string          `json:"normalized_action,omitempty"`
-	ScopeSummary            string          `json:"scope_summary,omitempty"`
-	Constraints             []string        `json:"constraints,omitempty"`
-	DoneCriteria            []string        `json:"done_criteria,omitempty"`
-	AmbiguityFlags          []string        `json:"ambiguity_flags,omitempty"`
-	ClarificationQuestions  []string        `json:"clarification_questions,omitempty"`
-	RequiresClarification   bool            `json:"requires_clarification,omitempty"`
-	WorkerFraming           string          `json:"worker_framing,omitempty"`
-	BoundedEvidenceMessages int             `json:"bounded_evidence_messages,omitempty"`
-	Digest                  string          `json:"digest,omitempty"`
-	Advisory                string          `json:"advisory,omitempty"`
-	CreatedAtUnixMs         int64           `json:"created_at_unix_ms,omitempty"`
+	BriefID                 common.BriefID           `json:"brief_id,omitempty"`
+	IntentID                common.IntentID          `json:"intent_id,omitempty"`
+	Posture                 string                   `json:"posture,omitempty"`
+	Objective               string                   `json:"objective,omitempty"`
+	RequestedOutcome        string                   `json:"requested_outcome,omitempty"`
+	NormalizedAction        string                   `json:"normalized_action,omitempty"`
+	ScopeSummary            string                   `json:"scope_summary,omitempty"`
+	Constraints             []string                 `json:"constraints,omitempty"`
+	DoneCriteria            []string                 `json:"done_criteria,omitempty"`
+	AmbiguityFlags          []string                 `json:"ambiguity_flags,omitempty"`
+	ClarificationQuestions  []string                 `json:"clarification_questions,omitempty"`
+	RequiresClarification   bool                     `json:"requires_clarification,omitempty"`
+	WorkerFraming           string                   `json:"worker_framing,omitempty"`
+	BoundedEvidenceMessages int                      `json:"bounded_evidence_messages,omitempty"`
+	PromptTriage            *brief.PromptTriage      `json:"prompt_triage,omitempty"`
+	MemoryCompression       *brief.MemoryCompression `json:"memory_compression,omitempty"`
+	PromptIR                *promptir.Packet         `json:"prompt_ir,omitempty"`
+	Digest                  string                   `json:"digest,omitempty"`
+	Advisory                string                   `json:"advisory,omitempty"`
+	CreatedAtUnixMs         int64                    `json:"created_at_unix_ms,omitempty"`
 }
 
 type TaskIntentRequest struct {
@@ -122,11 +128,22 @@ type TaskBriefRequest struct {
 }
 
 type TaskBriefResponse struct {
-	TaskID          common.TaskID              `json:"task_id"`
-	CurrentBriefID  common.BriefID             `json:"current_brief_id,omitempty"`
-	Bounded         bool                       `json:"bounded"`
-	Brief           *brief.ExecutionBrief      `json:"brief,omitempty"`
-	CompiledBrief   *TaskCompiledBriefSummary  `json:"compiled_brief,omitempty"`
+	TaskID         common.TaskID             `json:"task_id"`
+	CurrentBriefID common.BriefID            `json:"current_brief_id,omitempty"`
+	Bounded        bool                      `json:"bounded"`
+	Brief          *brief.ExecutionBrief     `json:"brief,omitempty"`
+	CompiledBrief  *TaskCompiledBriefSummary `json:"compiled_brief,omitempty"`
+}
+
+type TaskBenchmarkRequest struct {
+	TaskID common.TaskID `json:"task_id"`
+}
+
+type TaskBenchmarkResponse struct {
+	TaskID        common.TaskID             `json:"task_id"`
+	Benchmark     *benchmark.Run            `json:"benchmark,omitempty"`
+	Brief         *brief.ExecutionBrief     `json:"brief,omitempty"`
+	CompiledBrief *TaskCompiledBriefSummary `json:"compiled_brief,omitempty"`
 }
 
 type TaskRecoveryActionRecord struct {
@@ -164,9 +181,41 @@ type TaskStatusResponse struct {
 	LatestRunArgs                               []string                                     `json:"latest_run_args,omitempty"`
 	LatestRunExitCode                           *int                                         `json:"latest_run_exit_code,omitempty"`
 	LatestRunChangedFiles                       []string                                     `json:"latest_run_changed_files,omitempty"`
+	LatestRunChangedFilesSemantics              string                                       `json:"latest_run_changed_files_semantics,omitempty"`
+	LatestRunRepoDiffSummary                    string                                       `json:"latest_run_repo_diff_summary,omitempty"`
+	LatestRunWorktreeSummary                    string                                       `json:"latest_run_worktree_summary,omitempty"`
 	LatestRunValidationSignals                  []string                                     `json:"latest_run_validation_signals,omitempty"`
 	LatestRunOutputArtifactRef                  string                                       `json:"latest_run_output_artifact_ref,omitempty"`
 	LatestRunStructuredSummary                  string                                       `json:"latest_run_structured_summary,omitempty"`
+	CurrentContextPackID                        common.ContextPackID                         `json:"current_context_pack_id,omitempty"`
+	CurrentContextPackMode                      string                                       `json:"current_context_pack_mode,omitempty"`
+	CurrentContextPackFileCount                 int                                          `json:"current_context_pack_file_count,omitempty"`
+	CurrentContextPackHash                      string                                       `json:"current_context_pack_hash,omitempty"`
+	CurrentTaskMemoryID                         common.MemoryID                              `json:"current_task_memory_id,omitempty"`
+	CurrentTaskMemorySource                     string                                       `json:"current_task_memory_source,omitempty"`
+	CurrentTaskMemorySummary                    string                                       `json:"current_task_memory_summary,omitempty"`
+	CurrentTaskMemoryFullHistoryTokens          int                                          `json:"current_task_memory_full_history_tokens,omitempty"`
+	CurrentTaskMemoryResumePromptTokens         int                                          `json:"current_task_memory_resume_prompt_tokens,omitempty"`
+	CurrentTaskMemoryCompactionRatio            float64                                      `json:"current_task_memory_compaction_ratio,omitempty"`
+	CurrentBenchmarkID                          common.BenchmarkID                           `json:"current_benchmark_id,omitempty"`
+	CurrentBenchmarkSource                      string                                       `json:"current_benchmark_source,omitempty"`
+	CurrentBenchmarkSummary                     string                                       `json:"current_benchmark_summary,omitempty"`
+	CurrentBenchmarkRawPromptTokens             int                                          `json:"current_benchmark_raw_prompt_tokens,omitempty"`
+	CurrentBenchmarkDispatchPromptTokens        int                                          `json:"current_benchmark_dispatch_prompt_tokens,omitempty"`
+	CurrentBenchmarkStructuredPromptTokens      int                                          `json:"current_benchmark_structured_prompt_tokens,omitempty"`
+	CurrentBenchmarkSelectedContextTokens       int                                          `json:"current_benchmark_selected_context_tokens,omitempty"`
+	CurrentBenchmarkEstimatedTokenSavings       int                                          `json:"current_benchmark_estimated_token_savings,omitempty"`
+	CurrentBenchmarkFilesScanned                int                                          `json:"current_benchmark_files_scanned,omitempty"`
+	CurrentBenchmarkRankedTargetCount           int                                          `json:"current_benchmark_ranked_target_count,omitempty"`
+	CurrentBenchmarkCandidateRecallAt3          float64                                      `json:"current_benchmark_candidate_recall_at_3,omitempty"`
+	CurrentBenchmarkDefaultSerializer           string                                       `json:"current_benchmark_default_serializer,omitempty"`
+	CurrentBenchmarkStructuredCheaper           bool                                         `json:"current_benchmark_structured_cheaper,omitempty"`
+	CurrentBenchmarkConfidenceValue             float64                                      `json:"current_benchmark_confidence_value,omitempty"`
+	CurrentBenchmarkConfidenceLevel             string                                       `json:"current_benchmark_confidence_level,omitempty"`
+	LatestPolicyDecisionID                      common.DecisionID                            `json:"latest_policy_decision_id,omitempty"`
+	LatestPolicyDecisionStatus                  string                                       `json:"latest_policy_decision_status,omitempty"`
+	LatestPolicyDecisionRiskLevel               string                                       `json:"latest_policy_decision_risk_level,omitempty"`
+	LatestPolicyDecisionReason                  string                                       `json:"latest_policy_decision_reason,omitempty"`
 	LatestShellSessionID                        string                                       `json:"latest_shell_session_id,omitempty"`
 	LatestShellSessionClass                     string                                       `json:"latest_shell_session_class,omitempty"`
 	LatestShellSessionReason                    string                                       `json:"latest_shell_session_reason,omitempty"`
@@ -735,6 +784,8 @@ type TaskInspectResponse struct {
 	CompiledIntent                           *TaskCompiledIntentSummary                   `json:"compiled_intent,omitempty"`
 	Brief                                    *brief.ExecutionBrief                        `json:"brief,omitempty"`
 	CompiledBrief                            *TaskCompiledBriefSummary                    `json:"compiled_brief,omitempty"`
+	TaskMemory                               *taskmemory.Snapshot                         `json:"task_memory,omitempty"`
+	Benchmark                                *benchmark.Run                               `json:"benchmark,omitempty"`
 	Run                                      *run.ExecutionRun                            `json:"run,omitempty"`
 	Checkpoint                               *checkpoint.Checkpoint                       `json:"checkpoint,omitempty"`
 	Handoff                                  *handoff.Packet                              `json:"handoff,omitempty"`
@@ -967,6 +1018,15 @@ type TaskShellBrief struct {
 	RequiresClarification   bool           `json:"requires_clarification,omitempty"`
 	WorkerFraming           string         `json:"worker_framing,omitempty"`
 	BoundedEvidenceMessages int            `json:"bounded_evidence_messages,omitempty"`
+	PromptTargets           []string       `json:"prompt_targets,omitempty"`
+	ValidatorCommands       []string       `json:"validator_commands,omitempty"`
+	ConfidenceLevel         string         `json:"confidence_level,omitempty"`
+	ConfidenceReason        string         `json:"confidence_reason,omitempty"`
+	EstimatedTokenSavings   int            `json:"estimated_token_savings,omitempty"`
+	DispatchPromptTokens    int            `json:"dispatch_prompt_tokens,omitempty"`
+	StructuredPromptTokens  int            `json:"structured_prompt_tokens,omitempty"`
+	DefaultSerializer       string         `json:"default_serializer,omitempty"`
+	StructuredCheaper       bool           `json:"structured_cheaper,omitempty"`
 }
 
 type TaskShellRun struct {

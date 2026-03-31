@@ -44,6 +44,9 @@ func (c *Coordinator) RecordHandoffFollowThrough(ctx context.Context, req Record
 		return RecordHandoffFollowThroughResult{}, err
 	}
 	continuity := assessHandoffContinuity(taskID, assessment.LatestHandoff, assessment.LatestLaunch, assessment.LatestAck, assessment.LatestFollowThrough, assessment.LatestResolution)
+	if assessment.LatestResolution != nil && continuity.HandoffID == "" {
+		return RecordHandoffFollowThroughResult{}, fmt.Errorf("Claude handoff branch %s is already resolved", assessment.LatestResolution.HandoffID)
+	}
 	if err := validateHandoffFollowThroughPosture(continuity, req.Kind); err != nil {
 		return RecordHandoffFollowThroughResult{}, err
 	}
@@ -142,6 +145,9 @@ func (c *Coordinator) RecordHandoffFollowThrough(ctx context.Context, req Record
 }
 
 func validateHandoffFollowThroughPosture(continuity HandoffContinuity, kind handoff.FollowThroughKind) error {
+	if continuity.State == HandoffContinuityStateNotApplicable || continuity.HandoffID == "" {
+		return fmt.Errorf("no active Claude handoff branch exists for handoff follow-through")
+	}
 	if continuity.TargetWorker != rundomain.WorkerKindClaude {
 		return fmt.Errorf("handoff follow-through can only be recorded for Claude handoffs")
 	}

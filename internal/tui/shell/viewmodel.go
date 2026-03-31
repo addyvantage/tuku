@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"tuku/internal/domain/provider"
 )
 
 func BuildViewModel(snapshot Snapshot, ui UIState, host WorkerHost, width int, height int) ViewModel {
@@ -115,6 +117,7 @@ func BuildViewModel(snapshot Snapshot, ui UIState, host WorkerHost, width int, h
 			},
 		}
 	} else if ui.ShowStatus {
+		recommendation := snapshotWorkerRecommendation(snapshot, ui.Session.WorkerPreference)
 		lines := []string{
 			fmt.Sprintf("task %s", displayTaskLabel(snapshot.TaskID)),
 			fmt.Sprintf("new shell session %s", ui.Session.SessionID),
@@ -124,6 +127,7 @@ func BuildViewModel(snapshot Snapshot, ui UIState, host WorkerHost, width int, h
 			fmt.Sprintf("brief %s", briefDigestLine(snapshot)),
 			fmt.Sprintf("brief readiness %s", briefReadinessLine(snapshot)),
 			fmt.Sprintf("worker %s", effectiveWorkerLabel(snapshot, host)),
+			fmt.Sprintf("route %s", workerRecommendationLine(recommendation)),
 			fmt.Sprintf("host %s", hostStatusLine(snapshot, ui, host)),
 			fmt.Sprintf("repo %s", repoLabel(snapshot.Repo)),
 			fmt.Sprintf("continuity %s", continuityLabel(snapshot)),
@@ -367,6 +371,9 @@ func inspectorBrief(snapshot Snapshot) []string {
 		fmt.Sprintf("action %s", nonEmpty(snapshot.Brief.NormalizedAction, "n/a")),
 		fmt.Sprintf("posture %s", humanizeConstant(nonEmpty(snapshot.Brief.Posture, "unknown"))),
 	}
+	if line := workerRecommendationLine(snapshotWorkerRecommendation(snapshot, WorkerPreferenceAuto)); line != "n/a" {
+		lines = append(lines, "route "+truncateWithEllipsis(line, 64))
+	}
 	if snapshot.Brief.RequiresClarification {
 		lines = append(lines, "readiness clarification needed")
 	} else {
@@ -389,6 +396,23 @@ func inspectorBrief(snapshot Snapshot) []string {
 	}
 	if len(snapshot.Brief.ClarificationQuestions) > 0 {
 		lines = append(lines, truncateWithEllipsis("clarification "+snapshot.Brief.ClarificationQuestions[0], 64))
+	}
+	if len(snapshot.Brief.PromptTargets) > 0 {
+		lines = append(lines, truncateWithEllipsis("targets "+strings.Join(snapshot.Brief.PromptTargets, ", "), 64))
+	}
+	if len(snapshot.Brief.ValidatorCommands) > 0 {
+		lines = append(lines, truncateWithEllipsis("validators "+strings.Join(snapshot.Brief.ValidatorCommands, " | "), 64))
+	}
+	if snapshot.Brief.EstimatedTokenSavings > 0 {
+		lines = append(lines, fmt.Sprintf(
+			"savings %d tokens | prompt %d | structured %d",
+			snapshot.Brief.EstimatedTokenSavings,
+			snapshot.Brief.DispatchPromptTokens,
+			snapshot.Brief.StructuredPromptTokens,
+		))
+	}
+	if level := strings.TrimSpace(snapshot.Brief.ConfidenceLevel); level != "" {
+		lines = append(lines, truncateWithEllipsis("confidence "+level+" | "+nonEmpty(snapshot.Brief.ConfidenceReason, "bounded evidence"), 64))
 	}
 	return lines
 }
@@ -639,11 +663,13 @@ func inspectorWorkerSession(host WorkerHost, session SessionState) []string {
 		return []string{"No worker host."}
 	}
 	status := host.Status()
+	recommendation := snapshotWorkerRecommendation(hostSnapshot(host), session.WorkerPreference)
 	lines := []string{
 		fmt.Sprintf("new shell session %s", session.SessionID),
 		sessionRegistrySummary(session),
 		fmt.Sprintf("preferred %s", nonEmpty(string(session.WorkerPreference), "auto")),
 		fmt.Sprintf("resolved %s", nonEmpty(string(session.ResolvedWorker), "unknown")),
+		fmt.Sprintf("recommended %s", workerRecommendationLine(recommendation)),
 		fmt.Sprintf("worker session %s (%s)", nonEmpty(session.WorkerSessionID, "none"), nonEmpty(string(session.WorkerSessionIDSource), "none")),
 		fmt.Sprintf("attach %s", nonEmpty(string(session.AttachCapability), "none")),
 		fmt.Sprintf("mode %s", nonEmpty(string(status.Mode), "unknown")),
@@ -2283,6 +2309,10 @@ func workerPaneSummaryLine(snapshot Snapshot, ui UIState, host WorkerHost) strin
 	now := observedAt(ui)
 	cue := workerPanePrimaryCue(snapshot, ui, status, now)
 	operatorCue := operatorPaneCue(snapshot)
+	recommendation := workerRecommendationLine(snapshotWorkerRecommendation(snapshot, ui.Session.WorkerPreference))
+	if recommendation != "n/a" {
+		operatorCue = joinNonEmpty(" | ", operatorCue, "route "+recommendation)
+	}
 	if operatorCue == "" {
 		if cue == "" {
 			return label
@@ -2293,6 +2323,50 @@ func workerPaneSummaryLine(snapshot Snapshot, ui UIState, host WorkerHost) strin
 		return operatorCue + " | " + label
 	}
 	return operatorCue + " | " + label + " | " + cue
+}
+
+func hostSnapshot(host WorkerHost) Snapshot {
+	if host == nil {
+		return Snapshot{}
+	}
+	switch typed := host.(type) {
+	case *CodexPTYHost:
+		typed.mu.Lock()
+		defer typed.mu.Unlock()
+		return typed.snapshot
+	case *ClaudePTYHost:
+		typed.mu.Lock()
+		defer typed.mu.Unlock()
+		return typed.snapshot
+	case *TranscriptHost:
+		return typed.snapshot
+	default:
+		return Snapshot{}
+	}
+}
+
+func workerRecommendationLine(recommendation provider.Recommendation) string {
+	if recommendation.Worker == "" || recommendation.Worker == provider.WorkerUnknown {
+		return "n/a"
+	}
+	line := strings.ToLower(provider.Label(recommendation.Worker))
+	if confidence := strings.TrimSpace(recommendation.Confidence); confidence != "" {
+		line += " (" + confidence + ")"
+	}
+	if reason := strings.TrimSpace(recommendation.Reason); reason != "" {
+		line += " " + reason
+	}
+	return line
+}
+
+func joinNonEmpty(sep string, values ...string) string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return strings.Join(out, sep)
 }
 
 func workerPanePrimaryCue(snapshot Snapshot, ui UIState, status HostStatus, now time.Time) string {

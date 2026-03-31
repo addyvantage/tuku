@@ -1634,6 +1634,50 @@ func TestRecordHandoffFollowThroughRejectsInvalidPostureAndReplaysWithinSameLaun
 	}
 }
 
+func TestRecordHandoffFollowThroughRejectsResolvedClaudeBranch(t *testing.T) {
+	store := newTestStore(t)
+	coord := newTestCoordinatorWithLauncher(t, store, defaultAnchor(), newFakeAdapterSuccess(), newFakeHandoffLauncherSuccess())
+	taskID := setupTaskWithBrief(t, coord)
+
+	createOut, err := coord.CreateHandoff(context.Background(), CreateHandoffRequest{
+		TaskID:       string(taskID),
+		TargetWorker: rundomain.WorkerKindClaude,
+		Reason:       "resolved branches must reject new follow-through receipts",
+		Mode:         handoff.ModeResume,
+	})
+	if err != nil {
+		t.Fatalf("create handoff: %v", err)
+	}
+	if _, err := coord.AcceptHandoff(context.Background(), AcceptHandoffRequest{
+		TaskID:     string(taskID),
+		HandoffID:  createOut.HandoffID,
+		AcceptedBy: rundomain.WorkerKindClaude,
+	}); err != nil {
+		t.Fatalf("accept handoff: %v", err)
+	}
+	if _, err := coord.LaunchHandoff(context.Background(), LaunchHandoffRequest{
+		TaskID:    string(taskID),
+		HandoffID: createOut.HandoffID,
+	}); err != nil {
+		t.Fatalf("launch handoff: %v", err)
+	}
+	if _, err := coord.RecordHandoffResolution(context.Background(), RecordHandoffResolutionRequest{
+		TaskID:  string(taskID),
+		Kind:    handoff.ResolutionAbandoned,
+		Summary: "downstream launch abandoned during test",
+	}); err != nil {
+		t.Fatalf("record handoff resolution: %v", err)
+	}
+
+	if _, err := coord.RecordHandoffFollowThrough(context.Background(), RecordHandoffFollowThroughRequest{
+		TaskID:  string(taskID),
+		Kind:    handoff.FollowThroughContinuationUnknown,
+		Summary: "should not be accepted after resolution",
+	}); err == nil || !strings.Contains(err.Error(), "already resolved") {
+		t.Fatalf("expected resolved-branch rejection, got %v", err)
+	}
+}
+
 func TestRecordHandoffResolutionSupersededByLocalUnblocksAcceptedClaudeBranch(t *testing.T) {
 	store := newTestStore(t)
 	coord := newTestCoordinator(t, store, defaultAnchor(), newFakeAdapterSuccess())

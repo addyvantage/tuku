@@ -3,11 +3,13 @@ package shell
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type testSnapshotSource struct {
@@ -209,6 +211,502 @@ func TestShellModelSecondCtrlCQuitsImmediately(t *testing.T) {
 	}
 }
 
+func TestShellModelWindowResizePreservesFeedStateWithoutClearingScreen(t *testing.T) {
+	host := &stubHost{
+		worker: "codex",
+		status: HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+		lines:  []string{"worker> ready"},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_resize"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 120
+	model.height = 32
+	model.resize()
+	before := model.renderFeedContent(100)
+
+	updated, cmd := model.Update(tea.WindowSizeMsg{Width: 96, Height: 24})
+	model = updated.(*shellModel)
+	if cmd != nil {
+		if got := fmt.Sprintf("%T", cmd()); got == "tea.clearScreenMsg" {
+			t.Fatalf("did not expect resize to clear the normal screen")
+		}
+	}
+	if len(model.localEntries) != 0 {
+		t.Fatalf("expected resize to avoid appending feed entries, got %+v", model.localEntries)
+	}
+	after := model.renderFeedContent(100)
+	if before != after {
+		t.Fatalf("expected resize to preserve feed content, before=%q after=%q", before, after)
+	}
+}
+
+func TestShellModelRepeatedResizeDoesNotAppendDuplicateShellContent(t *testing.T) {
+	host := &stubHost{
+		worker: "codex",
+		status: HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+		lines:  []string{"worker> ready"},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_resize_repeat"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 120
+	model.height = 32
+	model.resize()
+	initialContent := model.lastContent
+
+	for _, size := range []tea.WindowSizeMsg{
+		{Width: 110, Height: 28},
+		{Width: 104, Height: 26},
+		{Width: 118, Height: 30},
+	} {
+		updated, _ := model.Update(size)
+		model = updated.(*shellModel)
+	}
+
+	if len(model.localEntries) != 0 {
+		t.Fatalf("expected repeated resize events to avoid duplicating local entries, got %+v", model.localEntries)
+	}
+	if strings.Count(model.lastContent, "worker> ready") != 1 {
+		t.Fatalf("expected rendered feed to contain one worker stream instance, got %q", model.lastContent)
+	}
+	if strings.Count(model.View(), "[ready]") > 1 {
+		t.Fatalf("expected shell chrome to render once after resize, got %q", model.View())
+	}
+	if initialContent == "" || model.lastContent == "" {
+		t.Fatalf("expected resize flow to maintain rendered content, initial=%q current=%q", initialContent, model.lastContent)
+	}
+}
+
+func TestShellModelViewFitsActualWindowAfterResize(t *testing.T) {
+	host := &stubHost{
+		worker: "codex",
+		status: HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+		lines:  []string{"worker> ready"},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_runtime_fit"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 52
+	model.height = 12
+	model.resize()
+
+	assertRenderedViewFitsWindow(t, model.View(), model.width, model.height)
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 44, Height: 9})
+	model = updated.(*shellModel)
+	assertRenderedViewFitsWindow(t, model.View(), model.width, model.height)
+}
+
+func TestShellModelWideLayoutWidthStaysRootDerivedAcrossShellStates(t *testing.T) {
+	host := &stubHost{
+		canInterrupt: true,
+		worker:       "codex",
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_width_authority"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 132
+	model.height = 28
+	model.resize()
+
+	idle := model.layout()
+	if idle.contentWidth < 120 {
+		t.Fatalf("expected wide shells to keep a wide root-derived content area, got %+v", idle)
+	}
+
+	model.ui.WorkerPromptPending = true
+	model.ui.LastWorkerPromptAt = time.Now().UTC().Add(-3 * time.Second)
+	working := model.layout()
+	if working.contentWidth != idle.contentWidth || working.feedWidth != idle.feedWidth {
+		t.Fatalf("expected working state not to collapse root width, idle=%+v working=%+v", idle, working)
+	}
+
+	model.composer.SetValue("/")
+	model.syncOverlayFromComposer()
+	overlay := model.layout()
+	if overlay.contentWidth != idle.contentWidth || overlay.feedWidth != idle.feedWidth {
+		t.Fatalf("expected overlay state not to feed width back into root layout, idle=%+v overlay=%+v", idle, overlay)
+	}
+}
+
+func TestShellModelResizeDoesNotReappendIntroContent(t *testing.T) {
+	host := &stubHost{
+		worker: "codex",
+		status: HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_intro"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 80
+	model.height = 18
+	model.resize()
+
+	for _, size := range []tea.WindowSizeMsg{
+		{Width: 72, Height: 16},
+		{Width: 68, Height: 14},
+		{Width: 90, Height: 22},
+	} {
+		updated, _ := model.Update(size)
+		model = updated.(*shellModel)
+	}
+
+	rendered := model.renderFeedContent(80)
+	if strings.Count(rendered, "Connected to codex") != 1 {
+		t.Fatalf("expected intro content to remain singular after resize, got %q", rendered)
+	}
+}
+
+func TestShellModelComposerStaysPackedBelowLatestTranscriptContent(t *testing.T) {
+	host := &stubHost{
+		worker:   "codex",
+		canInput: true,
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_layout"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 90
+	model.height = 24
+	model.resize()
+
+	model.pushUserPrompt("hi")
+	model.appendLocalEntry(shellFeedEntry{
+		Key:          "worker-reply",
+		Kind:         shellFeedWorker,
+		Title:        "Worker",
+		Body:         []string{"worker says hi"},
+		Preformatted: true,
+	})
+	model.syncViewport(true)
+
+	lines := splitLines(model.View())
+	headerLine := findLineContaining(lines, "TUKU shell")
+	promptLine := findLineContaining(lines, "› hi")
+	workerLine := findLastLineContaining(lines, "worker says hi")
+	composerLine := findLineContaining(lines, "Live worker")
+
+	if headerLine != 0 {
+		t.Fatalf("expected header to stay top-anchored, got %d", headerLine)
+	}
+	if promptLine == -1 || workerLine == -1 || composerLine == -1 {
+		t.Fatalf("expected prompt, worker reply, and composer in view, got %q", model.View())
+	}
+	if !(promptLine < workerLine && workerLine < composerLine) {
+		t.Fatalf("expected chronological prompt -> worker -> composer order, got prompt=%d worker=%d composer=%d view=%q", promptLine, workerLine, composerLine, model.View())
+	}
+	if composerLine-workerLine > 3 {
+		t.Fatalf("expected composer to sit directly below the latest transcript content, got worker=%d composer=%d", workerLine, composerLine)
+	}
+	if len(lines) >= model.height {
+		t.Fatalf("expected extra terminal height to remain below the packed shell content, got %d lines for height %d", len(lines), model.height)
+	}
+}
+
+func TestShellModelTallResizeKeepsBlankSpaceBelowComposerNotAboveIt(t *testing.T) {
+	host := &stubHost{
+		worker:   "codex",
+		canInput: true,
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_resize_layout"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 90
+	model.height = 18
+	model.resize()
+	model.pushUserPrompt("hi")
+	model.appendLocalEntry(shellFeedEntry{
+		Key:          "worker-reply",
+		Kind:         shellFeedWorker,
+		Title:        "Worker",
+		Body:         []string{"reply ready"},
+		Preformatted: true,
+	})
+	model.syncViewport(true)
+
+	shortLines := splitLines(model.View())
+	shortComposer := findLineContaining(shortLines, "Live worker")
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 90, Height: 30})
+	model = updated.(*shellModel)
+	tallLines := splitLines(model.View())
+	tallHeader := findLineContaining(tallLines, "TUKU shell")
+	tallWorker := findLastLineContaining(tallLines, "reply ready")
+	tallComposer := findLineContaining(tallLines, "Live worker")
+
+	if tallHeader != 0 {
+		t.Fatalf("expected header to remain pinned to the top after resize, got %d", tallHeader)
+	}
+	if tallComposer-shortComposer > 2 {
+		t.Fatalf("expected taller terminals to add empty space below the composer instead of pushing it downward, got short=%d tall=%d", shortComposer, tallComposer)
+	}
+	if tallWorker == -1 || tallComposer == -1 {
+		t.Fatalf("expected worker reply and composer in resized view, got %q", model.View())
+	}
+	if tallComposer-tallWorker > 3 {
+		t.Fatalf("expected composer to remain packed below the latest transcript after resize, got worker=%d composer=%d", tallWorker, tallComposer)
+	}
+	if len(tallLines) >= model.height {
+		t.Fatalf("expected resized shell content to stay top-packed with blank space below, got %d lines for height %d", len(tallLines), model.height)
+	}
+}
+
+func TestShellModelPgUpAndPgDnRestoreScrollableHistory(t *testing.T) {
+	host := &stubHost{
+		worker: "transcript",
+		status: HostStatus{Mode: HostModeTranscript, State: HostStateTranscriptOnly, Label: "transcript", InputLive: false},
+	}
+	conversation := make([]ConversationItem, 0, 24)
+	for i := 0; i < 12; i++ {
+		conversation = append(conversation,
+			ConversationItem{Role: "user", Body: fmt.Sprintf("user prompt %02d", i)},
+			ConversationItem{Role: "worker", Body: strings.Repeat(fmt.Sprintf("worker reply %02d ", i), 8)},
+		)
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{
+		TaskID:             "tsk_scroll",
+		RecentConversation: conversation,
+	}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.startupConversationBaseline = 0
+	model.width = 84
+	model.height = 14
+	model.resize()
+
+	bottomOffset := model.viewport.YOffset
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyPgUp})
+	model = updated.(*shellModel)
+	if model.viewport.YOffset >= bottomOffset {
+		t.Fatalf("expected PgUp to scroll into prior turns, got before=%d after=%d", bottomOffset, model.viewport.YOffset)
+	}
+	if model.followLatest {
+		t.Fatal("expected manual upward scroll to disable follow-latest mode")
+	}
+
+	upOffset := model.viewport.YOffset
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyPgDown})
+	model = updated.(*shellModel)
+	if model.viewport.YOffset <= upOffset {
+		t.Fatalf("expected PgDn to move back toward recent turns, got before=%d after=%d", upOffset, model.viewport.YOffset)
+	}
+}
+
+func TestShellModelShrinkAndRestoreKeepsTranscriptVisible(t *testing.T) {
+	host := &stubHost{
+		worker:   "codex",
+		canInput: true,
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_resize_recover"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 104
+	model.height = 16
+	model.resize()
+	model.pushUserPrompt("recover the layout")
+	model.appendLocalEntry(shellFeedEntry{
+		Key:          "resize-recover-worker",
+		Kind:         shellFeedWorker,
+		Title:        "Worker",
+		Body:         []string{"Most recent worker entry survives resize recovery."},
+		Preformatted: true,
+	})
+	model.syncViewport(true)
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 42, Height: 9})
+	model = updated.(*shellModel)
+	assertRenderedViewFitsWindow(t, model.View(), model.width, model.height)
+	if strings.TrimSpace(model.viewport.View()) == "" {
+		t.Fatalf("expected narrow resize to keep transcript visible, got %q", model.viewport.View())
+	}
+
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 104, Height: 16})
+	model = updated.(*shellModel)
+	assertRenderedViewFitsWindow(t, model.View(), model.width, model.height)
+	if strings.TrimSpace(model.viewport.View()) == "" {
+		t.Fatalf("expected restored resize to recover transcript visibility, got %q", model.viewport.View())
+	}
+	if !strings.Contains(model.renderFeedContent(model.layout().contentWidth), "Most recent worker entry survives resize recovery.") {
+		t.Fatalf("expected restored shell to retain the latest transcript content, got %q", model.renderFeedContent(model.layout().contentWidth))
+	}
+}
+
+func TestShellModelScrolledViewportDoesNotSnapBackOnWorkingTick(t *testing.T) {
+	now := time.Now().UTC()
+	host := &stubHost{
+		worker: "codex",
+		lines:  []string{"Ran rg --files", "internal/tui/shell/bubble_shell.go", "Checked worker output"},
+		status: HostStatus{
+			Mode:         HostModeCodexPTY,
+			State:        HostStateLive,
+			Label:        "codex live",
+			InputLive:    true,
+			LastOutputAt: now,
+		},
+	}
+	conversation := make([]ConversationItem, 0, 20)
+	for i := 0; i < 10; i++ {
+		conversation = append(conversation,
+			ConversationItem{Role: "user", Body: fmt.Sprintf("prompt %02d", i)},
+			ConversationItem{Role: "worker", Body: strings.Repeat(fmt.Sprintf("reply %02d ", i), 8)},
+		)
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{
+		TaskID:             "tsk_tick",
+		RecentConversation: conversation,
+	}, UIState{
+		Session:               newSessionState(now),
+		WorkerPromptPending:   true,
+		WorkerResponseStarted: true,
+		LastWorkerPromptAt:    now.Add(-5 * time.Second),
+	}, host)
+	model.startupConversationBaseline = 0
+	model.width = 84
+	model.height = 14
+	model.resize()
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyPgUp})
+	model = updated.(*shellModel)
+	scrolledOffset := model.viewport.YOffset
+
+	updatedModel, _ := model.Update(shellWorkingTickMsg{})
+	model = updatedModel.(*shellModel)
+	if model.viewport.YOffset != scrolledOffset {
+		t.Fatalf("expected working tick to preserve manual scroll position, got before=%d after=%d", scrolledOffset, model.viewport.YOffset)
+	}
+	if model.followLatest {
+		t.Fatal("expected working tick to keep follow-latest disabled while user is scrolled up")
+	}
+}
+
+func TestShellModelFollowLatestKeepsNewestWorkerOutputVisibleAtBottom(t *testing.T) {
+	now := time.Now().UTC()
+	host := &stubHost{
+		worker: "codex",
+		lines:  []string{"Explored repo state", "Read internal/tui/shell/bubble_shell.go"},
+		status: HostStatus{
+			Mode:         HostModeCodexPTY,
+			State:        HostStateLive,
+			Label:        "codex live",
+			InputLive:    true,
+			LastOutputAt: now,
+		},
+	}
+	conversation := make([]ConversationItem, 0, 18)
+	for i := 0; i < 9; i++ {
+		conversation = append(conversation,
+			ConversationItem{Role: "user", Body: fmt.Sprintf("prompt %02d", i)},
+			ConversationItem{Role: "worker", Body: strings.Repeat(fmt.Sprintf("reply %02d ", i), 7)},
+		)
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{
+		TaskID:             "tsk_follow",
+		RecentConversation: conversation,
+	}, UIState{
+		Session:               newSessionState(now),
+		WorkerPromptPending:   true,
+		WorkerResponseStarted: true,
+		LastWorkerPromptAt:    now.Add(-5 * time.Second),
+	}, host)
+	model.startupConversationBaseline = 0
+	model.width = 84
+	model.height = 14
+	model.resize()
+
+	host.lines = append(host.lines, "Ran go test ./internal/tui/shell")
+	host.status.LastOutputAt = now.Add(time.Second)
+	model.pollHost()
+
+	if !model.followLatest || !model.viewport.AtBottom() {
+		t.Fatalf("expected follow-latest mode to keep the viewport pinned to the tail, offset=%d", model.viewport.YOffset)
+	}
+	if !strings.Contains(model.viewport.View(), "Ran go test ./internal/tui/shell") {
+		t.Fatalf("expected newest worker output to stay visible at the bottom, got %q", model.viewport.View())
+	}
+}
+
+func TestShellModelWorkerOutputDoesNotYankViewportWhenUserScrolledUp(t *testing.T) {
+	now := time.Now().UTC()
+	host := &stubHost{
+		worker: "codex",
+		lines:  []string{"Explored repo state", "Read internal/tui/shell/bubble_shell.go"},
+		status: HostStatus{
+			Mode:         HostModeCodexPTY,
+			State:        HostStateLive,
+			Label:        "codex live",
+			InputLive:    true,
+			LastOutputAt: now,
+		},
+	}
+	conversation := make([]ConversationItem, 0, 18)
+	for i := 0; i < 9; i++ {
+		conversation = append(conversation,
+			ConversationItem{Role: "user", Body: fmt.Sprintf("prompt %02d", i)},
+			ConversationItem{Role: "worker", Body: strings.Repeat(fmt.Sprintf("reply %02d ", i), 7)},
+		)
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{
+		TaskID:             "tsk_no_yank",
+		RecentConversation: conversation,
+	}, UIState{
+		Session:               newSessionState(now),
+		WorkerPromptPending:   true,
+		WorkerResponseStarted: true,
+		LastWorkerPromptAt:    now.Add(-5 * time.Second),
+	}, host)
+	model.startupConversationBaseline = 0
+	model.width = 84
+	model.height = 14
+	model.resize()
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyPgUp})
+	model = updated.(*shellModel)
+	scrolledOffset := model.viewport.YOffset
+
+	host.lines = append(host.lines, "Waited on worker response", "internal/tui/shell/app.go")
+	host.status.LastOutputAt = now.Add(time.Second)
+	model.pollHost()
+
+	if model.viewport.YOffset != scrolledOffset {
+		t.Fatalf("expected worker output to preserve manual scroll position, got before=%d after=%d", scrolledOffset, model.viewport.YOffset)
+	}
+	if model.followLatest {
+		t.Fatal("expected manual scroll mode to remain active after new worker output")
+	}
+}
+
+func TestShellModelCommandPalettePreservesViewportAndComposerAnchoring(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		worker:   "codex",
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	conversation := make([]ConversationItem, 0, 18)
+	for i := 0; i < 9; i++ {
+		conversation = append(conversation,
+			ConversationItem{Role: "user", Body: fmt.Sprintf("prompt %02d", i)},
+			ConversationItem{Role: "worker", Body: strings.Repeat(fmt.Sprintf("reply %02d ", i), 7)},
+		)
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{
+		TaskID:             "tsk_palette",
+		RecentConversation: conversation,
+	}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.startupConversationBaseline = 0
+	model.width = 88
+	model.height = 18
+	model.resize()
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyPgUp})
+	model = updated.(*shellModel)
+	scrolledOffset := model.viewport.YOffset
+
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	model = updated.(*shellModel)
+	openLines := splitLines(model.View())
+	if model.viewport.YOffset != scrolledOffset {
+		t.Fatalf("expected command palette open to preserve feed scroll position, got before=%d after=%d", scrolledOffset, model.viewport.YOffset)
+	}
+	if composerLine := findLineContaining(openLines, "Command filter"); composerLine != model.layout().headerHeight+model.viewport.Height+1 {
+		t.Fatalf("expected palette open to keep the composer directly after visible transcript content, got composer=%d viewport=%d", composerLine, model.viewport.Height)
+	}
+
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(*shellModel)
+	closedLines := splitLines(model.View())
+	if composerLine := findLineContaining(closedLines, "Live worker"); composerLine != model.layout().headerHeight+model.viewport.Height+1 {
+		t.Fatalf("expected palette close to keep the composer directly after visible transcript content, got composer=%d viewport=%d", composerLine, model.viewport.Height)
+	}
+	if model.viewport.YOffset != scrolledOffset {
+		t.Fatalf("expected palette close to preserve feed scroll position, got before=%d after=%d", scrolledOffset, model.viewport.YOffset)
+	}
+}
+
 func TestShellModelStatusCommandAppendsStructuredFeedBlock(t *testing.T) {
 	host := &stubHost{
 		worker: "codex",
@@ -337,6 +835,30 @@ func TestShellModelSubmitToLiveHostWritesInputAndShowsPrompt(t *testing.T) {
 	}
 }
 
+func TestShellModelUserPromptRendersAsCleanPromptLine(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		worker:   "codex",
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_prompt"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+	model.pushUserPrompt("help")
+
+	rendered := model.renderFeedContent(100)
+	if !strings.Contains(rendered, "› help") {
+		t.Fatalf("expected clean prompt-line rendering, got %q", rendered)
+	}
+	if strings.Contains(rendered, "[YOU]") {
+		t.Fatalf("expected prompt-line rendering instead of boxed YOU label, got %q", rendered)
+	}
+	if strings.Count(rendered, "› help") != 1 {
+		t.Fatalf("expected prompt to render exactly once, got %q", rendered)
+	}
+}
+
 func TestShellModelCommitsWorkerReplyBeforeNextUserTurn(t *testing.T) {
 	host := &stubHost{
 		canInput: true,
@@ -353,6 +875,8 @@ func TestShellModelCommitsWorkerReplyBeforeNextUserTurn(t *testing.T) {
 	host.lines = []string{"First reply."}
 	host.canInput = true
 	host.status.LastOutputAt = time.Now().UTC().Add(time.Second)
+	model.pollHost()
+	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerIdleGrace - time.Second)
 	model.pollHost()
 
 	model.composer.SetValue("What's up?")
@@ -417,6 +941,265 @@ func TestShellModelWorkerRunningStateStaysConsistent(t *testing.T) {
 	}
 }
 
+func TestShellModelWorkingStateLineShowsElapsedSecondsAndInterruptHint(t *testing.T) {
+	host := &stubHost{
+		worker:       "codex",
+		canInterrupt: true,
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_working"}, UIState{
+		Session:             newSessionState(time.Now().UTC()),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  time.Now().UTC().Add(-5 * time.Second),
+	}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+
+	rendered := model.renderFeedContent(100)
+	if !strings.Contains(rendered, "Working (5s") {
+		t.Fatalf("expected elapsed working indicator, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Esc to interrupt") {
+		t.Fatalf("expected interrupt hint in working indicator, got %q", rendered)
+	}
+}
+
+func TestFormatShellElapsedAcrossRanges(t *testing.T) {
+	cases := []struct {
+		elapsed time.Duration
+		want    string
+	}{
+		{elapsed: 5 * time.Second, want: "5s"},
+		{elapsed: 59 * time.Second, want: "59s"},
+		{elapsed: time.Minute + 2*time.Second, want: "1m 02s"},
+		{elapsed: 3*time.Minute + 41*time.Second, want: "3m 41s"},
+		{elapsed: time.Hour + 2*time.Minute + 7*time.Second, want: "1h 02m 07s"},
+	}
+	for _, tc := range cases {
+		if got := formatShellElapsed(tc.elapsed); got != tc.want {
+			t.Fatalf("elapsed %s: expected %q, got %q", tc.elapsed, tc.want, got)
+		}
+	}
+}
+
+func TestShellModelWorkingTickRefreshesTimerWithoutHostOutput(t *testing.T) {
+	host := &stubHost{
+		worker: "codex",
+		status: HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_tick"}, UIState{
+		Session:             newSessionState(time.Now().UTC()),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  time.Now().UTC().Add(-5 * time.Second),
+	}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+	before := model.renderFeedContent(100)
+
+	model.ui.LastWorkerPromptAt = time.Now().UTC().Add(-6 * time.Second)
+	updated, _ := model.Update(shellWorkingTickMsg{})
+	model = updated.(*shellModel)
+	after := model.renderFeedContent(100)
+
+	if before == after {
+		t.Fatalf("expected working tick to update the rendered timer, before=%q after=%q", before, after)
+	}
+	if !strings.Contains(after, "Working (6s") {
+		t.Fatalf("expected updated working timer after tick, got %q", after)
+	}
+}
+
+func TestShellModelWorkingSpinnerTicksIndependentlyOfTranscriptArrival(t *testing.T) {
+	host := &stubHost{
+		worker: "codex",
+		status: HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_spinner"}, UIState{
+		Session:             newSessionState(time.Now().UTC()),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  time.Now().UTC().Add(-5 * time.Second),
+	}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+
+	before := model.renderFeedContent(100)
+	updated, cmd := model.Update(model.spinner.Tick())
+	model = updated.(*shellModel)
+	after := model.renderFeedContent(100)
+
+	if cmd == nil {
+		t.Fatal("expected spinner update to schedule the next animation tick")
+	}
+	if before == after {
+		t.Fatalf("expected spinner frame to advance without transcript changes, before=%q after=%q", before, after)
+	}
+	if !strings.Contains(after, "Working (5s") {
+		t.Fatalf("expected spinner tick to preserve the working row content, got %q", after)
+	}
+}
+
+func TestShellModelWorkingSpinnerStopsWhenWorkSettles(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		worker:   "codex",
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+		lines:    []string{"Ran go test ./internal/tui/shell"},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_spinner_stop"}, UIState{
+		Session:               newSessionState(time.Now().UTC()),
+		WorkerPromptPending:   true,
+		WorkerResponseStarted: true,
+		LastWorkerPromptAt:    time.Now().UTC().Add(-5 * time.Second),
+	}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+
+	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerIdleGrace - time.Second)
+	model.pollHost()
+	updated, cmd := model.Update(model.spinner.Tick())
+	model = updated.(*shellModel)
+
+	if cmd != nil {
+		t.Fatal("expected spinner loop to stop once the worker turn settles")
+	}
+	if strings.Contains(model.renderFeedContent(100), "Working (") {
+		t.Fatalf("expected no active working row after the worker settles, got %q", model.renderFeedContent(100))
+	}
+}
+
+func TestShellModelWorkingStateTracksLiveOutputAndClearsWhenSettled(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		worker:   "codex",
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_working"}, UIState{
+		Session:             newSessionState(time.Now().UTC()),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  time.Now().UTC().Add(-3 * time.Second),
+	}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+
+	if !strings.Contains(model.renderFeedContent(100), "Working (3s") {
+		t.Fatalf("expected pending worker indicator before output, got %q", model.renderFeedContent(100))
+	}
+
+	host.lines = []string{"Explored README.md", "  Read README.md", "Answer ready."}
+	host.status.LastOutputAt = time.Now().UTC()
+	model.pollHost()
+
+	rendered := model.renderFeedContent(100)
+	if !strings.Contains(rendered, "• Explored README.md") || !strings.Contains(rendered, "└ Read README.md") {
+		t.Fatalf("expected committed worker output to be grouped cleanly, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Working (") {
+		t.Fatalf("expected working indicator to remain while live output is still active, got %q", rendered)
+	}
+
+	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerIdleGrace - time.Second)
+	model.pollHost()
+
+	rendered = model.renderFeedContent(100)
+	if strings.Contains(rendered, "Working (") {
+		t.Fatalf("expected working indicator to clear after the worker stream settles, got %q", rendered)
+	}
+}
+
+func TestShellModelWorkingRowStaysBelowNewestVisibleWorkerContent(t *testing.T) {
+	host := &stubHost{
+		worker: "codex",
+		status: HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+		lines: []string{
+			"Explored internal/tui/shell/bubble_shell.go",
+			"  Read internal/tui/shell/bubble_shell.go:1409",
+			"Ran go test ./internal/tui/shell",
+		},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_position"}, UIState{
+		Session:               newSessionState(time.Now().UTC()),
+		WorkerPromptPending:   true,
+		WorkerResponseStarted: true,
+		LastWorkerPromptAt:    time.Now().UTC().Add(-8 * time.Second),
+	}, host)
+	model.width = 110
+	model.height = 28
+	model.resize()
+
+	rendered := model.renderFeedContent(110)
+	actionIdx := strings.Index(rendered, "• Explored internal/tui/shell/bubble_shell.go")
+	workingIdx := strings.Index(rendered, "Working (")
+	if actionIdx == -1 || workingIdx == -1 {
+		t.Fatalf("expected worker output and working row in feed, got %q", rendered)
+	}
+	if workingIdx <= actionIdx {
+		t.Fatalf("expected working row below the newest worker content, got %q", rendered)
+	}
+}
+
+func TestShellModelEscInterruptsRunningWorkerWhenSupported(t *testing.T) {
+	host := &stubHost{
+		canInterrupt: true,
+		worker:       "codex",
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_interrupt"}, UIState{
+		Session:             newSessionState(time.Now().UTC()),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  time.Now().UTC().Add(-4 * time.Second),
+	}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(*shellModel)
+
+	if host.interrupts != 1 {
+		t.Fatalf("expected Esc to interrupt the live worker, got %d interrupts", host.interrupts)
+	}
+	if !model.ui.WorkerInterruptRequested {
+		t.Fatal("expected shell state to record that interrupt was requested")
+	}
+	rendered := model.renderFeedContent(100)
+	if !strings.Contains(rendered, "interrupt sent") {
+		t.Fatalf("expected conservative interrupt note in transcript, got %q", rendered)
+	}
+}
+
+func TestShellModelEscDoesNotClaimInterruptWhenUnsupported(t *testing.T) {
+	host := &stubHost{
+		worker: "codex",
+		status: HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_no_interrupt"}, UIState{
+		Session:             newSessionState(time.Now().UTC()),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  time.Now().UTC().Add(-4 * time.Second),
+	}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(*shellModel)
+
+	if host.interrupts != 0 {
+		t.Fatalf("expected no interrupt call in unsupported state, got %d", host.interrupts)
+	}
+	if model.ui.WorkerInterruptRequested {
+		t.Fatal("expected no interrupt-request state when the host cannot interrupt")
+	}
+	if strings.Contains(model.renderFeedContent(100), "interrupt sent") {
+		t.Fatalf("expected no interrupt note in transcript, got %q", model.renderFeedContent(100))
+	}
+}
+
 func TestShellModelCanonicalSendStateUsesDedicatedDockCopy(t *testing.T) {
 	host := &stubHost{
 		canInput: false,
@@ -434,8 +1217,137 @@ func TestShellModelCanonicalSendStateUsesDedicatedDockCopy(t *testing.T) {
 	if state.Label != "Tuku message" || state.SendMode != "canonical" {
 		t.Fatalf("expected canonical-send dock labeling, got %+v", state)
 	}
-	if !strings.Contains(shellFooterHint(state), "Enter send via Tuku") {
-		t.Fatalf("expected dedicated canonical footer hint, got %q", shellFooterHint(state))
+	if !strings.Contains(model.renderHelpView(90), "Enter") || !strings.Contains(model.renderHelpView(90), "send") {
+		t.Fatalf("expected canonical help rail to advertise real send behavior, got %q", model.renderHelpView(90))
+	}
+}
+
+func TestShellModelComposerUsesFocusedTextInputPlaceholderAndTypedValue(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		worker:   "codex",
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_input"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+
+	if !model.composer.Focused() {
+		t.Fatal("expected live worker composer to stay focused")
+	}
+	empty := model.renderComposer(newShellStyles(), model.layout())
+	if !strings.Contains(empty, "Ask the worker to inspect, explain, or change something") {
+		t.Fatalf("expected placeholder in empty composer, got %q", empty)
+	}
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	model = updated.(*shellModel)
+	typed := model.renderComposer(newShellStyles(), model.layout())
+	if strings.Contains(typed, "Ask the worker to inspect, explain, or change something") {
+		t.Fatalf("expected placeholder to disappear after typing, got %q", typed)
+	}
+	if strings.Count(typed, "› z") != 1 {
+		t.Fatalf("expected typed content to render once without ghosting, got %q", typed)
+	}
+}
+
+func TestShellModelComposerKeepsTypedInputStableAcrossResize(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		worker:   "codex",
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_input_resize"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+	model.composer.SetValue("inspect")
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 86, Height: 22})
+	model = updated.(*shellModel)
+	rendered := model.renderComposer(newShellStyles(), model.layout())
+	if strings.Count(rendered, "inspect") != 1 {
+		t.Fatalf("expected typed input to survive resize without duplication, got %q", rendered)
+	}
+}
+
+func TestShellModelHelpRailRendersCompactBindingsAtBottom(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		worker:   "codex",
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_help"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+
+	helpView := model.renderHelpView(100)
+	if !strings.Contains(helpView, "/") || !strings.Contains(helpView, "commands") {
+		t.Fatalf("expected compact help to expose the command palette binding, got %q", helpView)
+	}
+	if !strings.Contains(helpView, "PgUp/PgDn") {
+		t.Fatalf("expected compact help to expose history scrolling, got %q", helpView)
+	}
+}
+
+func TestShellModelHelpRailUpdatesWidthAndToggleState(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		worker:   "codex",
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_help_width"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 90
+	model.height = 24
+	model.resize()
+
+	wide := model.renderHelpView(90)
+	narrow := model.renderHelpView(24)
+	if wide == narrow {
+		t.Fatalf("expected help rail to adapt to width changes, wide=%q narrow=%q", wide, narrow)
+	}
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	model = updated.(*shellModel)
+	if !model.help.ShowAll {
+		t.Fatal("expected ? to expand full help when the composer is empty")
+	}
+	full := model.renderHelpView(90)
+	if !strings.Contains(full, "Ctrl-C") || !strings.Contains(full, "exit") {
+		t.Fatalf("expected expanded help to include quit guidance, got %q", full)
+	}
+}
+
+func TestShellModelHelpRailReflectsRealEscBindingByState(t *testing.T) {
+	running := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_help_state"}, UIState{
+		Session:             newSessionState(time.Now().UTC()),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  time.Now().UTC().Add(-2 * time.Second),
+	}, &stubHost{
+		canInterrupt: true,
+		worker:       "codex",
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	})
+	running.width = 100
+	running.height = 24
+	running.resize()
+	if !strings.Contains(strings.ToLower(running.renderHelpView(100)), "interrupt") {
+		t.Fatalf("expected running help rail to advertise Esc interrupt, got %q", running.renderHelpView(100))
+	}
+
+	idle := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_help_overlay"}, UIState{Session: newSessionState(time.Now().UTC())}, &stubHost{
+		canInput: true,
+		worker:   "codex",
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	})
+	idle.width = 100
+	idle.height = 24
+	idle.resize()
+	idle.setOverlayKind(shellOverlayCommands, false)
+	if !strings.Contains(strings.ToLower(idle.renderHelpView(100)), "dismiss") {
+		t.Fatalf("expected overlay help rail to advertise Esc dismiss, got %q", idle.renderHelpView(100))
 	}
 }
 
@@ -486,6 +1398,241 @@ func TestShellModelCommandPaletteRendersSections(t *testing.T) {
 	}
 }
 
+func TestShellModelPaletteRendersBelowComposerArea(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 100
+	model.height = 26
+	model.resize()
+	model.composer.SetValue("/")
+	model.syncOverlayFromComposer()
+
+	lines := splitLines(model.View())
+	composerIdx := findLineContaining(lines, "Command filter")
+	overlayIdx := findLineContaining(lines, "Commands")
+	footerIdx := findLineContaining(lines, "session ")
+
+	if composerIdx == -1 || overlayIdx == -1 || footerIdx == -1 {
+		t.Fatalf("expected composer, overlay, and footer in rendered shell, got %q", model.View())
+	}
+	if overlayIdx <= composerIdx {
+		t.Fatalf("expected overlay below the composer area, got composer=%d overlay=%d", composerIdx, overlayIdx)
+	}
+	if overlayIdx >= footerIdx {
+		t.Fatalf("expected overlay to stay above the footer, got overlay=%d footer=%d", overlayIdx, footerIdx)
+	}
+}
+
+func TestShellModelPaletteCounterUsesSelectedCommandIndex(t *testing.T) {
+	host := &stubHost{
+		status: HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 120
+	model.height = 32
+	model.resize()
+	model.composer.SetValue("/")
+	model.syncOverlayFromComposer()
+
+	model.menuSelected = 0
+	rendered := model.renderOverlay(newShellStyles(), model.layout())
+	if !strings.Contains(rendered, "1 of 11") {
+		t.Fatalf("expected /next to show 1 of 11, got %q", rendered)
+	}
+
+	model.menuSelected = 1
+	rendered = model.renderOverlay(newShellStyles(), model.layout())
+	if !strings.Contains(rendered, "2 of 11") {
+		t.Fatalf("expected /run to show 2 of 11, got %q", rendered)
+	}
+
+	model.menuSelected = len(shellCommands) - 1
+	rendered = model.renderOverlay(newShellStyles(), model.layout())
+	if !strings.Contains(rendered, "11 of 11") {
+		t.Fatalf("expected /clear to show 11 of 11, got %q", rendered)
+	}
+}
+
+func TestShellModelPaletteCounterUsesFilteredSelectionIndex(t *testing.T) {
+	host := &stubHost{
+		status: HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 120
+	model.height = 32
+	model.resize()
+	model.composer.SetValue("/r")
+	model.syncOverlayFromComposer()
+
+	items := model.filteredOverlayItems()
+	if len(items) < 2 {
+		t.Fatalf("expected multiple filtered commands, got %+v", items)
+	}
+	model.menuSelected = 1
+	rendered := model.renderOverlay(newShellStyles(), model.layout())
+	if !strings.Contains(rendered, fmt.Sprintf("2 of %d", len(items))) {
+		t.Fatalf("expected filtered selected index in overlay counter, got %q", rendered)
+	}
+}
+
+func TestRenderFeedEntryShapesWorkerActionLines(t *testing.T) {
+	rendered := renderFeedEntry(shellFeedEntry{
+		Kind:         shellFeedWorker,
+		Title:        "Worker",
+		Body:         []string{"Explored repository", "  Read README.md", "Ran go test ./..."},
+		Preformatted: true,
+	}, 100)
+
+	if !strings.Contains(rendered, "• Explored repository") {
+		t.Fatalf("expected action line to be grouped with bullet, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "└ Read README.md") {
+		t.Fatalf("expected indented detail line to be grouped under action, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "• Ran go test ./...") {
+		t.Fatalf("expected second action line to render as compact bullet, got %q", rendered)
+	}
+}
+
+func TestRenderFeedEntryWrapsLongStructuredWorkerContentWithinWidth(t *testing.T) {
+	rendered := renderFeedEntry(shellFeedEntry{
+		Kind:  shellFeedWorker,
+		Title: "Worker",
+		Body: []string{
+			"Explored internal/tui/shell/bubble_shell.go to trace width authority through the shell.",
+			"  Read internal/tui/shell/bubble_shell.go:780 to verify resize and viewport clamping.",
+			"Plan:",
+			"- keep root width authoritative",
+			"- preserve wrapped paragraph spacing under resize",
+		},
+		Preformatted: true,
+	}, 52)
+
+	for _, line := range splitLines(rendered) {
+		if lipgloss.Width(line) > 52 {
+			t.Fatalf("expected structured worker rendering to fit width 52, got %d for %q", lipgloss.Width(line), line)
+		}
+	}
+	if !strings.Contains(rendered, "• Explored internal/tui/shell/bubble_shell.go") {
+		t.Fatalf("expected action block to remain structured after wrapping, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "└ Read internal/tui/shell/bubble_shell.go:780") {
+		t.Fatalf("expected detail line to remain grouped after wrapping, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Plan") || !strings.Contains(rendered, "• keep root width authoritative") {
+		t.Fatalf("expected header and bullet list readability, got %q", rendered)
+	}
+}
+
+func TestStyleFileReferencesDetectsObviousPathsConservatively(t *testing.T) {
+	if !looksLikeFileReference("README.md") {
+		t.Fatal("expected README.md to be recognized as a file reference")
+	}
+	if !looksLikeFileReference("internal/tui/shell/bubble_shell.go:1409") {
+		t.Fatal("expected repo-relative line reference to be recognized")
+	}
+	if looksLikeFileReference("Summarize") {
+		t.Fatal("expected plain prose token to remain unstyled")
+	}
+}
+
+func TestShellModelBackspaceFromSlashClosesPaletteCleanly(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	model = updated.(*shellModel)
+	if model.overlayKind != shellOverlayCommands {
+		t.Fatalf("expected slash to open commands, got %v", model.overlayKind)
+	}
+	if !strings.Contains(model.View(), "Commands") {
+		t.Fatalf("expected command palette to render after slash, got %q", model.View())
+	}
+
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	model = updated.(*shellModel)
+	if model.overlayKind != shellOverlayNone {
+		t.Fatalf("expected deleting slash to close the palette, got %v", model.overlayKind)
+	}
+	if model.composer.Value() != "" {
+		t.Fatalf("expected deleting slash to clear the filter input, got %q", model.composer.Value())
+	}
+	rendered := model.View()
+	if strings.Contains(rendered, "Commands") || strings.Contains(rendered, "ACTIONS") {
+		t.Fatalf("expected no stale palette content after dismiss, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Live worker") {
+		t.Fatalf("expected composer to return to normal live-worker state, got %q", rendered)
+	}
+}
+
+func TestShellModelCommandFilterBackspaceUpdatesPaletteStepByStep(t *testing.T) {
+	host := &stubHost{
+		canInput: true,
+		status:   HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+
+	for _, msg := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'/'}},
+		{Type: tea.KeyRunes, Runes: []rune{'r'}},
+	} {
+		updated, _ := model.updateKey(msg)
+		model = updated.(*shellModel)
+	}
+	if model.overlayKind != shellOverlayCommands || model.composer.Value() != "/r" {
+		t.Fatalf("expected command filter state after typing /r, overlay=%v value=%q", model.overlayKind, model.composer.Value())
+	}
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	model = updated.(*shellModel)
+	if model.overlayKind != shellOverlayCommands || model.composer.Value() != "/" {
+		t.Fatalf("expected backspace to keep command mode active at /, overlay=%v value=%q", model.overlayKind, model.composer.Value())
+	}
+	if !strings.Contains(model.View(), "Commands") {
+		t.Fatalf("expected palette to remain visible while filter is still /, got %q", model.View())
+	}
+
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	model = updated.(*shellModel)
+	if model.overlayKind != shellOverlayNone || model.composer.Value() != "" {
+		t.Fatalf("expected deleting the final slash to exit command mode, overlay=%v value=%q", model.overlayKind, model.composer.Value())
+	}
+	if strings.Contains(model.View(), "Commands") {
+		t.Fatalf("expected palette to disappear after command mode exits, got %q", model.View())
+	}
+
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	model = updated.(*shellModel)
+	if model.overlayKind != shellOverlayNone || model.composer.Value() != "h" {
+		t.Fatalf("expected normal typing after dismiss, overlay=%v value=%q", model.overlayKind, model.composer.Value())
+	}
+
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyBackspace})
+	model = updated.(*shellModel)
+	if model.composer.Value() != "" {
+		t.Fatalf("expected normal text to backspace cleanly before reopening commands, got %q", model.composer.Value())
+	}
+
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	model = updated.(*shellModel)
+	if model.overlayKind != shellOverlayCommands {
+		t.Fatalf("expected command mode to reopen cleanly, got %v", model.overlayKind)
+	}
+}
+
 func TestShellModelInitialViewportStartsOnEntryBoundary(t *testing.T) {
 	host := &stubHost{
 		worker: "codex",
@@ -502,7 +1649,7 @@ func TestShellModelInitialViewportStartsOnEntryBoundary(t *testing.T) {
 	model.height = 16
 	model.resize()
 
-	topLine := strings.TrimSpace(strings.Split(model.viewport.View(), "\n")[0])
+	topLine := firstNonEmptyViewportLine(model.viewport.View())
 	if topLine == "" || strings.HasPrefix(topLine, "prior line") {
 		t.Fatalf("expected viewport to start on a deliberate entry boundary, got %q", topLine)
 	}
@@ -531,7 +1678,7 @@ func TestShellModelCommandResultScrollsToEntryStart(t *testing.T) {
 	}
 }
 
-func TestShellModelBackToBackCommandsSettleOnLatestEntryBoundary(t *testing.T) {
+func TestShellModelBackToBackCommandsKeepLatestCommandVisibleAtBottom(t *testing.T) {
 	host := &stubHost{
 		worker: "transcript",
 		status: HostStatus{Mode: HostModeTranscript, State: HostStateTranscriptOnly, Label: "transcript", InputLive: false},
@@ -549,9 +1696,12 @@ func TestShellModelBackToBackCommandsSettleOnLatestEntryBoundary(t *testing.T) {
 	_, _ = model.executeSlashCommand("/status")
 	_, _ = model.executeSlashCommand("/sessions")
 
-	topLine := firstNonEmptyViewportLine(model.viewport.View())
-	if !strings.Contains(topLine, "SESSIONS") {
-		t.Fatalf("expected viewport to settle on the latest entry boundary, got %q", topLine)
+	viewport := model.viewport.View()
+	if !model.viewport.AtBottom() {
+		t.Fatalf("expected explicit slash commands to keep the latest command output visible, offset=%d", model.viewport.YOffset)
+	}
+	if !strings.Contains(viewport, "SESSIONS") {
+		t.Fatalf("expected latest command block to stay visible near the tail, got %q", viewport)
 	}
 }
 
@@ -634,9 +1784,10 @@ func TestShellModelWorkerPromptPendingWaitsForLiveInputToReturn(t *testing.T) {
 	}
 
 	host.canInput = true
+	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerIdleGrace - time.Second)
 	model.pollHost()
 	if model.ui.WorkerPromptPending {
-		t.Fatal("expected worker prompt pending to clear once live input returns")
+		t.Fatal("expected worker prompt pending to clear once the host is writable and the response has settled")
 	}
 	if state := model.composerState(); state.SendMode != "worker" || state.Status != "live worker" {
 		t.Fatalf("expected dock to return directly to live-worker state, got %+v", state)
@@ -803,4 +1954,35 @@ func firstNonEmptyViewportLine(view string) string {
 		}
 	}
 	return ""
+}
+
+func assertRenderedViewFitsWindow(t *testing.T, view string, width int, height int) {
+	t.Helper()
+	lines := splitLines(view)
+	if len(lines) > height {
+		t.Fatalf("expected rendered view to fit height %d, got %d lines: %q", height, len(lines), view)
+	}
+	for _, line := range lines {
+		if lipgloss.Width(line) > width {
+			t.Fatalf("expected rendered line to fit width %d, got %d for %q", width, lipgloss.Width(line), line)
+		}
+	}
+}
+
+func findLineContaining(lines []string, needle string) int {
+	for i, line := range lines {
+		if strings.Contains(line, needle) {
+			return i
+		}
+	}
+	return -1
+}
+
+func findLastLineContaining(lines []string, needle string) int {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.Contains(lines[i], needle) {
+			return i
+		}
+	}
+	return -1
 }

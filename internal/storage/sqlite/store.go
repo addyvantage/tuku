@@ -4,19 +4,25 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 
+	"tuku/internal/domain/benchmark"
 	"tuku/internal/domain/brief"
 	"tuku/internal/domain/capsule"
 	"tuku/internal/domain/checkpoint"
 	"tuku/internal/domain/common"
+	contextdomain "tuku/internal/domain/context"
 	"tuku/internal/domain/conversation"
 	"tuku/internal/domain/intent"
 	"tuku/internal/domain/phase"
+	"tuku/internal/domain/policy"
+	"tuku/internal/domain/promptir"
 	"tuku/internal/domain/proof"
 	"tuku/internal/domain/run"
+	"tuku/internal/domain/taskmemory"
 	"tuku/internal/storage"
 )
 
@@ -107,11 +113,19 @@ func (s *Store) IncidentFollowUps() storage.IncidentFollowUpStore {
 }
 
 func (s *Store) ContextPacks() storage.ContextPackStore {
-	panic("TODO: sqlite context-pack repository not implemented in milestone 1")
+	return &contextPackRepo{q: s.db}
+}
+
+func (s *Store) TaskMemories() storage.TaskMemoryStore {
+	return &taskMemoryRepo{q: s.db}
+}
+
+func (s *Store) Benchmarks() storage.BenchmarkStore {
+	return &benchmarkRepo{q: s.db}
 }
 
 func (s *Store) PolicyDecisions() storage.PolicyDecisionStore {
-	panic("TODO: sqlite policy-decision repository not implemented in milestone 1")
+	return &policyDecisionRepo{q: s.db}
 }
 
 func (s *Store) WithTx(fn func(storage.Store) error) error {
@@ -184,11 +198,19 @@ func (s *txStore) IncidentFollowUps() storage.IncidentFollowUpStore {
 }
 
 func (s *txStore) ContextPacks() storage.ContextPackStore {
-	panic("TODO: sqlite context-pack repository not implemented in milestone 1")
+	return &contextPackRepo{q: s.tx}
+}
+
+func (s *txStore) TaskMemories() storage.TaskMemoryStore {
+	return &taskMemoryRepo{q: s.tx}
+}
+
+func (s *txStore) Benchmarks() storage.BenchmarkStore {
+	return &benchmarkRepo{q: s.tx}
 }
 
 func (s *txStore) PolicyDecisions() storage.PolicyDecisionStore {
-	panic("TODO: sqlite policy-decision repository not implemented in milestone 1")
+	return &policyDecisionRepo{q: s.tx}
 }
 
 func (s *txStore) WithTx(fn func(storage.Store) error) error {
@@ -283,13 +305,45 @@ CREATE TABLE IF NOT EXISTS execution_briefs (
 	requires_clarification INTEGER NOT NULL DEFAULT 0,
 	worker_framing TEXT NOT NULL DEFAULT '',
 	bounded_evidence_messages INTEGER NOT NULL DEFAULT 0,
+	prompt_triage_json TEXT NOT NULL DEFAULT '{}',
 	context_pack_id TEXT NOT NULL,
+	task_memory_id TEXT NOT NULL DEFAULT '',
+	memory_compression_json TEXT NOT NULL DEFAULT '{}',
+	prompt_ir_json TEXT NOT NULL DEFAULT '{}',
+	benchmark_id TEXT NOT NULL DEFAULT '',
 	verbosity TEXT NOT NULL,
 	policy_profile_id TEXT NOT NULL,
 	brief_hash TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_execution_briefs_task_created
 	ON execution_briefs(task_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS benchmark_runs (
+	benchmark_id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	brief_id TEXT,
+	run_id TEXT,
+	version INTEGER NOT NULL,
+	source TEXT NOT NULL DEFAULT '',
+	raw_prompt_token_estimate INTEGER NOT NULL DEFAULT 0,
+	dispatch_prompt_token_estimate INTEGER NOT NULL DEFAULT 0,
+	structured_prompt_token_estimate INTEGER NOT NULL DEFAULT 0,
+	selected_context_token_estimate INTEGER NOT NULL DEFAULT 0,
+	estimated_token_savings INTEGER NOT NULL DEFAULT 0,
+	files_scanned INTEGER NOT NULL DEFAULT 0,
+	ranked_target_count INTEGER NOT NULL DEFAULT 0,
+	candidate_recall_at_3 REAL NOT NULL DEFAULT 0,
+	structured_cheaper INTEGER NOT NULL DEFAULT 0,
+	default_serializer TEXT NOT NULL DEFAULT '',
+	confidence_value REAL NOT NULL DEFAULT 0,
+	confidence_level TEXT NOT NULL DEFAULT '',
+	summary TEXT NOT NULL DEFAULT '',
+	changed_files_json TEXT NOT NULL DEFAULT '[]',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_benchmark_runs_task_created
+	ON benchmark_runs(task_id, created_at DESC, benchmark_id DESC);
 
 CREATE TABLE IF NOT EXISTS execution_runs (
 	run_id TEXT PRIMARY KEY,
@@ -306,6 +360,8 @@ CREATE TABLE IF NOT EXISTS execution_runs (
 	stderr TEXT,
 	changed_files_json TEXT,
 	changed_files_semantics TEXT,
+	repo_diff_summary TEXT,
+	worktree_summary TEXT,
 	validation_signals_json TEXT,
 	output_artifact_ref TEXT,
 	structured_summary_json TEXT,
@@ -364,6 +420,63 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 );
 CREATE INDEX IF NOT EXISTS idx_checkpoints_task_created
 	ON checkpoints(task_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS context_packs (
+	context_pack_id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	mode TEXT NOT NULL,
+	token_budget INTEGER NOT NULL,
+	repo_anchor_hash TEXT NOT NULL,
+	freshness_state TEXT NOT NULL,
+	included_files_json TEXT NOT NULL,
+	included_snippets_json TEXT NOT NULL,
+	selection_rationale_json TEXT NOT NULL,
+	pack_hash TEXT NOT NULL,
+	created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_context_packs_task_created
+	ON context_packs(task_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS task_memory_snapshots (
+	memory_id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	version INTEGER NOT NULL,
+	brief_id TEXT,
+	run_id TEXT,
+	phase TEXT NOT NULL,
+	source TEXT NOT NULL,
+	summary TEXT NOT NULL,
+	confirmed_facts_json TEXT NOT NULL,
+	rejected_hypotheses_json TEXT NOT NULL,
+	unknowns_json TEXT NOT NULL,
+	user_constraints_json TEXT NOT NULL,
+	touched_files_json TEXT NOT NULL,
+	validators_run_json TEXT NOT NULL,
+	candidate_files_json TEXT NOT NULL,
+	last_blocker TEXT,
+	next_suggested_step TEXT NOT NULL,
+	full_history_token_estimate INTEGER NOT NULL,
+	resume_prompt_token_estimate INTEGER NOT NULL,
+	memory_compaction_ratio REAL NOT NULL,
+	created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_memory_snapshots_task_created
+	ON task_memory_snapshots(task_id, created_at DESC, memory_id DESC);
+
+CREATE TABLE IF NOT EXISTS policy_decisions (
+	decision_id TEXT PRIMARY KEY,
+	task_id TEXT NOT NULL,
+	operation_type TEXT NOT NULL,
+	risk_level TEXT NOT NULL,
+	requested_at TEXT NOT NULL,
+	resolved_at TEXT,
+	resolved_by TEXT,
+	status TEXT NOT NULL,
+	reason TEXT,
+	scope_descriptor TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_policy_decisions_task_requested
+	ON policy_decisions(task_id, requested_at DESC);
 `
 	if _, err := db.Exec(migration); err != nil {
 		return fmt.Errorf("apply sqlite baseline migration: %w", err)
@@ -390,6 +503,18 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_task_created
 		return err
 	}
 	if err := ensureTransitionReceiptSchema(db); err != nil {
+		return err
+	}
+	if err := ensureContextPackSchema(db); err != nil {
+		return err
+	}
+	if err := ensureTaskMemorySchema(db); err != nil {
+		return err
+	}
+	if err := ensureBenchmarkSchema(db); err != nil {
+		return err
+	}
+	if err := ensurePolicyDecisionSchema(db); err != nil {
 		return err
 	}
 	return nil
@@ -434,6 +559,8 @@ func ensureExecutionRunColumns(db *sql.DB) error {
 		{Name: "stderr", DDL: "ALTER TABLE execution_runs ADD COLUMN stderr TEXT"},
 		{Name: "changed_files_json", DDL: "ALTER TABLE execution_runs ADD COLUMN changed_files_json TEXT"},
 		{Name: "changed_files_semantics", DDL: "ALTER TABLE execution_runs ADD COLUMN changed_files_semantics TEXT"},
+		{Name: "repo_diff_summary", DDL: "ALTER TABLE execution_runs ADD COLUMN repo_diff_summary TEXT"},
+		{Name: "worktree_summary", DDL: "ALTER TABLE execution_runs ADD COLUMN worktree_summary TEXT"},
 		{Name: "validation_signals_json", DDL: "ALTER TABLE execution_runs ADD COLUMN validation_signals_json TEXT"},
 		{Name: "output_artifact_ref", DDL: "ALTER TABLE execution_runs ADD COLUMN output_artifact_ref TEXT"},
 		{Name: "structured_summary_json", DDL: "ALTER TABLE execution_runs ADD COLUMN structured_summary_json TEXT"},
@@ -500,6 +627,11 @@ func ensureExecutionBriefColumns(db *sql.DB) error {
 		{Name: "requires_clarification", DDL: "ALTER TABLE execution_briefs ADD COLUMN requires_clarification INTEGER NOT NULL DEFAULT 0"},
 		{Name: "worker_framing", DDL: "ALTER TABLE execution_briefs ADD COLUMN worker_framing TEXT NOT NULL DEFAULT ''"},
 		{Name: "bounded_evidence_messages", DDL: "ALTER TABLE execution_briefs ADD COLUMN bounded_evidence_messages INTEGER NOT NULL DEFAULT 0"},
+		{Name: "prompt_triage_json", DDL: "ALTER TABLE execution_briefs ADD COLUMN prompt_triage_json TEXT NOT NULL DEFAULT '{}'"},
+		{Name: "task_memory_id", DDL: "ALTER TABLE execution_briefs ADD COLUMN task_memory_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "memory_compression_json", DDL: "ALTER TABLE execution_briefs ADD COLUMN memory_compression_json TEXT NOT NULL DEFAULT '{}'"},
+		{Name: "prompt_ir_json", DDL: "ALTER TABLE execution_briefs ADD COLUMN prompt_ir_json TEXT NOT NULL DEFAULT '{}'"},
+		{Name: "benchmark_id", DDL: "ALTER TABLE execution_briefs ADD COLUMN benchmark_id TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, item := range needed {
 		ok, err := hasColumn(db, "execution_briefs", item.Name)
@@ -512,6 +644,165 @@ func ensureExecutionBriefColumns(db *sql.DB) error {
 		if _, err := db.Exec(item.DDL); err != nil {
 			return fmt.Errorf("add execution_briefs column %s: %w", item.Name, err)
 		}
+	}
+	return nil
+}
+
+func ensureContextPackSchema(db *sql.DB) error {
+	type colDef struct {
+		Name string
+		DDL  string
+	}
+	needed := []colDef{
+		{Name: "task_id", DDL: "ALTER TABLE context_packs ADD COLUMN task_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "mode", DDL: "ALTER TABLE context_packs ADD COLUMN mode TEXT NOT NULL DEFAULT 'compact'"},
+		{Name: "token_budget", DDL: "ALTER TABLE context_packs ADD COLUMN token_budget INTEGER NOT NULL DEFAULT 0"},
+		{Name: "repo_anchor_hash", DDL: "ALTER TABLE context_packs ADD COLUMN repo_anchor_hash TEXT NOT NULL DEFAULT ''"},
+		{Name: "freshness_state", DDL: "ALTER TABLE context_packs ADD COLUMN freshness_state TEXT NOT NULL DEFAULT ''"},
+		{Name: "included_files_json", DDL: "ALTER TABLE context_packs ADD COLUMN included_files_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "included_snippets_json", DDL: "ALTER TABLE context_packs ADD COLUMN included_snippets_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "selection_rationale_json", DDL: "ALTER TABLE context_packs ADD COLUMN selection_rationale_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "pack_hash", DDL: "ALTER TABLE context_packs ADD COLUMN pack_hash TEXT NOT NULL DEFAULT ''"},
+		{Name: "created_at", DDL: "ALTER TABLE context_packs ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, item := range needed {
+		ok, err := hasColumn(db, "context_packs", item.Name)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.Exec(item.DDL); err != nil {
+			return fmt.Errorf("add context_packs column %s: %w", item.Name, err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_context_packs_task_created ON context_packs(task_id, created_at DESC)`); err != nil {
+		return fmt.Errorf("create idx_context_packs_task_created: %w", err)
+	}
+	return nil
+}
+
+func ensureTaskMemorySchema(db *sql.DB) error {
+	type colDef struct {
+		Name string
+		DDL  string
+	}
+	needed := []colDef{
+		{Name: "version", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN version INTEGER NOT NULL DEFAULT 1"},
+		{Name: "brief_id", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN brief_id TEXT"},
+		{Name: "run_id", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN run_id TEXT"},
+		{Name: "phase", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN phase TEXT NOT NULL DEFAULT ''"},
+		{Name: "source", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN source TEXT NOT NULL DEFAULT ''"},
+		{Name: "summary", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN summary TEXT NOT NULL DEFAULT ''"},
+		{Name: "confirmed_facts_json", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN confirmed_facts_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "rejected_hypotheses_json", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN rejected_hypotheses_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "unknowns_json", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN unknowns_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "user_constraints_json", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN user_constraints_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "touched_files_json", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN touched_files_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "validators_run_json", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN validators_run_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "candidate_files_json", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN candidate_files_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "last_blocker", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN last_blocker TEXT"},
+		{Name: "next_suggested_step", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN next_suggested_step TEXT NOT NULL DEFAULT ''"},
+		{Name: "full_history_token_estimate", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN full_history_token_estimate INTEGER NOT NULL DEFAULT 0"},
+		{Name: "resume_prompt_token_estimate", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN resume_prompt_token_estimate INTEGER NOT NULL DEFAULT 0"},
+		{Name: "memory_compaction_ratio", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN memory_compaction_ratio REAL NOT NULL DEFAULT 0"},
+		{Name: "created_at", DDL: "ALTER TABLE task_memory_snapshots ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, item := range needed {
+		ok, err := hasColumn(db, "task_memory_snapshots", item.Name)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.Exec(item.DDL); err != nil {
+			return fmt.Errorf("add task_memory_snapshots column %s: %w", item.Name, err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_memory_snapshots_task_created ON task_memory_snapshots(task_id, created_at DESC, memory_id DESC)`); err != nil {
+		return fmt.Errorf("create idx_task_memory_snapshots_task_created: %w", err)
+	}
+	return nil
+}
+
+func ensureBenchmarkSchema(db *sql.DB) error {
+	type colDef struct {
+		Name string
+		DDL  string
+	}
+	needed := []colDef{
+		{Name: "task_id", DDL: "ALTER TABLE benchmark_runs ADD COLUMN task_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "brief_id", DDL: "ALTER TABLE benchmark_runs ADD COLUMN brief_id TEXT"},
+		{Name: "run_id", DDL: "ALTER TABLE benchmark_runs ADD COLUMN run_id TEXT"},
+		{Name: "version", DDL: "ALTER TABLE benchmark_runs ADD COLUMN version INTEGER NOT NULL DEFAULT 1"},
+		{Name: "source", DDL: "ALTER TABLE benchmark_runs ADD COLUMN source TEXT NOT NULL DEFAULT ''"},
+		{Name: "raw_prompt_token_estimate", DDL: "ALTER TABLE benchmark_runs ADD COLUMN raw_prompt_token_estimate INTEGER NOT NULL DEFAULT 0"},
+		{Name: "dispatch_prompt_token_estimate", DDL: "ALTER TABLE benchmark_runs ADD COLUMN dispatch_prompt_token_estimate INTEGER NOT NULL DEFAULT 0"},
+		{Name: "structured_prompt_token_estimate", DDL: "ALTER TABLE benchmark_runs ADD COLUMN structured_prompt_token_estimate INTEGER NOT NULL DEFAULT 0"},
+		{Name: "selected_context_token_estimate", DDL: "ALTER TABLE benchmark_runs ADD COLUMN selected_context_token_estimate INTEGER NOT NULL DEFAULT 0"},
+		{Name: "estimated_token_savings", DDL: "ALTER TABLE benchmark_runs ADD COLUMN estimated_token_savings INTEGER NOT NULL DEFAULT 0"},
+		{Name: "files_scanned", DDL: "ALTER TABLE benchmark_runs ADD COLUMN files_scanned INTEGER NOT NULL DEFAULT 0"},
+		{Name: "ranked_target_count", DDL: "ALTER TABLE benchmark_runs ADD COLUMN ranked_target_count INTEGER NOT NULL DEFAULT 0"},
+		{Name: "candidate_recall_at_3", DDL: "ALTER TABLE benchmark_runs ADD COLUMN candidate_recall_at_3 REAL NOT NULL DEFAULT 0"},
+		{Name: "structured_cheaper", DDL: "ALTER TABLE benchmark_runs ADD COLUMN structured_cheaper INTEGER NOT NULL DEFAULT 0"},
+		{Name: "default_serializer", DDL: "ALTER TABLE benchmark_runs ADD COLUMN default_serializer TEXT NOT NULL DEFAULT ''"},
+		{Name: "confidence_value", DDL: "ALTER TABLE benchmark_runs ADD COLUMN confidence_value REAL NOT NULL DEFAULT 0"},
+		{Name: "confidence_level", DDL: "ALTER TABLE benchmark_runs ADD COLUMN confidence_level TEXT NOT NULL DEFAULT ''"},
+		{Name: "summary", DDL: "ALTER TABLE benchmark_runs ADD COLUMN summary TEXT NOT NULL DEFAULT ''"},
+		{Name: "changed_files_json", DDL: "ALTER TABLE benchmark_runs ADD COLUMN changed_files_json TEXT NOT NULL DEFAULT '[]'"},
+		{Name: "created_at", DDL: "ALTER TABLE benchmark_runs ADD COLUMN created_at TEXT NOT NULL DEFAULT ''"},
+		{Name: "updated_at", DDL: "ALTER TABLE benchmark_runs ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, item := range needed {
+		ok, err := hasColumn(db, "benchmark_runs", item.Name)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.Exec(item.DDL); err != nil {
+			return fmt.Errorf("add benchmark_runs column %s: %w", item.Name, err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_benchmark_runs_task_created ON benchmark_runs(task_id, created_at DESC, benchmark_id DESC)`); err != nil {
+		return fmt.Errorf("create idx_benchmark_runs_task_created: %w", err)
+	}
+	return nil
+}
+
+func ensurePolicyDecisionSchema(db *sql.DB) error {
+	type colDef struct {
+		Name string
+		DDL  string
+	}
+	needed := []colDef{
+		{Name: "task_id", DDL: "ALTER TABLE policy_decisions ADD COLUMN task_id TEXT NOT NULL DEFAULT ''"},
+		{Name: "operation_type", DDL: "ALTER TABLE policy_decisions ADD COLUMN operation_type TEXT NOT NULL DEFAULT ''"},
+		{Name: "risk_level", DDL: "ALTER TABLE policy_decisions ADD COLUMN risk_level TEXT NOT NULL DEFAULT 'LOW'"},
+		{Name: "requested_at", DDL: "ALTER TABLE policy_decisions ADD COLUMN requested_at TEXT NOT NULL DEFAULT ''"},
+		{Name: "resolved_at", DDL: "ALTER TABLE policy_decisions ADD COLUMN resolved_at TEXT"},
+		{Name: "resolved_by", DDL: "ALTER TABLE policy_decisions ADD COLUMN resolved_by TEXT"},
+		{Name: "status", DDL: "ALTER TABLE policy_decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'PENDING'"},
+		{Name: "reason", DDL: "ALTER TABLE policy_decisions ADD COLUMN reason TEXT"},
+		{Name: "scope_descriptor", DDL: "ALTER TABLE policy_decisions ADD COLUMN scope_descriptor TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, item := range needed {
+		ok, err := hasColumn(db, "policy_decisions", item.Name)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := db.Exec(item.DDL); err != nil {
+			return fmt.Errorf("add policy_decisions column %s: %w", item.Name, err)
+		}
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_policy_decisions_task_requested ON policy_decisions(task_id, requested_at DESC)`); err != nil {
+		return fmt.Errorf("create idx_policy_decisions_task_requested: %w", err)
 	}
 	return nil
 }
@@ -557,6 +848,14 @@ type proofRepo struct{ q queryable }
 type runRepo struct{ q queryable }
 
 type checkpointRepo struct{ q queryable }
+
+type contextPackRepo struct{ q queryable }
+
+type taskMemoryRepo struct{ q queryable }
+
+type benchmarkRepo struct{ q queryable }
+
+type policyDecisionRepo struct{ q queryable }
 
 func (r *capsuleRepo) Create(c capsule.WorkCapsule) error {
 	acceptanceJSON, err := marshalStringSlice(c.AcceptanceCriteria)
@@ -924,6 +1223,18 @@ func (r *briefRepo) Save(b brief.ExecutionBrief) error {
 	if err != nil {
 		return err
 	}
+	promptTriageJSON, err := marshalPromptTriage(b.PromptTriage)
+	if err != nil {
+		return err
+	}
+	memoryCompressionJSON, err := marshalMemoryCompression(b.MemoryCompression)
+	if err != nil {
+		return err
+	}
+	promptIRJSON, err := marshalPromptIR(b.PromptIR)
+	if err != nil {
+		return err
+	}
 	requiresClarification := 0
 	if b.RequiresClarification {
 		requiresClarification = 1
@@ -933,13 +1244,13 @@ INSERT INTO execution_briefs(
 	brief_id, task_id, intent_id, capsule_version, version, created_at, posture, objective,
 	requested_outcome, normalized_action, scope_summary, scope_in_json, scope_out_json, constraints_json, done_criteria_json,
 	ambiguity_flags_json, clarification_questions_json, requires_clarification, worker_framing, bounded_evidence_messages,
-	context_pack_id, verbosity, policy_profile_id, brief_hash
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	prompt_triage_json, context_pack_id, task_memory_id, memory_compression_json, prompt_ir_json, benchmark_id, verbosity, policy_profile_id, brief_hash
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 `,
 		string(b.BriefID), string(b.TaskID), string(b.IntentID), int64(b.CapsuleVersion), b.Version, b.CreatedAt.Format(sqliteTimestampLayout),
 		string(b.Posture), b.Objective, b.RequestedOutcome, b.NormalizedAction, b.ScopeSummary, scopeInJSON, scopeOutJSON, constraintsJSON, doneJSON,
 		ambiguityJSON, clarificationQuestionsJSON, requiresClarification, b.WorkerFraming, b.BoundedEvidenceMessages,
-		string(b.ContextPackID), string(b.Verbosity), b.PolicyProfileID, b.BriefHash,
+		promptTriageJSON, string(b.ContextPackID), string(b.TaskMemoryID), memoryCompressionJSON, promptIRJSON, string(b.BenchmarkID), string(b.Verbosity), b.PolicyProfileID, b.BriefHash,
 	)
 	if err != nil {
 		return fmt.Errorf("insert execution brief: %w", err)
@@ -952,7 +1263,7 @@ func (r *briefRepo) Get(briefID common.BriefID) (brief.ExecutionBrief, error) {
 SELECT brief_id, task_id, intent_id, capsule_version, version, created_at, posture, objective,
 	requested_outcome, normalized_action, scope_summary, scope_in_json, scope_out_json, constraints_json, done_criteria_json,
 	ambiguity_flags_json, clarification_questions_json, requires_clarification, worker_framing, bounded_evidence_messages,
-	context_pack_id, verbosity, policy_profile_id, brief_hash
+	prompt_triage_json, context_pack_id, task_memory_id, memory_compression_json, prompt_ir_json, benchmark_id, verbosity, policy_profile_id, brief_hash
 FROM execution_briefs WHERE brief_id = ?
 `, string(briefID))
 	return scanBrief(row)
@@ -963,7 +1274,7 @@ func (r *briefRepo) LatestByTask(taskID common.TaskID) (brief.ExecutionBrief, er
 SELECT brief_id, task_id, intent_id, capsule_version, version, created_at, posture, objective,
 	requested_outcome, normalized_action, scope_summary, scope_in_json, scope_out_json, constraints_json, done_criteria_json,
 	ambiguity_flags_json, clarification_questions_json, requires_clarification, worker_framing, bounded_evidence_messages,
-	context_pack_id, verbosity, policy_profile_id, brief_hash
+	prompt_triage_json, context_pack_id, task_memory_id, memory_compression_json, prompt_ir_json, benchmark_id, verbosity, policy_profile_id, brief_hash
 FROM execution_briefs WHERE task_id = ?
 ORDER BY created_at DESC
 LIMIT 1
@@ -987,14 +1298,14 @@ func (r *runRepo) Create(execRun run.ExecutionRun) error {
 	_, err = r.q.Exec(`
 INSERT INTO execution_runs(
 	run_id, task_id, brief_id, worker_kind, worker_run_id, shell_session_id, status, command, args_json, exit_code,
-	stdout, stderr, changed_files_json, changed_files_semantics, validation_signals_json, output_artifact_ref, structured_summary_json,
+	stdout, stderr, changed_files_json, changed_files_semantics, repo_diff_summary, worktree_summary, validation_signals_json, output_artifact_ref, structured_summary_json,
 	started_at, ended_at, interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 `,
 		string(execRun.RunID), string(execRun.TaskID), string(execRun.BriefID), string(execRun.WorkerKind),
 		nilIfString(execRun.WorkerRunID), nilIfString(execRun.ShellSessionID), string(execRun.Status),
 		nilIfString(execRun.Command), argsJSON, nilIfInt(execRun.ExitCode),
-		nilIfString(execRun.Stdout), nilIfString(execRun.Stderr), changedFilesJSON, nilIfString(execRun.ChangedFilesSemantics), validationSignalsJSON, nilIfString(execRun.OutputArtifactRef), nilIfString(execRun.StructuredSummary),
+		nilIfString(execRun.Stdout), nilIfString(execRun.Stderr), changedFilesJSON, nilIfString(execRun.ChangedFilesSemantics), nilIfString(execRun.RepoDiffSummary), nilIfString(execRun.WorktreeSummary), validationSignalsJSON, nilIfString(execRun.OutputArtifactRef), nilIfString(execRun.StructuredSummary),
 		execRun.StartedAt.Format(sqliteTimestampLayout), nilIfTime(execRun.EndedAt), nilIfString(execRun.InterruptionReason), string(execRun.CreatedFromPhase), nilIfString(execRun.LastKnownSummary),
 		execRun.CreatedAt.Format(sqliteTimestampLayout), execRun.UpdatedAt.Format(sqliteTimestampLayout),
 	)
@@ -1007,7 +1318,7 @@ INSERT INTO execution_runs(
 func (r *runRepo) Get(runID common.RunID) (run.ExecutionRun, error) {
 	row := r.q.QueryRow(`
 SELECT run_id, task_id, brief_id, worker_kind, worker_run_id, shell_session_id, status, command, args_json, exit_code,
-	stdout, stderr, changed_files_json, changed_files_semantics, validation_signals_json, output_artifact_ref, structured_summary_json,
+	stdout, stderr, changed_files_json, changed_files_semantics, repo_diff_summary, worktree_summary, validation_signals_json, output_artifact_ref, structured_summary_json,
 	started_at, ended_at, interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
 FROM execution_runs
 WHERE run_id = ?
@@ -1018,7 +1329,7 @@ WHERE run_id = ?
 func (r *runRepo) LatestByTask(taskID common.TaskID) (run.ExecutionRun, error) {
 	row := r.q.QueryRow(`
 SELECT run_id, task_id, brief_id, worker_kind, worker_run_id, shell_session_id, status, command, args_json, exit_code,
-	stdout, stderr, changed_files_json, changed_files_semantics, validation_signals_json, output_artifact_ref, structured_summary_json,
+	stdout, stderr, changed_files_json, changed_files_semantics, repo_diff_summary, worktree_summary, validation_signals_json, output_artifact_ref, structured_summary_json,
 	started_at, ended_at, interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
 FROM execution_runs
 WHERE task_id = ?
@@ -1034,7 +1345,7 @@ func (r *runRepo) ListByTask(taskID common.TaskID, limit int) ([]run.ExecutionRu
 	}
 	rows, err := r.q.Query(`
 SELECT run_id, task_id, brief_id, worker_kind, worker_run_id, shell_session_id, status, command, args_json, exit_code,
-	stdout, stderr, changed_files_json, changed_files_semantics, validation_signals_json, output_artifact_ref, structured_summary_json,
+	stdout, stderr, changed_files_json, changed_files_semantics, repo_diff_summary, worktree_summary, validation_signals_json, output_artifact_ref, structured_summary_json,
 	started_at, ended_at, interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
 FROM execution_runs
 WHERE task_id = ?
@@ -1063,7 +1374,7 @@ LIMIT ?
 func (r *runRepo) LatestRunningByTask(taskID common.TaskID) (run.ExecutionRun, error) {
 	row := r.q.QueryRow(`
 SELECT run_id, task_id, brief_id, worker_kind, worker_run_id, shell_session_id, status, command, args_json, exit_code,
-	stdout, stderr, changed_files_json, changed_files_semantics, validation_signals_json, output_artifact_ref, structured_summary_json,
+	stdout, stderr, changed_files_json, changed_files_semantics, repo_diff_summary, worktree_summary, validation_signals_json, output_artifact_ref, structured_summary_json,
 	started_at, ended_at, interruption_reason, created_from_phase, last_known_summary, created_at, updated_at
 FROM execution_runs
 WHERE task_id = ? AND status = ?
@@ -1089,13 +1400,13 @@ func (r *runRepo) Update(execRun run.ExecutionRun) error {
 	res, err := r.q.Exec(`
 UPDATE execution_runs SET
 	task_id=?, brief_id=?, worker_kind=?, worker_run_id=?, shell_session_id=?, status=?, command=?, args_json=?, exit_code=?,
-	stdout=?, stderr=?, changed_files_json=?, changed_files_semantics=?, validation_signals_json=?, output_artifact_ref=?, structured_summary_json=?,
+	stdout=?, stderr=?, changed_files_json=?, changed_files_semantics=?, repo_diff_summary=?, worktree_summary=?, validation_signals_json=?, output_artifact_ref=?, structured_summary_json=?,
 	started_at=?, ended_at=?, interruption_reason=?, created_from_phase=?, last_known_summary=?, created_at=?, updated_at=?
 WHERE run_id = ?
 `,
 		string(execRun.TaskID), string(execRun.BriefID), string(execRun.WorkerKind), nilIfString(execRun.WorkerRunID), nilIfString(execRun.ShellSessionID), string(execRun.Status),
 		nilIfString(execRun.Command), argsJSON, nilIfInt(execRun.ExitCode),
-		nilIfString(execRun.Stdout), nilIfString(execRun.Stderr), changedFilesJSON, nilIfString(execRun.ChangedFilesSemantics), validationSignalsJSON, nilIfString(execRun.OutputArtifactRef), nilIfString(execRun.StructuredSummary),
+		nilIfString(execRun.Stdout), nilIfString(execRun.Stderr), changedFilesJSON, nilIfString(execRun.ChangedFilesSemantics), nilIfString(execRun.RepoDiffSummary), nilIfString(execRun.WorktreeSummary), validationSignalsJSON, nilIfString(execRun.OutputArtifactRef), nilIfString(execRun.StructuredSummary),
 		execRun.StartedAt.Format(sqliteTimestampLayout), nilIfTime(execRun.EndedAt),
 		nilIfString(execRun.InterruptionReason), string(execRun.CreatedFromPhase), nilIfString(execRun.LastKnownSummary),
 		execRun.CreatedAt.Format(sqliteTimestampLayout), execRun.UpdatedAt.Format(sqliteTimestampLayout),
@@ -1160,6 +1471,259 @@ ORDER BY created_at DESC, checkpoint_id DESC
 LIMIT 1
 `, string(taskID))
 	return scanCheckpoint(row)
+}
+
+func (r *contextPackRepo) Save(pack contextdomain.Pack) error {
+	includedFilesJSON, err := marshalStringSlice(pack.IncludedFiles)
+	if err != nil {
+		return err
+	}
+	includedSnippetsJSON, err := marshalSnippets(pack.IncludedSnippets)
+	if err != nil {
+		return err
+	}
+	selectionRationaleJSON, err := marshalStringSlice(pack.SelectionRationale)
+	if err != nil {
+		return err
+	}
+	_, err = r.q.Exec(`
+INSERT OR REPLACE INTO context_packs(
+	context_pack_id, task_id, mode, token_budget, repo_anchor_hash, freshness_state,
+	included_files_json, included_snippets_json, selection_rationale_json, pack_hash, created_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+`,
+		string(pack.ContextPackID), string(pack.TaskID), string(pack.Mode), pack.TokenBudget, pack.RepoAnchorHash, pack.FreshnessState,
+		includedFilesJSON, includedSnippetsJSON, selectionRationaleJSON, pack.PackHash, pack.CreatedAt.Format(sqliteTimestampLayout),
+	)
+	if err != nil {
+		return fmt.Errorf("save context pack: %w", err)
+	}
+	return nil
+}
+
+func (r *contextPackRepo) Get(id common.ContextPackID) (contextdomain.Pack, error) {
+	row := r.q.QueryRow(`
+SELECT context_pack_id, task_id, mode, token_budget, repo_anchor_hash, freshness_state,
+	included_files_json, included_snippets_json, selection_rationale_json, pack_hash, created_at
+FROM context_packs
+WHERE context_pack_id = ?
+`, string(id))
+
+	var pack contextdomain.Pack
+	var mode string
+	var includedFilesJSON string
+	var includedSnippetsJSON string
+	var selectionRationaleJSON string
+	var createdAt string
+	err := row.Scan(
+		&pack.ContextPackID, &pack.TaskID, &mode, &pack.TokenBudget, &pack.RepoAnchorHash, &pack.FreshnessState,
+		&includedFilesJSON, &includedSnippetsJSON, &selectionRationaleJSON, &pack.PackHash, &createdAt,
+	)
+	if err != nil {
+		return contextdomain.Pack{}, err
+	}
+	pack.Mode = contextdomain.Mode(mode)
+	pack.IncludedFiles, err = unmarshalStringSlice(includedFilesJSON)
+	if err != nil {
+		return contextdomain.Pack{}, err
+	}
+	pack.IncludedSnippets, err = unmarshalSnippets(includedSnippetsJSON)
+	if err != nil {
+		return contextdomain.Pack{}, err
+	}
+	pack.SelectionRationale, err = unmarshalStringSlice(selectionRationaleJSON)
+	if err != nil {
+		return contextdomain.Pack{}, err
+	}
+	pack.CreatedAt, err = time.Parse(sqliteTimestampLayout, createdAt)
+	if err != nil {
+		return contextdomain.Pack{}, err
+	}
+	return pack, nil
+}
+
+func (r *taskMemoryRepo) Save(snapshot taskmemory.Snapshot) error {
+	confirmedFactsJSON, err := marshalStringSlice(snapshot.ConfirmedFacts)
+	if err != nil {
+		return err
+	}
+	rejectedHypothesesJSON, err := marshalStringSlice(snapshot.RejectedHypotheses)
+	if err != nil {
+		return err
+	}
+	unknownsJSON, err := marshalStringSlice(snapshot.Unknowns)
+	if err != nil {
+		return err
+	}
+	userConstraintsJSON, err := marshalStringSlice(snapshot.UserConstraints)
+	if err != nil {
+		return err
+	}
+	touchedFilesJSON, err := marshalStringSlice(snapshot.TouchedFiles)
+	if err != nil {
+		return err
+	}
+	validatorsRunJSON, err := marshalStringSlice(snapshot.ValidatorsRun)
+	if err != nil {
+		return err
+	}
+	candidateFilesJSON, err := marshalStringSlice(snapshot.CandidateFiles)
+	if err != nil {
+		return err
+	}
+	_, err = r.q.Exec(`
+INSERT OR REPLACE INTO task_memory_snapshots(
+	memory_id, task_id, version, brief_id, run_id, phase, source, summary, confirmed_facts_json, rejected_hypotheses_json,
+	unknowns_json, user_constraints_json, touched_files_json, validators_run_json, candidate_files_json,
+	last_blocker, next_suggested_step, full_history_token_estimate, resume_prompt_token_estimate, memory_compaction_ratio, created_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+`,
+		string(snapshot.MemoryID), string(snapshot.TaskID), snapshot.Version, nilIfString(string(snapshot.BriefID)), nilIfString(string(snapshot.RunID)),
+		string(snapshot.Phase), snapshot.Source, snapshot.Summary, confirmedFactsJSON, rejectedHypothesesJSON,
+		unknownsJSON, userConstraintsJSON, touchedFilesJSON, validatorsRunJSON, candidateFilesJSON,
+		nilIfString(snapshot.LastBlocker), snapshot.NextSuggestedStep, snapshot.FullHistoryTokenEstimate, snapshot.ResumePromptTokenEstimate,
+		snapshot.MemoryCompactionRatio, snapshot.CreatedAt.Format(sqliteTimestampLayout),
+	)
+	if err != nil {
+		return fmt.Errorf("save task memory snapshot: %w", err)
+	}
+	return nil
+}
+
+func (r *taskMemoryRepo) Get(memoryID common.MemoryID) (taskmemory.Snapshot, error) {
+	row := r.q.QueryRow(`
+SELECT memory_id, task_id, version, brief_id, run_id, phase, source, summary, confirmed_facts_json, rejected_hypotheses_json,
+	unknowns_json, user_constraints_json, touched_files_json, validators_run_json, candidate_files_json,
+	last_blocker, next_suggested_step, full_history_token_estimate, resume_prompt_token_estimate, memory_compaction_ratio, created_at
+FROM task_memory_snapshots
+WHERE memory_id = ?
+`, string(memoryID))
+	return scanTaskMemory(row)
+}
+
+func (r *taskMemoryRepo) LatestByTask(taskID common.TaskID) (taskmemory.Snapshot, error) {
+	row := r.q.QueryRow(`
+SELECT memory_id, task_id, version, brief_id, run_id, phase, source, summary, confirmed_facts_json, rejected_hypotheses_json,
+	unknowns_json, user_constraints_json, touched_files_json, validators_run_json, candidate_files_json,
+	last_blocker, next_suggested_step, full_history_token_estimate, resume_prompt_token_estimate, memory_compaction_ratio, created_at
+FROM task_memory_snapshots
+WHERE task_id = ?
+ORDER BY created_at DESC, memory_id DESC
+LIMIT 1
+`, string(taskID))
+	return scanTaskMemory(row)
+}
+
+func (r *benchmarkRepo) Save(runRec benchmark.Run) error {
+	changedFilesJSON, err := marshalStringSlice(runRec.ChangedFiles)
+	if err != nil {
+		return err
+	}
+	structuredCheaper := 0
+	if runRec.StructuredCheaper {
+		structuredCheaper = 1
+	}
+	_, err = r.q.Exec(`
+INSERT OR REPLACE INTO benchmark_runs(
+	benchmark_id, task_id, brief_id, run_id, version, source, raw_prompt_token_estimate, dispatch_prompt_token_estimate,
+	structured_prompt_token_estimate, selected_context_token_estimate, estimated_token_savings, files_scanned, ranked_target_count,
+	candidate_recall_at_3, structured_cheaper, default_serializer, confidence_value, confidence_level, summary, changed_files_json,
+	created_at, updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+`,
+		string(runRec.BenchmarkID), string(runRec.TaskID), nilIfString(string(runRec.BriefID)), nilIfString(string(runRec.RunID)), runRec.Version, runRec.Source,
+		runRec.RawPromptTokenEstimate, runRec.DispatchPromptTokenEstimate, runRec.StructuredPromptTokenEstimate, runRec.SelectedContextTokenEstimate,
+		runRec.EstimatedTokenSavings, runRec.FilesScanned, runRec.RankedTargetCount, runRec.CandidateRecallAt3, structuredCheaper, runRec.DefaultSerializer,
+		runRec.ConfidenceValue, runRec.ConfidenceLevel, runRec.Summary, changedFilesJSON, runRec.CreatedAt.Format(sqliteTimestampLayout), runRec.UpdatedAt.Format(sqliteTimestampLayout),
+	)
+	if err != nil {
+		return fmt.Errorf("save benchmark run: %w", err)
+	}
+	return nil
+}
+
+func (r *benchmarkRepo) Get(benchmarkID common.BenchmarkID) (benchmark.Run, error) {
+	row := r.q.QueryRow(`
+SELECT benchmark_id, task_id, brief_id, run_id, version, source, raw_prompt_token_estimate, dispatch_prompt_token_estimate,
+	structured_prompt_token_estimate, selected_context_token_estimate, estimated_token_savings, files_scanned, ranked_target_count,
+	candidate_recall_at_3, structured_cheaper, default_serializer, confidence_value, confidence_level, summary, changed_files_json,
+	created_at, updated_at
+FROM benchmark_runs
+WHERE benchmark_id = ?
+`, string(benchmarkID))
+	return scanBenchmark(row)
+}
+
+func (r *benchmarkRepo) LatestByTask(taskID common.TaskID) (benchmark.Run, error) {
+	row := r.q.QueryRow(`
+SELECT benchmark_id, task_id, brief_id, run_id, version, source, raw_prompt_token_estimate, dispatch_prompt_token_estimate,
+	structured_prompt_token_estimate, selected_context_token_estimate, estimated_token_savings, files_scanned, ranked_target_count,
+	candidate_recall_at_3, structured_cheaper, default_serializer, confidence_value, confidence_level, summary, changed_files_json,
+	created_at, updated_at
+FROM benchmark_runs
+WHERE task_id = ?
+ORDER BY created_at DESC, benchmark_id DESC
+LIMIT 1
+`, string(taskID))
+	return scanBenchmark(row)
+}
+
+func (r *policyDecisionRepo) Save(decision policy.Decision) error {
+	_, err := r.q.Exec(`
+INSERT OR REPLACE INTO policy_decisions(
+	decision_id, task_id, operation_type, risk_level, requested_at, resolved_at, resolved_by, status, reason, scope_descriptor
+) VALUES(?,?,?,?,?,?,?,?,?,?)
+`,
+		string(decision.DecisionID), string(decision.TaskID), decision.OperationType, string(decision.RiskLevel),
+		decision.RequestedAt.Format(sqliteTimestampLayout), nilIfTime(decision.ResolvedAt), nilIfString(decision.ResolvedBy),
+		string(decision.Status), nilIfString(decision.Reason), decision.ScopeDescriptor,
+	)
+	if err != nil {
+		return fmt.Errorf("save policy decision: %w", err)
+	}
+	return nil
+}
+
+func (r *policyDecisionRepo) Get(decisionID common.DecisionID) (policy.Decision, error) {
+	row := r.q.QueryRow(`
+SELECT decision_id, task_id, operation_type, risk_level, requested_at, resolved_at, resolved_by, status, reason, scope_descriptor
+FROM policy_decisions
+WHERE decision_id = ?
+`, string(decisionID))
+
+	var decision policy.Decision
+	var riskLevel string
+	var requestedAt string
+	var resolvedAt sql.NullString
+	var resolvedBy sql.NullString
+	var status string
+	var reason sql.NullString
+	err := row.Scan(
+		&decision.DecisionID, &decision.TaskID, &decision.OperationType, &riskLevel, &requestedAt, &resolvedAt, &resolvedBy, &status, &reason, &decision.ScopeDescriptor,
+	)
+	if err != nil {
+		return policy.Decision{}, err
+	}
+	decision.RiskLevel = policy.RiskLevel(riskLevel)
+	decision.RequestedAt, err = time.Parse(sqliteTimestampLayout, requestedAt)
+	if err != nil {
+		return policy.Decision{}, err
+	}
+	if resolvedAt.Valid && resolvedAt.String != "" {
+		parsed, err := time.Parse(sqliteTimestampLayout, resolvedAt.String)
+		if err != nil {
+			return policy.Decision{}, err
+		}
+		decision.ResolvedAt = &parsed
+	}
+	if resolvedBy.Valid {
+		decision.ResolvedBy = resolvedBy.String
+	}
+	decision.Status = policy.DecisionStatus(status)
+	if reason.Valid {
+		decision.Reason = reason.String
+	}
+	return decision, nil
 }
 
 func (r *proofRepo) Append(event proof.Event) error {
@@ -1339,6 +1903,63 @@ func unmarshalStringSlice(value string) ([]string, error) {
 	return out, nil
 }
 
+func marshalPromptTriage(value brief.PromptTriage) (string, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("marshal prompt triage: %w", err)
+	}
+	return string(raw), nil
+}
+
+func unmarshalPromptTriage(value string) (brief.PromptTriage, error) {
+	if strings.TrimSpace(value) == "" {
+		return brief.PromptTriage{}, nil
+	}
+	var out brief.PromptTriage
+	if err := json.Unmarshal([]byte(value), &out); err != nil {
+		return brief.PromptTriage{}, fmt.Errorf("unmarshal prompt triage: %w", err)
+	}
+	return out, nil
+}
+
+func marshalMemoryCompression(value brief.MemoryCompression) (string, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("marshal memory compression: %w", err)
+	}
+	return string(raw), nil
+}
+
+func unmarshalMemoryCompression(value string) (brief.MemoryCompression, error) {
+	if strings.TrimSpace(value) == "" {
+		return brief.MemoryCompression{}, nil
+	}
+	var out brief.MemoryCompression
+	if err := json.Unmarshal([]byte(value), &out); err != nil {
+		return brief.MemoryCompression{}, fmt.Errorf("unmarshal memory compression: %w", err)
+	}
+	return out, nil
+}
+
+func marshalPromptIR(value promptir.Packet) (string, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("marshal prompt ir: %w", err)
+	}
+	return string(raw), nil
+}
+
+func unmarshalPromptIR(value string) (promptir.Packet, error) {
+	if strings.TrimSpace(value) == "" {
+		return promptir.Packet{}, nil
+	}
+	var out promptir.Packet
+	if err := json.Unmarshal([]byte(value), &out); err != nil {
+		return promptir.Packet{}, fmt.Errorf("unmarshal prompt ir: %w", err)
+	}
+	return out, nil
+}
+
 func parseNullableTime(value sql.NullString) (time.Time, error) {
 	if !value.Valid || value.String == "" {
 		return time.Time{}, nil
@@ -1412,18 +2033,45 @@ func unmarshalDecisionSlice(value string) ([]common.DecisionID, error) {
 	return out, nil
 }
 
+func marshalSnippets(values []contextdomain.Snippet) (string, error) {
+	if values == nil {
+		values = []contextdomain.Snippet{}
+	}
+	b, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func unmarshalSnippets(value string) ([]contextdomain.Snippet, error) {
+	if value == "" {
+		return []contextdomain.Snippet{}, nil
+	}
+	var out []contextdomain.Snippet
+	if err := json.Unmarshal([]byte(value), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func scanBrief(row *sql.Row) (brief.ExecutionBrief, error) {
 	var b brief.ExecutionBrief
 	var createdAt string
 	var posture string
 	var scopeInJSON, scopeOutJSON, constraintsJSON, doneJSON string
 	var ambiguityJSON, clarificationQuestionsJSON string
+	var promptTriageJSON string
+	var memoryCompressionJSON string
+	var promptIRJSON string
 	var requiresClarificationInt int
+	var taskMemoryID sql.NullString
+	var benchmarkID sql.NullString
 	err := row.Scan(
 		&b.BriefID, &b.TaskID, &b.IntentID, &b.CapsuleVersion, &b.Version, &createdAt, &posture, &b.Objective,
 		&b.RequestedOutcome, &b.NormalizedAction, &b.ScopeSummary, &scopeInJSON, &scopeOutJSON, &constraintsJSON, &doneJSON,
 		&ambiguityJSON, &clarificationQuestionsJSON, &requiresClarificationInt, &b.WorkerFraming, &b.BoundedEvidenceMessages,
-		&b.ContextPackID, &b.Verbosity, &b.PolicyProfileID, &b.BriefHash,
+		&promptTriageJSON, &b.ContextPackID, &taskMemoryID, &memoryCompressionJSON, &promptIRJSON, &benchmarkID, &b.Verbosity, &b.PolicyProfileID, &b.BriefHash,
 	)
 	if err != nil {
 		return brief.ExecutionBrief{}, err
@@ -1457,8 +2105,129 @@ func scanBrief(row *sql.Row) (brief.ExecutionBrief, error) {
 	if err != nil {
 		return brief.ExecutionBrief{}, err
 	}
+	b.PromptTriage, err = unmarshalPromptTriage(promptTriageJSON)
+	if err != nil {
+		return brief.ExecutionBrief{}, err
+	}
+	if taskMemoryID.Valid {
+		b.TaskMemoryID = common.MemoryID(taskMemoryID.String)
+	}
+	b.MemoryCompression, err = unmarshalMemoryCompression(memoryCompressionJSON)
+	if err != nil {
+		return brief.ExecutionBrief{}, err
+	}
+	b.PromptIR, err = unmarshalPromptIR(promptIRJSON)
+	if err != nil {
+		return brief.ExecutionBrief{}, err
+	}
+	if benchmarkID.Valid {
+		b.BenchmarkID = common.BenchmarkID(benchmarkID.String)
+	}
 	b.RequiresClarification = requiresClarificationInt == 1
 	return b, nil
+}
+
+func scanBenchmark(row *sql.Row) (benchmark.Run, error) {
+	var out benchmark.Run
+	var briefID sql.NullString
+	var runID sql.NullString
+	var changedFilesJSON string
+	var structuredCheaperInt int
+	var createdAt string
+	var updatedAt string
+	err := row.Scan(
+		&out.BenchmarkID, &out.TaskID, &briefID, &runID, &out.Version, &out.Source, &out.RawPromptTokenEstimate,
+		&out.DispatchPromptTokenEstimate, &out.StructuredPromptTokenEstimate, &out.SelectedContextTokenEstimate,
+		&out.EstimatedTokenSavings, &out.FilesScanned, &out.RankedTargetCount, &out.CandidateRecallAt3,
+		&structuredCheaperInt, &out.DefaultSerializer, &out.ConfidenceValue, &out.ConfidenceLevel, &out.Summary, &changedFilesJSON,
+		&createdAt, &updatedAt,
+	)
+	if err != nil {
+		return benchmark.Run{}, err
+	}
+	if briefID.Valid {
+		out.BriefID = common.BriefID(briefID.String)
+	}
+	if runID.Valid {
+		out.RunID = common.RunID(runID.String)
+	}
+	out.StructuredCheaper = structuredCheaperInt == 1
+	out.ChangedFiles, err = unmarshalStringSlice(changedFilesJSON)
+	if err != nil {
+		return benchmark.Run{}, err
+	}
+	out.CreatedAt, err = time.Parse(sqliteTimestampLayout, createdAt)
+	if err != nil {
+		return benchmark.Run{}, err
+	}
+	out.UpdatedAt, err = time.Parse(sqliteTimestampLayout, updatedAt)
+	if err != nil {
+		return benchmark.Run{}, err
+	}
+	return out, nil
+}
+
+func scanTaskMemory(row *sql.Row) (taskmemory.Snapshot, error) {
+	var snapshot taskmemory.Snapshot
+	var phaseValue string
+	var briefID sql.NullString
+	var runID sql.NullString
+	var confirmedFactsJSON, rejectedHypothesesJSON, unknownsJSON string
+	var userConstraintsJSON, touchedFilesJSON, validatorsRunJSON, candidateFilesJSON string
+	var lastBlocker sql.NullString
+	var createdAt string
+	err := row.Scan(
+		&snapshot.MemoryID, &snapshot.TaskID, &snapshot.Version, &briefID, &runID, &phaseValue, &snapshot.Source, &snapshot.Summary,
+		&confirmedFactsJSON, &rejectedHypothesesJSON, &unknownsJSON, &userConstraintsJSON, &touchedFilesJSON,
+		&validatorsRunJSON, &candidateFilesJSON, &lastBlocker, &snapshot.NextSuggestedStep,
+		&snapshot.FullHistoryTokenEstimate, &snapshot.ResumePromptTokenEstimate, &snapshot.MemoryCompactionRatio, &createdAt,
+	)
+	if err != nil {
+		return taskmemory.Snapshot{}, err
+	}
+	if briefID.Valid {
+		snapshot.BriefID = common.BriefID(briefID.String)
+	}
+	if runID.Valid {
+		snapshot.RunID = common.RunID(runID.String)
+	}
+	snapshot.Phase = phase.Phase(phaseValue)
+	snapshot.ConfirmedFacts, err = unmarshalStringSlice(confirmedFactsJSON)
+	if err != nil {
+		return taskmemory.Snapshot{}, err
+	}
+	snapshot.RejectedHypotheses, err = unmarshalStringSlice(rejectedHypothesesJSON)
+	if err != nil {
+		return taskmemory.Snapshot{}, err
+	}
+	snapshot.Unknowns, err = unmarshalStringSlice(unknownsJSON)
+	if err != nil {
+		return taskmemory.Snapshot{}, err
+	}
+	snapshot.UserConstraints, err = unmarshalStringSlice(userConstraintsJSON)
+	if err != nil {
+		return taskmemory.Snapshot{}, err
+	}
+	snapshot.TouchedFiles, err = unmarshalStringSlice(touchedFilesJSON)
+	if err != nil {
+		return taskmemory.Snapshot{}, err
+	}
+	snapshot.ValidatorsRun, err = unmarshalStringSlice(validatorsRunJSON)
+	if err != nil {
+		return taskmemory.Snapshot{}, err
+	}
+	snapshot.CandidateFiles, err = unmarshalStringSlice(candidateFilesJSON)
+	if err != nil {
+		return taskmemory.Snapshot{}, err
+	}
+	if lastBlocker.Valid {
+		snapshot.LastBlocker = lastBlocker.String
+	}
+	snapshot.CreatedAt, err = time.Parse(sqliteTimestampLayout, createdAt)
+	if err != nil {
+		return taskmemory.Snapshot{}, err
+	}
+	return snapshot, nil
 }
 
 type sqlScannable interface {
@@ -1482,6 +2251,8 @@ func scanRunScannable(row sqlScannable) (run.ExecutionRun, error) {
 	var stderr sql.NullString
 	var changedFilesJSON sql.NullString
 	var changedFilesSemantics sql.NullString
+	var repoDiffSummary sql.NullString
+	var worktreeSummary sql.NullString
 	var validationSignalsJSON sql.NullString
 	var outputArtifactRef sql.NullString
 	var structuredSummary sql.NullString
@@ -1489,7 +2260,7 @@ func scanRunScannable(row sqlScannable) (run.ExecutionRun, error) {
 	var summary sql.NullString
 	err := row.Scan(
 		&r.RunID, &r.TaskID, &r.BriefID, &r.WorkerKind, &workerRunID, &shellSessionID, &r.Status, &command, &argsJSON, &exitCode,
-		&stdout, &stderr, &changedFilesJSON, &changedFilesSemantics, &validationSignalsJSON, &outputArtifactRef, &structuredSummary,
+		&stdout, &stderr, &changedFilesJSON, &changedFilesSemantics, &repoDiffSummary, &worktreeSummary, &validationSignalsJSON, &outputArtifactRef, &structuredSummary,
 		&startedAt, &endedAt, &interruption, &r.CreatedFromPhase, &summary, &createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -1528,6 +2299,12 @@ func scanRunScannable(row sqlScannable) (run.ExecutionRun, error) {
 	}
 	if changedFilesSemantics.Valid {
 		r.ChangedFilesSemantics = changedFilesSemantics.String
+	}
+	if repoDiffSummary.Valid {
+		r.RepoDiffSummary = repoDiffSummary.String
+	}
+	if worktreeSummary.Valid {
+		r.WorktreeSummary = worktreeSummary.String
 	}
 	if validationSignalsJSON.Valid {
 		r.ValidationSignals, err = unmarshalStringSlice(validationSignalsJSON.String)

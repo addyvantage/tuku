@@ -43,6 +43,8 @@ type ExecutionRun struct {
 	Stderr                string         `json:"stderr,omitempty"`
 	ChangedFiles          []string       `json:"changed_files,omitempty"`
 	ChangedFilesSemantics string         `json:"changed_files_semantics,omitempty"`
+	RepoDiffSummary       string         `json:"repo_diff_summary,omitempty"`
+	WorktreeSummary       string         `json:"worktree_summary,omitempty"`
 	ValidationSignals     []string       `json:"validation_signals,omitempty"`
 	OutputArtifactRef     string         `json:"output_artifact_ref,omitempty"`
 	StructuredSummary     string         `json:"structured_summary,omitempty"`

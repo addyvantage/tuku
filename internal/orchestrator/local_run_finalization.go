@@ -11,6 +11,7 @@ type LocalRunFinalizationState string
 
 const (
 	LocalRunFinalizationNoRelevantRun             LocalRunFinalizationState = "NO_RELEVANT_RUN"
+	LocalRunFinalizationActiveExecution           LocalRunFinalizationState = "ACTIVE_EXECUTION"
 	LocalRunFinalizationFinalized                 LocalRunFinalizationState = "FINALIZED"
 	LocalRunFinalizationInterruptedRecoverable    LocalRunFinalizationState = "INTERRUPTED_RECOVERABLE"
 	LocalRunFinalizationInterruptedNeedsRepair    LocalRunFinalizationState = "INTERRUPTED_NEEDS_REPAIR"
@@ -43,11 +44,20 @@ func deriveLocalRunFinalization(assessment continueAssessment, recovery Recovery
 
 	switch assessment.LatestRun.Status {
 	case rundomain.StatusRunning:
-		out.State = LocalRunFinalizationStaleReconciliationNeeded
-		if recovery.Reason != "" {
-			out.Reason = recovery.Reason
+		if recovery.RecoveryClass == RecoveryClassRunInProgress {
+			out.State = LocalRunFinalizationActiveExecution
+			if recovery.Reason != "" {
+				out.Reason = recovery.Reason
+			} else {
+				out.Reason = fmt.Sprintf("latest run %s is still actively executing", assessment.LatestRun.RunID)
+			}
 		} else {
-			out.Reason = fmt.Sprintf("latest run %s is still durably RUNNING and requires explicit stale reconciliation", assessment.LatestRun.RunID)
+			out.State = LocalRunFinalizationStaleReconciliationNeeded
+			if recovery.Reason != "" {
+				out.Reason = recovery.Reason
+			} else {
+				out.Reason = fmt.Sprintf("latest run %s is still durably RUNNING and requires explicit stale reconciliation", assessment.LatestRun.RunID)
+			}
 		}
 	case rundomain.StatusInterrupted:
 		if checkpointIDFromAssessment(assessment, recovery) != "" && (assessment.LatestCheckpoint == nil || assessment.LatestCheckpoint.IsResumable) {

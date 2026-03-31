@@ -21,6 +21,7 @@ const (
 	EventValidationResult                   EventType = "VALIDATION_RESULT"
 	EventPolicyDecisionRequested            EventType = "POLICY_DECISION_REQUESTED"
 	EventPolicyDecisionResolved             EventType = "POLICY_DECISION_RESOLVED"
+	EventTaskMemoryUpdated                  EventType = "TASK_MEMORY_UPDATED"
 	EventCheckpointCreated                  EventType = "CHECKPOINT_CREATED"
 	EventContinueAssessed                   EventType = "CONTINUE_ASSESSED"
 	EventHandoffCreated                     EventType = "HANDOFF_CREATED"

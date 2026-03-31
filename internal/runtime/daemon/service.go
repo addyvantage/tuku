@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"tuku/internal/domain/brief"
 	"tuku/internal/domain/handoff"
 	"tuku/internal/domain/operatorstep"
+	"tuku/internal/domain/promptir"
 	"tuku/internal/domain/recoveryaction"
 	"tuku/internal/domain/shellsession"
 	"tuku/internal/ipc"
@@ -95,10 +97,47 @@ func ipcCompiledBriefSummary(in *orchestrator.CompiledBriefSummary) *ipc.TaskCom
 		RequiresClarification:   in.RequiresClarification,
 		WorkerFraming:           in.WorkerFraming,
 		BoundedEvidenceMessages: in.BoundedEvidenceMessages,
+		PromptTriage:            cloneIPCPromptTriage(in.PromptTriage),
+		MemoryCompression:       cloneIPCMemoryCompression(in.MemoryCompression),
+		PromptIR:                cloneIPCPromptIR(in.PromptIR),
 		Digest:                  in.Digest,
 		Advisory:                in.Advisory,
 		CreatedAtUnixMs:         createdAt,
 	}
+}
+
+func cloneIPCPromptTriage(in *brief.PromptTriage) *brief.PromptTriage {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.SearchTerms = append([]string{}, in.SearchTerms...)
+	out.CandidateFiles = append([]string{}, in.CandidateFiles...)
+	return &out
+}
+
+func cloneIPCMemoryCompression(in *brief.MemoryCompression) *brief.MemoryCompression {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
+func cloneIPCPromptIR(in *promptir.Packet) *promptir.Packet {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.RankedTargets = append([]promptir.Target{}, in.RankedTargets...)
+	out.OperationPlan = append([]string{}, in.OperationPlan...)
+	out.Constraints = append([]string{}, in.Constraints...)
+	out.NonGoals = append([]string{}, in.NonGoals...)
+	out.ValidatorPlan.Commands = append([]string{}, in.ValidatorPlan.Commands...)
+	out.ValidatorPlan.Evidence = append([]string{}, in.ValidatorPlan.Evidence...)
+	out.OutputContract = append([]string{}, in.OutputContract...)
+	out.EvidenceRequirements = append([]string{}, in.EvidenceRequirements...)
+	return &out
 }
 
 func ipcRecoveryAssessment(in *orchestrator.RecoveryAssessment) *ipc.TaskRecoveryAssessment {
@@ -1195,7 +1234,7 @@ func (s *Service) Run(ctx context.Context) error {
 func (s *Service) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	decoder := json.NewDecoder(bufio.NewReader(conn))
 	encoder := json.NewEncoder(conn)
 
@@ -1204,8 +1243,10 @@ func (s *Service) handleConn(ctx context.Context, conn net.Conn) {
 		_ = encoder.Encode(ipc.Response{RequestID: req.RequestID, OK: false, Error: &ipc.ErrorPayload{Code: "BAD_REQUEST", Message: err.Error()}})
 		return
 	}
+	_ = conn.SetDeadline(time.Time{})
 
 	resp := s.handleRequest(ctx, req)
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	_ = encoder.Encode(resp)
 }
 
@@ -1343,9 +1384,41 @@ func (s *Service) handleRequest(ctx context.Context, req ipc.Request) ipc.Respon
 			LatestRunArgs:                               append([]string{}, out.LatestRunArgs...),
 			LatestRunExitCode:                           out.LatestRunExitCode,
 			LatestRunChangedFiles:                       append([]string{}, out.LatestRunChangedFiles...),
+			LatestRunChangedFilesSemantics:              out.LatestRunChangedFilesSemantics,
+			LatestRunRepoDiffSummary:                    out.LatestRunRepoDiffSummary,
+			LatestRunWorktreeSummary:                    out.LatestRunWorktreeSummary,
 			LatestRunValidationSignals:                  append([]string{}, out.LatestRunValidationSignals...),
 			LatestRunOutputArtifactRef:                  out.LatestRunOutputArtifactRef,
 			LatestRunStructuredSummary:                  out.LatestRunStructuredSummary,
+			CurrentContextPackID:                        out.CurrentContextPackID,
+			CurrentContextPackMode:                      string(out.CurrentContextPackMode),
+			CurrentContextPackFileCount:                 out.CurrentContextPackFileCount,
+			CurrentContextPackHash:                      out.CurrentContextPackHash,
+			CurrentTaskMemoryID:                         out.CurrentTaskMemoryID,
+			CurrentTaskMemorySource:                     out.CurrentTaskMemorySource,
+			CurrentTaskMemorySummary:                    out.CurrentTaskMemorySummary,
+			CurrentTaskMemoryFullHistoryTokens:          out.CurrentTaskMemoryFullHistoryTokens,
+			CurrentTaskMemoryResumePromptTokens:         out.CurrentTaskMemoryResumePromptTokens,
+			CurrentTaskMemoryCompactionRatio:            out.CurrentTaskMemoryCompactionRatio,
+			CurrentBenchmarkID:                          out.CurrentBenchmarkID,
+			CurrentBenchmarkSource:                      out.CurrentBenchmarkSource,
+			CurrentBenchmarkSummary:                     out.CurrentBenchmarkSummary,
+			CurrentBenchmarkRawPromptTokens:             out.CurrentBenchmarkRawPromptTokens,
+			CurrentBenchmarkDispatchPromptTokens:        out.CurrentBenchmarkDispatchPromptTokens,
+			CurrentBenchmarkStructuredPromptTokens:      out.CurrentBenchmarkStructuredPromptTokens,
+			CurrentBenchmarkSelectedContextTokens:       out.CurrentBenchmarkSelectedContextTokens,
+			CurrentBenchmarkEstimatedTokenSavings:       out.CurrentBenchmarkEstimatedTokenSavings,
+			CurrentBenchmarkFilesScanned:                out.CurrentBenchmarkFilesScanned,
+			CurrentBenchmarkRankedTargetCount:           out.CurrentBenchmarkRankedTargetCount,
+			CurrentBenchmarkCandidateRecallAt3:          out.CurrentBenchmarkCandidateRecallAt3,
+			CurrentBenchmarkDefaultSerializer:           out.CurrentBenchmarkDefaultSerializer,
+			CurrentBenchmarkStructuredCheaper:           out.CurrentBenchmarkStructuredCheaper,
+			CurrentBenchmarkConfidenceValue:             out.CurrentBenchmarkConfidenceValue,
+			CurrentBenchmarkConfidenceLevel:             out.CurrentBenchmarkConfidenceLevel,
+			LatestPolicyDecisionID:                      out.LatestPolicyDecisionID,
+			LatestPolicyDecisionStatus:                  out.LatestPolicyDecisionStatus,
+			LatestPolicyDecisionRiskLevel:               out.LatestPolicyDecisionRiskLevel,
+			LatestPolicyDecisionReason:                  out.LatestPolicyDecisionReason,
 			LatestShellSessionID:                        out.LatestShellSessionID,
 			LatestShellSessionClass:                     string(out.LatestShellSessionClass),
 			LatestShellSessionReason:                    out.LatestShellSessionReason,
@@ -1483,6 +1556,21 @@ func (s *Service) handleRequest(ctx context.Context, req ipc.Request) ipc.Respon
 			Bounded:        out.Bounded,
 			Brief:          out.Brief,
 			CompiledBrief:  ipcCompiledBriefSummary(out.CompiledBrief),
+		})
+	case ipc.MethodTaskBenchmark:
+		var p ipc.TaskBenchmarkRequest
+		if err := json.Unmarshal(req.Payload, &p); err != nil {
+			return respondErr("BAD_PAYLOAD", err.Error())
+		}
+		out, err := s.Handler.ReadBenchmark(ctx, orchestrator.ReadBenchmarkRequest{TaskID: string(p.TaskID)})
+		if err != nil {
+			return respondErr("BENCHMARK_READ_FAILED", err.Error())
+		}
+		return respondOK(ipc.TaskBenchmarkResponse{
+			TaskID:        out.TaskID,
+			Benchmark:     out.Benchmark,
+			Brief:         out.Brief,
+			CompiledBrief: ipcCompiledBriefSummary(out.CompiledBrief),
 		})
 	case ipc.MethodRecordRecoveryAction:
 		var p ipc.TaskRecordRecoveryActionRequest
@@ -1738,6 +1826,8 @@ func (s *Service) handleRequest(ctx context.Context, req ipc.Request) ipc.Respon
 			CompiledIntent:                           ipcCompiledIntentSummary(out.CompiledIntent),
 			Brief:                                    out.Brief,
 			CompiledBrief:                            ipcCompiledBriefSummary(out.CompiledBrief),
+			TaskMemory:                               out.TaskMemory,
+			Benchmark:                                out.Benchmark,
 			Run:                                      out.Run,
 			Checkpoint:                               out.Checkpoint,
 			Handoff:                                  out.Handoff,
@@ -1865,6 +1955,15 @@ func (s *Service) handleRequest(ctx context.Context, req ipc.Request) ipc.Respon
 				RequiresClarification:   out.Brief.RequiresClarification,
 				WorkerFraming:           out.Brief.WorkerFraming,
 				BoundedEvidenceMessages: out.Brief.BoundedEvidenceMessages,
+				PromptTargets:           append([]string{}, out.Brief.PromptTargets...),
+				ValidatorCommands:       append([]string{}, out.Brief.ValidatorCommands...),
+				ConfidenceLevel:         out.Brief.ConfidenceLevel,
+				ConfidenceReason:        out.Brief.ConfidenceReason,
+				EstimatedTokenSavings:   out.Brief.EstimatedTokenSavings,
+				DispatchPromptTokens:    out.Brief.DispatchPromptTokens,
+				StructuredPromptTokens:  out.Brief.StructuredPromptTokens,
+				DefaultSerializer:       out.Brief.DefaultSerializer,
+				StructuredCheaper:       out.Brief.StructuredCheaper,
 			}
 		}
 		if out.Run != nil {

@@ -14,6 +14,7 @@ import (
 
 	"tuku/internal/adapters/adapter_contract"
 	"tuku/internal/domain/common"
+	"tuku/internal/domain/promptir"
 	"tuku/internal/runtime/process"
 )
 
@@ -30,6 +31,8 @@ type Config struct {
 	Timeout time.Duration
 	Runner  process.Runner
 }
+
+const codexSafeReasoningEffortConfig = `model_reasoning_effort="high"`
 
 func NewAdapter() *Adapter {
 	cfg := Config{}
@@ -136,7 +139,7 @@ func (a *Adapter) Execute(ctx context.Context, req adapter_contract.ExecutionReq
 }
 
 func (a *Adapter) commandArgs() []string {
-	args := append([]string{}, a.args...)
+	args := ensureCodexReasoningEffortArgs(append([]string{}, a.args...))
 	for _, arg := range args {
 		switch strings.TrimSpace(strings.ToLower(arg)) {
 		case "exec", "help", "review", "resume":
@@ -146,8 +149,42 @@ func (a *Adapter) commandArgs() []string {
 	return append(args, "exec", "--color", "never", "-")
 }
 
+func ensureCodexReasoningEffortArgs(args []string) []string {
+	if hasCodexReasoningEffortOverride(args) {
+		return append([]string{}, args...)
+	}
+	return append([]string{"-c", codexSafeReasoningEffortConfig}, args...)
+}
+
+func hasCodexReasoningEffortOverride(args []string) bool {
+	for idx, arg := range args {
+		lower := strings.ToLower(strings.TrimSpace(arg))
+		if strings.Contains(lower, "model_reasoning_effort") {
+			return true
+		}
+		if (lower == "-c" || lower == "--config") && idx+1 < len(args) {
+			if strings.Contains(strings.ToLower(strings.TrimSpace(args[idx+1])), "model_reasoning_effort") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func buildPrompt(req adapter_contract.ExecutionRequest) string {
 	b := req.Brief
+	contextFiles := "none"
+	if len(req.ContextPack.IncludedFiles) > 0 {
+		contextFiles = strings.Join(req.ContextPack.IncludedFiles, ", ")
+	}
+	contextRationale := "none"
+	if len(req.ContextPack.SelectionRationale) > 0 {
+		contextRationale = strings.Join(req.ContextPack.SelectionRationale, " | ")
+	}
+	taskMemorySummary := "none"
+	if strings.TrimSpace(req.TaskMemory.Summary) != "" {
+		taskMemorySummary = strings.TrimSpace(req.TaskMemory.Summary)
+	}
 	sections := []string{
 		"You are Codex executing one bounded Tuku run.",
 		"Follow the brief exactly and do not start unrelated work.",
@@ -166,7 +203,102 @@ func buildPrompt(req adapter_contract.ExecutionRequest) string {
 		fmt.Sprintf("AGENTS checksum: %s", req.AgentsChecksum),
 		fmt.Sprintf("AGENTS constraints: %s", req.AgentsInstructions),
 		fmt.Sprintf("Context summary: %s", req.ContextSummary),
+		fmt.Sprintf("Context pack: id=%s mode=%s files=%s", req.ContextPack.ContextPackID, req.ContextPack.Mode, contextFiles),
+		fmt.Sprintf("Context rationale: %s", contextRationale),
+		fmt.Sprintf("Task memory: id=%s source=%s", req.TaskMemory.MemoryID, req.TaskMemory.Source),
+		fmt.Sprintf("Task memory summary: %s", taskMemorySummary),
+		fmt.Sprintf("Task memory compaction: full_history_tokens=%d resume_prompt_tokens=%d ratio=%.2f",
+			req.TaskMemory.FullHistoryTokenEstimate,
+			req.TaskMemory.ResumePromptTokenEstimate,
+			req.TaskMemory.MemoryCompactionRatio,
+		),
 		"Return concise implementation summary, tests run, and unknowns.",
+	}
+	if len(req.TaskMemory.ConfirmedFacts) > 0 {
+		sections = append(sections, "Task memory facts: "+strings.Join(req.TaskMemory.ConfirmedFacts, " | "))
+	}
+	if len(req.TaskMemory.ValidatorsRun) > 0 {
+		sections = append(sections, "Task memory validators: "+strings.Join(req.TaskMemory.ValidatorsRun, ", "))
+	}
+	if len(req.TaskMemory.CandidateFiles) > 0 {
+		sections = append(sections, "Task memory candidates: "+strings.Join(req.TaskMemory.CandidateFiles, ", "))
+	}
+	if strings.TrimSpace(req.TaskMemory.LastBlocker) != "" {
+		sections = append(sections, "Task memory blocker: "+strings.TrimSpace(req.TaskMemory.LastBlocker))
+	}
+	if strings.TrimSpace(req.TaskMemory.NextSuggestedStep) != "" {
+		sections = append(sections, "Task memory next step: "+strings.TrimSpace(req.TaskMemory.NextSuggestedStep))
+	}
+	if len(req.TaskMemory.Unknowns) > 0 {
+		sections = append(sections, "Task memory unknowns: "+strings.Join(req.TaskMemory.Unknowns, " | "))
+	}
+	if b.PromptTriage.Applied {
+		triageSummary := strings.TrimSpace(b.PromptTriage.Summary)
+		if triageSummary == "" {
+			triageSummary = strings.TrimSpace(b.PromptTriage.Reason)
+		}
+		triageSearchTerms := strings.Join(b.PromptTriage.SearchTerms, ", ")
+		if strings.TrimSpace(triageSearchTerms) == "" {
+			triageSearchTerms = "none"
+		}
+		triageCandidates := strings.Join(b.PromptTriage.CandidateFiles, ", ")
+		if strings.TrimSpace(triageCandidates) == "" {
+			triageCandidates = "none"
+		}
+		sections = append(sections,
+			fmt.Sprintf("Prompt triage: %s", triageSummary),
+			fmt.Sprintf("Prompt triage search terms: %s", triageSearchTerms),
+			fmt.Sprintf("Prompt triage candidates: %s", triageCandidates),
+			fmt.Sprintf("Prompt triage token estimates: raw=%d rewritten=%d search_space=%d selected_context=%d savings=%d",
+				b.PromptTriage.RawPromptTokenEstimate,
+				b.PromptTriage.RewrittenPromptTokenEstimate,
+				b.PromptTriage.SearchSpaceTokenEstimate,
+				b.PromptTriage.SelectedContextTokenEstimate,
+				b.PromptTriage.ContextTokenSavingsEstimate,
+			),
+		)
+	}
+	if strings.TrimSpace(b.PromptIR.NormalizedTaskType) != "" || len(b.PromptIR.RankedTargets) > 0 || len(b.PromptIR.ValidatorPlan.Commands) > 0 {
+		targets := promptIRTargetLabels(b.PromptIR.RankedTargets, 6)
+		if len(targets) == 0 {
+			targets = []string{"none"}
+		}
+		plan := b.PromptIR.OperationPlan
+		if len(plan) == 0 {
+			plan = []string{"none"}
+		}
+		validators := b.PromptIR.ValidatorPlan.Commands
+		if len(validators) == 0 {
+			validators = []string{"none"}
+		}
+		sections = append(sections,
+			fmt.Sprintf("Prompt IR task type: %s", nonEmpty(strings.TrimSpace(b.PromptIR.NormalizedTaskType), "unknown")),
+			fmt.Sprintf("Prompt IR objective: %s", nonEmpty(strings.TrimSpace(b.PromptIR.Objective), "none")),
+			fmt.Sprintf("Prompt IR operation: %s", nonEmpty(strings.TrimSpace(b.PromptIR.Operation), "none")),
+			fmt.Sprintf("Prompt IR targets: %s", strings.Join(targets, ", ")),
+			fmt.Sprintf("Prompt IR plan: %s", strings.Join(plan, " | ")),
+			fmt.Sprintf("Prompt IR validators: %s", strings.Join(validators, " | ")),
+			fmt.Sprintf("Prompt IR confidence: level=%s value=%.2f reason=%s",
+				nonEmpty(strings.TrimSpace(b.PromptIR.Confidence.Level), "unknown"),
+				b.PromptIR.Confidence.Value,
+				nonEmpty(strings.TrimSpace(b.PromptIR.Confidence.Reason), "none"),
+			),
+			fmt.Sprintf("Prompt IR serializer benchmark: default=%s natural=%d structured=%d structured_cheaper=%t",
+				nonEmpty(strings.TrimSpace(string(b.PromptIR.DefaultSerializer)), "natural_language"),
+				b.PromptIR.NaturalLanguageTokens,
+				b.PromptIR.StructuredTokens,
+				b.PromptIR.StructuredCheaper,
+			),
+		)
+	}
+	if len(req.ContextPack.IncludedSnippets) > 0 {
+		sections = append(sections, "Context snippets:")
+		for _, snippet := range req.ContextPack.IncludedSnippets {
+			sections = append(sections,
+				fmt.Sprintf("FILE %s:%d-%d", snippet.Path, snippet.StartLine, snippet.EndLine),
+				snippet.Content,
+			)
+		}
 	}
 	return strings.Join(sections, "\n") + "\n"
 }
@@ -192,6 +324,38 @@ func changedFiles(worktree string) ([]string, error) {
 		}
 	}
 	return paths, nil
+}
+
+func promptIRTargetLabels(targets []promptir.Target, limit int) []string {
+	if limit <= 0 || limit > len(targets) {
+		limit = len(targets)
+	}
+	out := make([]string, 0, limit)
+	for _, target := range targets {
+		label := strings.TrimSpace(target.Path)
+		if strings.TrimSpace(target.Name) != "" {
+			if label != "" {
+				label = fmt.Sprintf("%s#%s", label, strings.TrimSpace(target.Name))
+			} else {
+				label = strings.TrimSpace(target.Name)
+			}
+		}
+		if label == "" {
+			continue
+		}
+		out = append(out, label)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func nonEmpty(value string, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return value
+	}
+	return fallback
 }
 
 func changedByRunHint(before, after []string, beforeErr, afterErr error) ([]string, string) {

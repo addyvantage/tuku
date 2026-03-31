@@ -155,15 +155,18 @@ func (a *App) Run(ctx context.Context) error {
 		tea.WithContext(ctx),
 		tea.WithInput(a.Input),
 		tea.WithOutput(a.Output),
+		tea.WithAltScreen(),
 	)
 
 	finalModel, runErr := program.Run()
 
 	activeHost := host
 	finalUI := ui
+	finalView := ""
 	if finalState, ok := finalModel.(*shellModel); ok {
 		activeHost = finalState.host
 		finalUI = finalState.ui
+		finalView = finalState.View()
 	}
 
 	if activeHost != nil {
@@ -172,7 +175,23 @@ func (a *App) Run(ctx context.Context) error {
 		_ = activeHost.Stop()
 	}
 
+	if err := writeFinalShellView(a.Output, finalView); runErr == nil && err != nil {
+		return err
+	}
+
 	return runErr
+}
+
+func writeFinalShellView(out io.Writer, view string) error {
+	if out == nil {
+		return nil
+	}
+	view = strings.TrimRight(view, "\n")
+	if strings.TrimSpace(view) == "" {
+		return nil
+	}
+	_, err := io.WriteString(out, view+"\n")
+	return err
 }
 
 func initialUIState(now time.Time, preference WorkerPreference) UIState {

@@ -224,6 +224,26 @@ func TestCodexPTYHostStartRequiresRepoRoot(t *testing.T) {
 	}
 }
 
+func TestCodexExecArgsIncludeSafeReasoningEffortOverride(t *testing.T) {
+	host := NewDefaultCodexPTYHost()
+	args := host.execArgsForPrompt("fix the bug")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, `model_reasoning_effort="high"`) {
+		t.Fatalf("expected safe reasoning override in exec args, got %q", joined)
+	}
+}
+
+func TestCodexReasoningEffortOverrideDoesNotDuplicate(t *testing.T) {
+	args := ensureCodexReasoningEffortArgs([]string{"-c", `model_reasoning_effort="medium"`, "exec", "--json", "prompt"})
+	joined := strings.Join(args, " ")
+	if strings.Count(joined, "model_reasoning_effort") != 1 {
+		t.Fatalf("expected a single reasoning override, got %q", joined)
+	}
+	if !strings.Contains(joined, `model_reasoning_effort="medium"`) {
+		t.Fatalf("expected explicit reasoning override to survive, got %q", joined)
+	}
+}
+
 func TestTranscriptHostDefaultsToTranscriptOnlyState(t *testing.T) {
 	host := NewTranscriptHost()
 	if host.Status().State != HostStateTranscriptOnly {
@@ -365,5 +385,53 @@ printf '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens
 	}
 	if status.LastOutputAt.IsZero() {
 		t.Fatalf("expected output timestamp to be set, got %+v", status)
+	}
+}
+
+func TestCodexPTYHostExecModeFallbackUsesCalmTruthfulWording(t *testing.T) {
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "codex")
+	script := `#!/bin/sh
+printf '{"type":"thread.started","thread_id":"thr_test_123"}\n'
+printf '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":0}}\n'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write codex stub: %v", err)
+	}
+
+	host := NewDefaultCodexPTYHost()
+	host.mode = "exec"
+	host.binPath = bin
+	if err := host.Start(context.Background(), Snapshot{
+		TaskID: "tsk_exec",
+		Repo:   RepoAnchor{RepoRoot: tmp},
+	}); err != nil {
+		t.Fatalf("start exec host: %v", err)
+	}
+
+	for _, b := range []byte("Quiet turn\n") {
+		if !host.WriteInput([]byte{b}) {
+			t.Fatalf("expected write to be accepted for byte %q", b)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		status := host.Status()
+		if status.InputLive && !host.execRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("exec run did not complete in time: %+v", status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	joined := strings.Join(host.Lines(40, 120), "\n")
+	if !strings.Contains(joined, "The worker completed without a visible assistant message.") {
+		t.Fatalf("expected calm truthful fallback wording, got %q", joined)
+	}
+	if strings.Contains(joined, "Codex returned no visible assistant message.") {
+		t.Fatalf("expected old blunt fallback wording to be removed, got %q", joined)
 	}
 }

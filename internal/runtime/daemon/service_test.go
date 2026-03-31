@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"tuku/internal/domain/benchmark"
 	"tuku/internal/domain/brief"
 	"tuku/internal/domain/checkpoint"
 	"tuku/internal/domain/common"
@@ -16,10 +17,12 @@ import (
 	"tuku/internal/domain/incidenttriage"
 	"tuku/internal/domain/operatorstep"
 	"tuku/internal/domain/phase"
+	"tuku/internal/domain/promptir"
 	"tuku/internal/domain/proof"
 	"tuku/internal/domain/recoveryaction"
 	"tuku/internal/domain/run"
 	"tuku/internal/domain/shellsession"
+	"tuku/internal/domain/taskmemory"
 	"tuku/internal/domain/transition"
 	anchorgit "tuku/internal/git/anchor"
 	"tuku/internal/ipc"
@@ -692,16 +695,16 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 					Advisory:                "Intent is repair/recovery-focused in bounded recent evidence.",
 				},
 				CompiledBrief: &orchestrator.CompiledBriefSummary{
-					BriefID:                "brf_status_1",
-					IntentID:               "int_status_1",
-					Posture:                brief.PostureRepairOriented,
-					Objective:              "Repair stalled handoff continuity posture",
-					NormalizedAction:       "inspect and repair stalled handoff follow-through posture",
-					ScopeSummary:           "bounded scope signals: handoff continuity and review posture",
-					Constraints:            []string{"no authority changes"},
-					DoneCriteria:           []string{"repair evidence captured conservatively"},
-					Digest:                 "repair-oriented brief posture in bounded recent evidence",
-					Advisory:               "Brief is repair-oriented in bounded recent evidence.",
+					BriefID:                 "brf_status_1",
+					IntentID:                "int_status_1",
+					Posture:                 brief.PostureRepairOriented,
+					Objective:               "Repair stalled handoff continuity posture",
+					NormalizedAction:        "inspect and repair stalled handoff follow-through posture",
+					ScopeSummary:            "bounded scope signals: handoff continuity and review posture",
+					Constraints:             []string{"no authority changes"},
+					DoneCriteria:            []string{"repair evidence captured conservatively"},
+					Digest:                  "repair-oriented brief posture in bounded recent evidence",
+					Advisory:                "Brief is repair-oriented in bounded recent evidence.",
 					BoundedEvidenceMessages: 6,
 				},
 				LatestCheckpointTrigger:     checkpoint.TriggerManual,
@@ -793,9 +796,15 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 						orchestrator.ContinuityIncidentClosureWeakLoop,
 					},
 				},
-				RecoveryClass:        orchestrator.RecoveryClassHandoffFollowThroughReviewRequired,
-				RecommendedAction:    orchestrator.RecoveryActionReviewHandoffFollowThrough,
-				LatestRecoveryAction: action,
+				CurrentTaskMemoryID:                 common.MemoryID("mem_status_1"),
+				CurrentTaskMemorySource:             "run_completed",
+				CurrentTaskMemorySummary:            "phase=blocked; action=inspect and repair stalled handoff follow-through posture; next=review follow-through",
+				CurrentTaskMemoryFullHistoryTokens:  480,
+				CurrentTaskMemoryResumePromptTokens: 140,
+				CurrentTaskMemoryCompactionRatio:    3.43,
+				RecoveryClass:                       orchestrator.RecoveryClassHandoffFollowThroughReviewRequired,
+				RecommendedAction:                   orchestrator.RecoveryActionReviewHandoffFollowThrough,
+				LatestRecoveryAction:                action,
 			}, nil
 		},
 		inspectFn: func(_ context.Context, _ string) (orchestrator.InspectTaskResult, error) {
@@ -813,16 +822,16 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 					Advisory:                "Intent is repair/recovery-focused in bounded recent evidence.",
 				},
 				CompiledBrief: &orchestrator.CompiledBriefSummary{
-					BriefID:                "brf_status_1",
-					IntentID:               "int_status_1",
-					Posture:                brief.PostureRepairOriented,
-					Objective:              "Repair stalled handoff continuity posture",
-					NormalizedAction:       "inspect and repair stalled handoff follow-through posture",
-					ScopeSummary:           "bounded scope signals: handoff continuity and review posture",
-					Constraints:            []string{"no authority changes"},
-					DoneCriteria:           []string{"repair evidence captured conservatively"},
-					Digest:                 "repair-oriented brief posture in bounded recent evidence",
-					Advisory:               "Brief is repair-oriented in bounded recent evidence.",
+					BriefID:                 "brf_status_1",
+					IntentID:                "int_status_1",
+					Posture:                 brief.PostureRepairOriented,
+					Objective:               "Repair stalled handoff continuity posture",
+					NormalizedAction:        "inspect and repair stalled handoff follow-through posture",
+					ScopeSummary:            "bounded scope signals: handoff continuity and review posture",
+					Constraints:             []string{"no authority changes"},
+					DoneCriteria:            []string{"repair evidence captured conservatively"},
+					Digest:                  "repair-oriented brief posture in bounded recent evidence",
+					Advisory:                "Brief is repair-oriented in bounded recent evidence.",
 					BoundedEvidenceMessages: 6,
 				},
 				LatestRecoveryAction:  action,
@@ -895,6 +904,14 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 					BlockingBranchClass: orchestrator.ActiveBranchClassHandoffClaude,
 					BlockingBranchRef:   "hnd_status",
 					Reason:              "local interrupted-lineage resume is blocked while Claude handoff branch hnd_status owns continuity",
+				},
+				TaskMemory: &taskmemory.Snapshot{
+					MemoryID:                  common.MemoryID("mem_status_1"),
+					Source:                    "run_completed",
+					Summary:                   "phase=blocked; action=inspect and repair stalled handoff follow-through posture; next=review follow-through",
+					FullHistoryTokenEstimate:  480,
+					ResumePromptTokenEstimate: 140,
+					MemoryCompactionRatio:     3.43,
 				},
 				ActionAuthority: &orchestrator.OperatorActionAuthoritySet{
 					RequiredNextAction: orchestrator.OperatorActionReviewHandoffFollowUp,
@@ -1036,6 +1053,9 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 	if len(statusOut.ContinuityIncidentTaskRisk.RecentAnchorClasses) != 2 {
 		t.Fatalf("expected status task-risk recent classes mapping, got %+v", statusOut.ContinuityIncidentTaskRisk)
 	}
+	if statusOut.CurrentTaskMemoryID != "mem_status_1" || statusOut.CurrentTaskMemoryResumePromptTokens != 140 || statusOut.CurrentTaskMemoryCompactionRatio != 3.43 {
+		t.Fatalf("expected status task memory mapping, got %+v", statusOut)
+	}
 
 	inspectPayload, _ := json.Marshal(ipc.TaskInspectRequest{TaskID: common.TaskID("tsk_status")})
 	inspectResp := svc.handleRequest(context.Background(), ipc.Request{
@@ -1104,6 +1124,9 @@ func TestHandleRequestStatusAndInspectRouteMapRecoveryActions(t *testing.T) {
 	if inspectOut.ContinuityIncidentTaskRisk == nil || inspectOut.ContinuityIncidentTaskRisk.Class != string(orchestrator.ContinuityIncidentTaskRiskRecurringWeakClosure) {
 		t.Fatalf("expected inspect incident task-risk mapping, got %+v", inspectOut.ContinuityIncidentTaskRisk)
 	}
+	if inspectOut.TaskMemory == nil || inspectOut.TaskMemory.MemoryID != "mem_status_1" || inspectOut.TaskMemory.ResumePromptTokenEstimate != 140 {
+		t.Fatalf("expected inspect task memory mapping, got %+v", inspectOut.TaskMemory)
+	}
 }
 
 func TestHandleRequestTaskIntentRoute(t *testing.T) {
@@ -1170,39 +1193,47 @@ func TestHandleRequestTaskBriefRoute(t *testing.T) {
 				CurrentBriefID: common.BriefID("brf_123"),
 				Bounded:        true,
 				Brief: &brief.ExecutionBrief{
-					BriefID:               common.BriefID("brf_123"),
-					TaskID:                common.TaskID(req.TaskID),
-					IntentID:              common.IntentID("int_123"),
-					Posture:               brief.PostureClarificationNeeded,
-					Objective:             "Clarify and bound next execution step",
-					RequestedOutcome:      "Produce explicit bounded implementation brief",
-					NormalizedAction:      "prepare bounded execution brief",
-					ScopeSummary:          "scope remains underspecified in recent bounded evidence",
-					Constraints:           []string{"no authority changes"},
-					DoneCriteria:          []string{"clarification questions remain explicit"},
-					AmbiguityFlags:        []string{"scope_underspecified"},
-					ClarificationQuestions: []string{"Which module should be changed first?"},
-					RequiresClarification: true,
-					WorkerFraming:         "Clarification-focused brief: do not fabricate missing requirements; surface unresolved questions before bounded execution.",
+					BriefID:                 common.BriefID("brf_123"),
+					TaskID:                  common.TaskID(req.TaskID),
+					IntentID:                common.IntentID("int_123"),
+					Posture:                 brief.PostureClarificationNeeded,
+					Objective:               "Clarify and bound next execution step",
+					RequestedOutcome:        "Produce explicit bounded implementation brief",
+					NormalizedAction:        "prepare bounded execution brief",
+					ScopeSummary:            "scope remains underspecified in recent bounded evidence",
+					Constraints:             []string{"no authority changes"},
+					DoneCriteria:            []string{"clarification questions remain explicit"},
+					AmbiguityFlags:          []string{"scope_underspecified"},
+					ClarificationQuestions:  []string{"Which module should be changed first?"},
+					RequiresClarification:   true,
+					WorkerFraming:           "Clarification-focused brief: do not fabricate missing requirements; surface unresolved questions before bounded execution.",
 					BoundedEvidenceMessages: 4,
 				},
 				CompiledBrief: &orchestrator.CompiledBriefSummary{
-					BriefID:                common.BriefID("brf_123"),
-					IntentID:               common.IntentID("int_123"),
-					Posture:                brief.PostureClarificationNeeded,
-					Objective:              "Clarify and bound next execution step",
-					RequestedOutcome:       "Produce explicit bounded implementation brief",
-					NormalizedAction:       "prepare bounded execution brief",
-					ScopeSummary:           "scope remains underspecified in recent bounded evidence",
-					Constraints:            []string{"no authority changes"},
-					DoneCriteria:           []string{"clarification questions remain explicit"},
-					AmbiguityFlags:         []string{"scope_underspecified"},
-					ClarificationQuestions: []string{"Which module should be changed first?"},
-					RequiresClarification:  true,
-					WorkerFraming:          "Clarification-focused brief: do not fabricate missing requirements; surface unresolved questions before bounded execution.",
+					BriefID:                 common.BriefID("brf_123"),
+					IntentID:                common.IntentID("int_123"),
+					Posture:                 brief.PostureClarificationNeeded,
+					Objective:               "Clarify and bound next execution step",
+					RequestedOutcome:        "Produce explicit bounded implementation brief",
+					NormalizedAction:        "prepare bounded execution brief",
+					ScopeSummary:            "scope remains underspecified in recent bounded evidence",
+					Constraints:             []string{"no authority changes"},
+					DoneCriteria:            []string{"clarification questions remain explicit"},
+					AmbiguityFlags:          []string{"scope_underspecified"},
+					ClarificationQuestions:  []string{"Which module should be changed first?"},
+					RequiresClarification:   true,
+					WorkerFraming:           "Clarification-focused brief: do not fabricate missing requirements; surface unresolved questions before bounded execution.",
 					BoundedEvidenceMessages: 4,
-					Digest:                 "clarification-needed brief posture in bounded recent evidence",
-					Advisory:               "Brief remains clarification-needed in bounded recent evidence; unresolved clarification questions remain explicit.",
+					MemoryCompression: &brief.MemoryCompression{
+						Applied:                   true,
+						Summary:                   "phase=planning; action=prepare bounded execution brief",
+						FullHistoryTokenEstimate:  360,
+						ResumePromptTokenEstimate: 110,
+						MemoryCompactionRatio:     3.27,
+						ConfirmedFactsCount:       3,
+					},
+					Digest:   "clarification-needed brief posture in bounded recent evidence",
+					Advisory: "Brief remains clarification-needed in bounded recent evidence; unresolved clarification questions remain explicit.",
 				},
 			}, nil
 		},
@@ -1234,8 +1265,65 @@ func TestHandleRequestTaskBriefRoute(t *testing.T) {
 	if out.CompiledBrief.Digest != "clarification-needed brief posture in bounded recent evidence" {
 		t.Fatalf("unexpected compiled brief digest mapping: %+v", out.CompiledBrief)
 	}
+	if out.CompiledBrief.MemoryCompression == nil || !out.CompiledBrief.MemoryCompression.Applied || out.CompiledBrief.MemoryCompression.ResumePromptTokenEstimate != 110 {
+		t.Fatalf("expected memory compression in compiled brief mapping, got %+v", out.CompiledBrief)
+	}
 	if out.Brief == nil || !out.Brief.RequiresClarification || len(out.Brief.ClarificationQuestions) != 1 {
 		t.Fatalf("expected brief clarification cues, got %+v", out.Brief)
+	}
+}
+
+func TestHandleRequestTaskBenchmarkRoute(t *testing.T) {
+	var captured orchestrator.ReadBenchmarkRequest
+	handler := &fakeOrchestratorService{
+		readBenchmarkFn: func(_ context.Context, req orchestrator.ReadBenchmarkRequest) (orchestrator.BenchmarkTaskResult, error) {
+			captured = req
+			return orchestrator.BenchmarkTaskResult{
+				TaskID: common.TaskID(req.TaskID),
+				Benchmark: &benchmark.Run{
+					BenchmarkID:                   common.BenchmarkID("bmk_123"),
+					TaskID:                        common.TaskID(req.TaskID),
+					Source:                        "brief_compiled",
+					RawPromptTokenEstimate:        5,
+					DispatchPromptTokenEstimate:   118,
+					StructuredPromptTokenEstimate: 99,
+					EstimatedTokenSavings:         380,
+					ConfidenceLevel:               "high",
+					ConfidenceValue:               0.82,
+				},
+				CompiledBrief: &orchestrator.CompiledBriefSummary{
+					BriefID: common.BriefID("brf_123"),
+					PromptIR: &promptir.Packet{
+						NormalizedTaskType: "BUG_FIX",
+						ValidatorPlan:      promptir.ValidatorPlan{Commands: []string{"go test ./internal/orchestrator"}},
+					},
+				},
+			}, nil
+		},
+	}
+	svc := NewService("/tmp/unused.sock", handler)
+
+	payload, _ := json.Marshal(ipc.TaskBenchmarkRequest{TaskID: common.TaskID("tsk_benchmark")})
+	resp := svc.handleRequest(context.Background(), ipc.Request{
+		RequestID: "req_benchmark",
+		Method:    ipc.MethodTaskBenchmark,
+		Payload:   payload,
+	})
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error: %+v", resp.Error)
+	}
+	if captured.TaskID != "tsk_benchmark" {
+		t.Fatalf("unexpected benchmark request: %+v", captured)
+	}
+	var out ipc.TaskBenchmarkResponse
+	if err := json.Unmarshal(resp.Payload, &out); err != nil {
+		t.Fatalf("unmarshal task benchmark response: %v", err)
+	}
+	if out.TaskID != "tsk_benchmark" || out.Benchmark == nil || out.Benchmark.BenchmarkID != "bmk_123" {
+		t.Fatalf("unexpected benchmark response envelope: %+v", out)
+	}
+	if out.CompiledBrief == nil || out.CompiledBrief.PromptIR == nil || len(out.CompiledBrief.PromptIR.ValidatorPlan.Commands) != 1 {
+		t.Fatalf("expected compiled brief prompt ir mapping, got %+v", out.CompiledBrief)
 	}
 }
 
@@ -2795,6 +2883,7 @@ type fakeOrchestratorService struct {
 	recordContinuityIncidentFollowUpFn      func(context.Context, orchestrator.RecordContinuityIncidentFollowUpRequest) (orchestrator.RecordContinuityIncidentFollowUpResult, error)
 	readCompiledIntentFn                    func(context.Context, orchestrator.ReadCompiledIntentRequest) (orchestrator.ReadCompiledIntentResult, error)
 	readGeneratedBriefFn                    func(context.Context, orchestrator.ReadGeneratedBriefRequest) (orchestrator.ReadGeneratedBriefResult, error)
+	readBenchmarkFn                         func(context.Context, orchestrator.ReadBenchmarkRequest) (orchestrator.BenchmarkTaskResult, error)
 	statusFn                                func(context.Context, string) (orchestrator.StatusTaskResult, error)
 	inspectFn                               func(context.Context, string) (orchestrator.InspectTaskResult, error)
 	shellSnapshotFn                         func(context.Context, string) (orchestrator.ShellSnapshotResult, error)
@@ -2904,6 +2993,13 @@ func (f *fakeOrchestratorService) ReadGeneratedBrief(ctx context.Context, req or
 		return f.readGeneratedBriefFn(ctx, req)
 	}
 	return orchestrator.ReadGeneratedBriefResult{}, nil
+}
+
+func (f *fakeOrchestratorService) ReadBenchmark(ctx context.Context, req orchestrator.ReadBenchmarkRequest) (orchestrator.BenchmarkTaskResult, error) {
+	if f.readBenchmarkFn != nil {
+		return f.readBenchmarkFn(ctx, req)
+	}
+	return orchestrator.BenchmarkTaskResult{}, nil
 }
 
 func (f *fakeOrchestratorService) CreateCheckpoint(_ context.Context, _ string) (orchestrator.CreateCheckpointResult, error) {

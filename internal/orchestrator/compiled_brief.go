@@ -11,26 +11,30 @@ import (
 	"tuku/internal/domain/capsule"
 	"tuku/internal/domain/common"
 	"tuku/internal/domain/intent"
+	"tuku/internal/domain/promptir"
 )
 
 type CompiledBriefSummary struct {
-	BriefID                common.BriefID `json:"brief_id"`
-	IntentID               common.IntentID `json:"intent_id"`
-	Posture                brief.Posture `json:"posture"`
-	Objective              string `json:"objective,omitempty"`
-	RequestedOutcome       string `json:"requested_outcome,omitempty"`
-	NormalizedAction       string `json:"normalized_action,omitempty"`
-	ScopeSummary           string `json:"scope_summary,omitempty"`
-	Constraints            []string `json:"constraints,omitempty"`
-	DoneCriteria           []string `json:"done_criteria,omitempty"`
-	AmbiguityFlags         []string `json:"ambiguity_flags,omitempty"`
-	ClarificationQuestions []string `json:"clarification_questions,omitempty"`
-	RequiresClarification  bool `json:"requires_clarification"`
-	WorkerFraming          string `json:"worker_framing,omitempty"`
-	BoundedEvidenceMessages int `json:"bounded_evidence_messages"`
-	CreatedAt              time.Time `json:"created_at,omitempty"`
-	Digest                 string `json:"digest,omitempty"`
-	Advisory               string `json:"advisory,omitempty"`
+	BriefID                 common.BriefID           `json:"brief_id"`
+	IntentID                common.IntentID          `json:"intent_id"`
+	Posture                 brief.Posture            `json:"posture"`
+	Objective               string                   `json:"objective,omitempty"`
+	RequestedOutcome        string                   `json:"requested_outcome,omitempty"`
+	NormalizedAction        string                   `json:"normalized_action,omitempty"`
+	ScopeSummary            string                   `json:"scope_summary,omitempty"`
+	Constraints             []string                 `json:"constraints,omitempty"`
+	DoneCriteria            []string                 `json:"done_criteria,omitempty"`
+	AmbiguityFlags          []string                 `json:"ambiguity_flags,omitempty"`
+	ClarificationQuestions  []string                 `json:"clarification_questions,omitempty"`
+	RequiresClarification   bool                     `json:"requires_clarification"`
+	WorkerFraming           string                   `json:"worker_framing,omitempty"`
+	BoundedEvidenceMessages int                      `json:"bounded_evidence_messages"`
+	PromptTriage            *brief.PromptTriage      `json:"prompt_triage,omitempty"`
+	MemoryCompression       *brief.MemoryCompression `json:"memory_compression,omitempty"`
+	PromptIR                *promptir.Packet         `json:"prompt_ir,omitempty"`
+	CreatedAt               time.Time                `json:"created_at,omitempty"`
+	Digest                  string                   `json:"digest,omitempty"`
+	Advisory                string                   `json:"advisory,omitempty"`
 }
 
 type ReadGeneratedBriefRequest struct {
@@ -38,11 +42,11 @@ type ReadGeneratedBriefRequest struct {
 }
 
 type ReadGeneratedBriefResult struct {
-	TaskID          common.TaskID
-	CurrentBriefID  common.BriefID
-	Bounded         bool
-	Brief           *brief.ExecutionBrief
-	CompiledBrief   *CompiledBriefSummary
+	TaskID         common.TaskID
+	CurrentBriefID common.BriefID
+	Bounded        bool
+	Brief          *brief.ExecutionBrief
+	CompiledBrief  *CompiledBriefSummary
 }
 
 func (c *Coordinator) ReadGeneratedBrief(ctx context.Context, req ReadGeneratedBriefRequest) (ReadGeneratedBriefResult, error) {
@@ -108,6 +112,18 @@ func compiledBriefSummaryFromBrief(b brief.ExecutionBrief) *CompiledBriefSummary
 		WorkerFraming:           b.WorkerFraming,
 		BoundedEvidenceMessages: b.BoundedEvidenceMessages,
 		CreatedAt:               b.CreatedAt,
+	}
+	if hasMeaningfulPromptTriage(b.PromptTriage) {
+		promptTriage := clonePromptTriage(b.PromptTriage)
+		out.PromptTriage = &promptTriage
+	}
+	if hasMeaningfulMemoryCompression(b.MemoryCompression) {
+		memoryCompression := cloneMemoryCompression(b.MemoryCompression)
+		out.MemoryCompression = &memoryCompression
+	}
+	if hasMeaningfulPromptIR(b.PromptIR) {
+		promptCopy := clonePromptIR(b.PromptIR)
+		out.PromptIR = &promptCopy
 	}
 	posture := normalizedBriefPosture(b.Posture, b.RequiresClarification)
 	out.Posture = posture
@@ -202,6 +218,16 @@ func buildBriefInputV2(caps capsule.WorkCapsule, in intent.State, previous *brie
 			policyProfileID = previous.PolicyProfileID
 		}
 	}
+	promptTriage := brief.PromptTriage{}
+	memoryCompression := brief.MemoryCompression{}
+	promptPacket := promptir.Packet{}
+	taskMemoryID := common.MemoryID("")
+	if previous != nil {
+		promptTriage = clonePromptTriage(previous.PromptTriage)
+		memoryCompression = cloneMemoryCompression(previous.MemoryCompression)
+		promptPacket = clonePromptIR(previous.PromptIR)
+		taskMemoryID = previous.TaskMemoryID
+	}
 
 	return brief.BuildInput{
 		TaskID:                  caps.TaskID,
@@ -221,10 +247,34 @@ func buildBriefInputV2(caps capsule.WorkCapsule, in intent.State, previous *brie
 		RequiresClarification:   requiresClarification,
 		WorkerFraming:           defaultWorkerFramingForPosture(posture, requiresClarification),
 		BoundedEvidenceMessages: in.BoundedEvidenceMessages,
+		PromptTriage:            promptTriage,
 		ContextPackID:           contextPackID,
+		TaskMemoryID:            taskMemoryID,
+		MemoryCompression:       memoryCompression,
+		PromptIR:                promptPacket,
 		Verbosity:               verbosity,
 		PolicyProfileID:         policyProfileID,
 	}
+}
+
+func hasMeaningfulMemoryCompression(in brief.MemoryCompression) bool {
+	return in.Applied ||
+		strings.TrimSpace(in.Summary) != "" ||
+		in.FullHistoryTokenEstimate > 0 ||
+		in.ResumePromptTokenEstimate > 0 ||
+		in.MemoryCompactionRatio > 0
+}
+
+func hasMeaningfulPromptIR(in promptir.Packet) bool {
+	return strings.TrimSpace(in.Objective) != "" ||
+		strings.TrimSpace(in.ScopeSummary) != "" ||
+		len(in.RankedTargets) > 0 ||
+		len(in.OperationPlan) > 0 ||
+		len(in.ValidatorPlan.Commands) > 0 ||
+		len(in.OutputContract) > 0 ||
+		in.Confidence.Value > 0 ||
+		in.NaturalLanguageTokens > 0 ||
+		in.StructuredTokens > 0
 }
 
 func deriveBriefPostureFromIntent(in intent.State) brief.Posture {

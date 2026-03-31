@@ -17,6 +17,7 @@ type RecoveryClass string
 
 const (
 	RecoveryClassReadyNextRun                       RecoveryClass = "READY_NEXT_RUN"
+	RecoveryClassRunInProgress                      RecoveryClass = "RUN_IN_PROGRESS"
 	RecoveryClassInterruptedRunRecoverable          RecoveryClass = "INTERRUPTED_RUN_RECOVERABLE"
 	RecoveryClassAcceptedHandoffLaunchReady         RecoveryClass = "ACCEPTED_HANDOFF_LAUNCH_READY"
 	RecoveryClassHandoffLaunchPendingOutcome        RecoveryClass = "HANDOFF_LAUNCH_PENDING_OUTCOME"
@@ -37,6 +38,7 @@ type RecoveryAction string
 
 const (
 	RecoveryActionNone                       RecoveryAction = "NONE"
+	RecoveryActionWaitForLocalRun            RecoveryAction = "WAIT_FOR_LOCAL_RUN"
 	RecoveryActionStartNextRun               RecoveryAction = "START_NEXT_RUN"
 	RecoveryActionResumeInterrupted          RecoveryAction = "RESUME_INTERRUPTED_RUN"
 	RecoveryActionLaunchAcceptedHandoff      RecoveryAction = "LAUNCH_ACCEPTED_HANDOFF"
@@ -111,6 +113,13 @@ func (c *Coordinator) recoveryFromContinueAssessment(assessment continueAssessme
 	}
 
 	switch assessment.Outcome {
+	case ContinueOutcomeRunInProgress:
+		recovery.RecoveryClass = RecoveryClassRunInProgress
+		recovery.RecommendedAction = RecoveryActionWaitForLocalRun
+		if recovery.Reason == "" {
+			recovery.Reason = "latest local run is still actively executing"
+		}
+		return applyRecoveryActionProgression(recovery)
 	case ContinueOutcomeBlockedInconsistent:
 		recovery.RecoveryClass = RecoveryClassRepairRequired
 		recovery.RecommendedAction = RecoveryActionRepairContinuity
@@ -479,6 +488,8 @@ func runStartBlockedCanonical(recovery RecoveryAssessment) string {
 		return "Execution cannot start yet because the latest handoff launch step is already complete and should be monitored rather than replaced by a new local run."
 	case RecoveryClassInterruptedRunRecoverable:
 		return "Execution cannot start yet because the task is in interrupted-run recovery, not cleared for a fresh bounded run."
+	case RecoveryClassRunInProgress:
+		return "Execution cannot start yet because a local run is still actively executing."
 	case RecoveryClassStaleRunReconciliationRequired:
 		return "Execution cannot start yet because stale run reconciliation is still required."
 	case RecoveryClassCompletedNoAction:

@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,12 +19,15 @@ import (
 
 const (
 	shellHostTickInterval       = 350 * time.Millisecond
+	shellWorkingTickInterval    = 1 * time.Second
 	shellSnapshotTickInterval   = 15 * time.Second
 	shellRegistryTickInterval   = shellSessionHeartbeatInterval
 	shellTranscriptTickInterval = shellTranscriptFlushInterval
 	shellFeedHostLineLimit      = 400
 	shellExitConfirmWindow      = 2 * time.Second
 	shellOverlayVisibleItems    = 6
+	shellWorkerIdleGrace        = 2 * time.Second
+	shellTailViewportBlocks     = 2
 )
 
 type shellOverlayKind int
@@ -40,6 +47,7 @@ const (
 	shellFeedTuku
 	shellFeedWarning
 	shellFeedError
+	shellFeedWorking
 )
 
 type shellFeedEntry struct {
@@ -78,6 +86,7 @@ var shellModelOptions = []shellCommand{
 }
 
 type shellHostTickMsg struct{}
+type shellWorkingTickMsg struct{}
 type shellSnapshotTickMsg struct{}
 type shellRegistryTickMsg struct{}
 type shellTranscriptTickMsg struct{}
@@ -107,8 +116,11 @@ type shellSurfaceLayout struct {
 	headerHeight   int
 	footerHeight   int
 	composerHeight int
+	overlayHeight  int
 	viewportHeight int
 	contentWidth   int
+	composerWidth  int
+	feedWidth      int
 }
 
 type shellComposerState struct {
@@ -118,6 +130,71 @@ type shellComposerState struct {
 	Placeholder string
 	Tone        string
 	SendMode    string
+}
+
+type shellKeyMap struct {
+	Send      key.Binding
+	Commands  key.Binding
+	Scroll    key.Binding
+	Dismiss   key.Binding
+	Interrupt key.Binding
+	Help      key.Binding
+	Quit      key.Binding
+	Move      key.Binding
+	Select    key.Binding
+}
+
+func newShellKeyMap() shellKeyMap {
+	return shellKeyMap{
+		Send: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("Enter", "send"),
+		),
+		Commands: key.NewBinding(
+			key.WithKeys("/"),
+			key.WithHelp("/", "commands"),
+		),
+		Scroll: key.NewBinding(
+			key.WithKeys("pgup", "pgdown", "ctrl+u", "ctrl+d"),
+			key.WithHelp("PgUp/PgDn", "history"),
+		),
+		Dismiss: key.NewBinding(
+			key.WithKeys("esc"),
+			key.WithHelp("Esc", "dismiss"),
+		),
+		Interrupt: key.NewBinding(
+			key.WithKeys("esc"),
+			key.WithHelp("Esc", "interrupt"),
+		),
+		Help: key.NewBinding(
+			key.WithKeys("?"),
+			key.WithHelp("?", "help"),
+		),
+		Quit: key.NewBinding(
+			key.WithKeys("ctrl+c"),
+			key.WithHelp("Ctrl-C", "exit"),
+		),
+		Move: key.NewBinding(
+			key.WithKeys("up", "down", "tab", "shift+tab"),
+			key.WithHelp("↑/↓", "move"),
+		),
+		Select: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("Enter", "select"),
+		),
+	}
+}
+
+func (k shellKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Send, k.Commands, k.Scroll, k.Dismiss, k.Interrupt, k.Help, k.Quit}
+}
+
+func (k shellKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Send, k.Select, k.Commands},
+		{k.Scroll, k.Move},
+		{k.Dismiss, k.Interrupt, k.Help, k.Quit},
+	}
 }
 
 type shellStyles struct {
@@ -134,7 +211,11 @@ type shellStyles struct {
 	feedTitle       lipgloss.Style
 	feedBody        lipgloss.Style
 	feedUserTitle   lipgloss.Style
+	feedUserStrip   lipgloss.Style
 	feedWorkerTitle lipgloss.Style
+	feedWorkerMeta  lipgloss.Style
+	feedActionVerb  lipgloss.Style
+	feedPath        lipgloss.Style
 	feedNoteTitle   lipgloss.Style
 	feedWarnTitle   lipgloss.Style
 	feedErrorTitle  lipgloss.Style
@@ -167,6 +248,9 @@ type shellModel struct {
 
 	viewport viewport.Model
 	composer textinput.Model
+	spinner  spinner.Model
+	help     help.Model
+	keys     shellKeyMap
 
 	overlayKind                 shellOverlayKind
 	menuSelected                int
@@ -175,21 +259,42 @@ type shellModel struct {
 	lastHost                    HostStatus
 	lastDigest                  uint64
 	didInitialFit               bool
+	followLatest                bool
+	spinnerRunning              bool
 	scrollToEntry               string
-	bottomPadLines              int
 	exitConfirmUntil            time.Time
 	exitConfirmNonce            int
 	archivedHostLines           []string
 	startupConversationBaseline int
+	lastViewportWidth           int
+	lastViewportHeight          int
 }
 
 func newShellModel(ctx context.Context, app *App, snapshot Snapshot, ui UIState, host WorkerHost) *shellModel {
 	composer := textinput.New()
 	composer.Prompt = ""
 	composer.CharLimit = 4000
-	composer.PlaceholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#60748D"))
+	composer.PromptStyle = lipgloss.NewStyle()
+	composer.TextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F3F4F6"))
+	composer.PlaceholderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 	composer.Focus()
-	composer.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#A9D1FF"))
+	composer.Cursor.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB"))
+
+	spin := spinner.New()
+	spin.Spinner = spinner.Spinner{
+		Frames: spinner.Dot.Frames,
+		FPS:    200 * time.Millisecond,
+	}
+	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB"))
+
+	helpModel := help.New()
+	helpModel.Styles.ShortKey = lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB"))
+	helpModel.Styles.ShortDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	helpModel.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
+	helpModel.Styles.Ellipsis = lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
+	helpModel.Styles.FullKey = lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB"))
+	helpModel.Styles.FullDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	helpModel.Styles.FullSeparator = lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
 
 	vp := viewport.New(80, 20)
 	vp.MouseWheelEnabled = true
@@ -202,19 +307,28 @@ func newShellModel(ctx context.Context, app *App, snapshot Snapshot, ui UIState,
 		host:                        host,
 		viewport:                    vp,
 		composer:                    composer,
+		spinner:                     spin,
+		help:                        helpModel,
+		keys:                        newShellKeyMap(),
 		lastHost:                    host.Status(),
+		followLatest:                true,
 		startupConversationBaseline: len(visibleConversationItems(snapshot)),
 	}
 }
 
 func (m *shellModel) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		textinput.Blink,
 		shellHostTickCmd(),
+		shellWorkingTickCmd(),
 		shellSnapshotTickCmd(m.app.refreshEvery()),
 		shellRegistryTickCmd(),
 		shellTranscriptTickCmd(),
-	)
+	}
+	if cmd := m.ensureSpinnerTick(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -230,6 +344,25 @@ func (m *shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := shellHostTickCmd()
 		m.pollHost()
 		return m, cmd
+	case spinner.TickMsg:
+		if !m.spinnerActive() {
+			m.spinnerRunning = false
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		m.spinnerRunning = true
+		m.syncViewport(false)
+		return m, cmd
+	case shellWorkingTickMsg:
+		cmds := []tea.Cmd{shellWorkingTickCmd()}
+		if cmd := m.ensureSpinnerTick(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if m.ui.WorkerPromptPending || m.ui.PrimaryActionInFlight != nil {
+			m.syncViewport(false)
+		}
+		return m, tea.Batch(cmds...)
 	case shellSnapshotTickMsg:
 		cmds := []tea.Cmd{shellSnapshotTickCmd(m.app.refreshEvery())}
 		if !(m.host.Status().State == HostStateLive && m.host.Status().InputLive && !m.ui.WorkerPromptPending) {
@@ -319,24 +452,37 @@ func (m *shellModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.overlayKind == shellOverlayNone && strings.TrimSpace(m.composer.Value()) == "" {
 			return m, tea.Quit
 		}
+	case "?":
+		if strings.TrimSpace(m.composer.Value()) == "" {
+			m.help.ShowAll = !m.help.ShowAll
+			m.reflowLayout(false)
+			return m, nil
+		}
 	case "esc":
 		if m.overlayKind != shellOverlayNone {
-			m.overlayKind = shellOverlayNone
-			m.syncViewport(false)
+			m.setOverlayKind(shellOverlayNone, false)
+			return m, nil
+		}
+		if m.ui.WorkerPromptPending && m.requestWorkerInterrupt() {
+			m.syncViewport(true)
 			return m, nil
 		}
 		return m, nil
 	case "pgdown":
 		m.viewport.ViewDown()
+		m.syncFollowLatest()
 		return m, nil
 	case "pgup":
 		m.viewport.ViewUp()
+		m.followLatest = m.viewport.AtBottom()
 		return m, nil
 	case "ctrl+d":
 		m.viewport.HalfViewDown()
+		m.syncFollowLatest()
 		return m, nil
 	case "ctrl+u":
 		m.viewport.HalfViewUp()
+		m.followLatest = m.viewport.AtBottom()
 		return m, nil
 	}
 
@@ -396,7 +542,7 @@ func (m *shellModel) submitComposer() (tea.Model, tea.Cmd) {
 	}
 	if strings.HasPrefix(raw, "/") {
 		if m.overlayKind == shellOverlayNone {
-			m.overlayKind = shellOverlayCommands
+			m.setOverlayKind(shellOverlayCommands, false)
 		}
 		items := m.filteredOverlayItems()
 		if len(items) == 0 {
@@ -413,13 +559,14 @@ func (m *shellModel) submitComposer() (tea.Model, tea.Cmd) {
 		m.syncViewport(true)
 		return m, nil
 	case "worker":
-		m.commitCurrentWorkerStream()
 		m.composer.SetValue("")
-		m.overlayKind = shellOverlayNone
+		m.setOverlayKind(shellOverlayNone, false)
 		if m.host.WriteInput([]byte(prompt + "\n")) {
 			m.ui.LastWorkerPrompt = prompt
 			m.ui.LastWorkerPromptAt = time.Now().UTC()
 			m.ui.WorkerPromptPending = true
+			m.ui.WorkerResponseStarted = false
+			m.ui.WorkerInterruptRequested = false
 			m.pushUserPrompt(prompt)
 			m.syncViewport(true)
 			return m, nil
@@ -429,13 +576,13 @@ func (m *shellModel) submitComposer() (tea.Model, tea.Cmd) {
 		return m, nil
 	case "canonical":
 		m.composer.SetValue("")
-		m.overlayKind = shellOverlayNone
+		m.setOverlayKind(shellOverlayNone, false)
 		m.pushUserPrompt(prompt)
 		m.syncViewport(true)
 		return m, shellSendPromptCmd(m.app.MessageSender, m.app.Source, m.app.TaskID, prompt, m.app.RegistrySource)
 	case "scratch":
 		m.composer.SetValue("")
-		m.overlayKind = shellOverlayNone
+		m.setOverlayKind(shellOverlayNone, false)
 		if m.host.WriteInput([]byte(prompt + "\n")) {
 			m.pushUserPrompt(prompt)
 			m.syncViewport(true)
@@ -452,7 +599,7 @@ func (m *shellModel) submitComposer() (tea.Model, tea.Cmd) {
 }
 
 func (m *shellModel) executeSlashCommand(name string) (tea.Model, tea.Cmd) {
-	m.overlayKind = shellOverlayNone
+	m.setOverlayKind(shellOverlayNone, false)
 	m.composer.SetValue("")
 	switch strings.TrimSpace(strings.ToLower(name)) {
 	case "/help":
@@ -466,7 +613,7 @@ func (m *shellModel) executeSlashCommand(name string) (tea.Model, tea.Cmd) {
 	case "/clear":
 		m.localEntries = nil
 	case "/model":
-		m.overlayKind = shellOverlayModel
+		m.setOverlayKind(shellOverlayModel, false)
 		m.menuSelected = 0
 	case "/next":
 		if err := executablePrimaryStepExists(m.snapshot, m.app.ActionExecutor); err != nil {
@@ -516,7 +663,7 @@ func (m *shellModel) executeGuidedPrimaryCommand(noun string, actionTerms []stri
 }
 
 func (m *shellModel) selectModelOption(name string) (tea.Model, tea.Cmd) {
-	m.overlayKind = shellOverlayNone
+	m.setOverlayKind(shellOverlayNone, false)
 	lines := []string{
 		fmt.Sprintf("Previewed %s.", name),
 		fmt.Sprintf("Current worker remains %s.", effectiveWorkerLabel(m.snapshot, m.host)),
@@ -550,10 +697,14 @@ func (m *shellModel) pollHost() {
 	}
 	if m.ui.WorkerPromptPending {
 		if current.State != HostStateLive {
-			m.ui.WorkerPromptPending = false
-		} else if m.host.CanAcceptInput() && !current.LastOutputAt.IsZero() && (m.ui.LastWorkerPromptAt.IsZero() || !current.LastOutputAt.Before(m.ui.LastWorkerPromptAt)) {
-			m.ui.WorkerPromptPending = false
-			m.commitCurrentWorkerStream()
+			m.clearWorkerTurnState()
+		} else {
+			if !current.LastOutputAt.IsZero() && (m.ui.LastWorkerPromptAt.IsZero() || !current.LastOutputAt.Before(m.ui.LastWorkerPromptAt)) {
+				m.ui.WorkerResponseStarted = true
+			}
+			if !m.workerTurnStillActive(current) {
+				m.clearWorkerTurnState()
+			}
 		}
 	}
 	digest := shellHostDigest(m.host, max(20, m.layout().contentWidth-4))
@@ -565,6 +716,7 @@ func (m *shellModel) pollHost() {
 }
 
 func (m *shellModel) syncOverlayFromComposer() {
+	previous := m.overlayKind
 	value := strings.TrimSpace(m.composer.Value())
 	if strings.HasPrefix(value, "/") {
 		if m.overlayKind != shellOverlayCommands {
@@ -584,6 +736,9 @@ func (m *shellModel) syncOverlayFromComposer() {
 	if m.overlayKind == shellOverlayCommands {
 		m.overlayKind = shellOverlayNone
 		m.menuSelected = 0
+	}
+	if previous != m.overlayKind {
+		m.reflowLayout(false)
 	}
 }
 
@@ -611,33 +766,41 @@ func (m *shellModel) View() string {
 	if m.width <= 0 || m.height <= 0 {
 		return "loading shell..."
 	}
-	m.resize()
 
 	layout := m.layout()
 	styles := newShellStyles()
 
 	header := m.renderHeader(styles, layout)
-	feed := m.viewport.View()
+	feed := m.renderViewport(layout)
 	composer := m.renderComposer(styles, layout)
 	footer := m.renderFooter(styles, layout)
 
-	base := lipgloss.JoinVertical(lipgloss.Left, header, feed, composer, footer)
-	base = styles.root.Width(m.width).Render(base)
-
-	if m.overlayKind == shellOverlayNone {
-		return base
+	sections := []string{header, feed, composer}
+	if m.overlayKind != shellOverlayNone {
+		sections = append(sections, m.renderOverlay(styles, layout))
 	}
-	overlay := m.renderOverlay(styles, layout)
-	return overlayNearComposer(base, overlay, m.width, m.height, layout)
+	sections = append(sections, footer)
+	return styles.root.Render(lipgloss.JoinVertical(lipgloss.Left, sections...))
 }
 
 func (m *shellModel) resize() {
+	m.reflowLayout(false)
+}
+
+func (m *shellModel) reflowLayout(forceBottom bool) {
 	layout := m.layout()
-	m.viewport.Width = max(10, layout.contentWidth)
-	m.viewport.Height = max(4, layout.viewportHeight)
-	m.composer.Width = max(10, layout.contentWidth-4)
+	m.viewport.Width = layout.feedWidth
+	m.composer.Width = layout.composerWidth
 	m.resizeHost()
-	m.syncViewport(false)
+	m.syncViewport(forceBottom)
+}
+
+func (m *shellModel) setOverlayKind(kind shellOverlayKind, forceBottom bool) {
+	if m.overlayKind == kind {
+		return
+	}
+	m.overlayKind = kind
+	m.reflowLayout(forceBottom)
 }
 
 func (m *shellModel) resizeHost() {
@@ -645,81 +808,88 @@ func (m *shellModel) resizeHost() {
 		return
 	}
 	layout := m.layout()
-	m.host.Resize(max(10, layout.contentWidth-4), max(4, layout.viewportHeight-2))
+	m.host.Resize(max(10, layout.composerWidth), max(1, layout.viewportHeight-2))
 }
 
 func (m *shellModel) layout() shellSurfaceLayout {
-	width := max(60, m.width)
-	height := max(16, m.height)
+	width := m.width
+	if width <= 0 {
+		width = 60
+	}
+	height := m.height
+	if height <= 0 {
+		height = 16
+	}
 	padding := 2
 	if width < 88 {
 		padding = 1
 	}
 	headerHeight := 3
-	if width < 88 {
+	if width < 88 || height < 18 {
 		headerHeight = 2
 	}
-	footerHeight := 1
-	composerHeight := 4
-	if height < 22 {
-		composerHeight = 3
+	composerHeight := 5
+	if height < 20 {
+		composerHeight = 4
 	}
 	contentWidth := width - (padding * 2)
+	if contentWidth > 1 {
+		contentWidth--
+	}
 	if contentWidth < 40 {
-		contentWidth = width
+		contentWidth = max(1, width-2)
 		padding = 0
 	}
-	viewportHeight := height - headerHeight - footerHeight - composerHeight
-	if viewportHeight < 6 {
-		viewportHeight = 6
+	layout := shellSurfaceLayout{
+		padding:      padding,
+		headerHeight: headerHeight,
+		contentWidth: contentWidth,
+		feedWidth:    max(10, contentWidth),
+		composerWidth: max(10,
+			contentWidth-6),
 	}
-	return shellSurfaceLayout{
-		padding:        padding,
-		headerHeight:   headerHeight,
-		footerHeight:   footerHeight,
-		composerHeight: composerHeight,
-		viewportHeight: viewportHeight,
-		contentWidth:   contentWidth,
+	layout.composerHeight = max(composerHeight, m.composerBlockHeight(layout))
+	layout.footerHeight = m.footerBlockHeight(layout)
+	if m.overlayKind != shellOverlayNone {
+		styles := newShellStyles()
+		layout.overlayHeight = len(splitLines(m.renderOverlay(styles, layout)))
 	}
+
+	viewportHeight := height - layout.headerHeight - layout.footerHeight - layout.composerHeight - layout.overlayHeight
+	if viewportHeight < 1 {
+		viewportHeight = 1
+	}
+	layout.viewportHeight = viewportHeight
+	return layout
 }
 
 func (m *shellModel) syncViewport(forceBottom bool) {
 	layout := m.layout()
 	feed := m.renderedFeed(layout.contentWidth)
 	content := strings.Join(feed.blocks, "\n\n")
-	if m.bottomPadLines > 0 {
-		content += strings.Repeat("\n", m.bottomPadLines)
-	}
-	if content == m.lastContent && !forceBottom && m.didInitialFit && m.scrollToEntry == "" {
+	desiredHeight := min(layout.viewportHeight, max(1, shellTailViewportLineCount(feed.blocks)))
+	layoutChanged := m.lastViewportWidth != layout.feedWidth || m.lastViewportHeight != desiredHeight
+	if content == m.lastContent && !forceBottom && m.didInitialFit && m.scrollToEntry == "" && !layoutChanged {
 		return
 	}
 	oldOffset := m.viewport.YOffset
-	atBottom := forceBottom || m.viewport.AtBottom()
-	if m.scrollToEntry != "" {
-		if offset, ok := feed.entryOffsets[m.scrollToEntry]; ok {
-			baseMaxOffset := max(0, shellFeedLineCount(feed.blocks)-m.viewport.Height)
-			if offset > baseMaxOffset {
-				m.bottomPadLines = offset - baseMaxOffset
-				content = strings.Join(feed.blocks, "\n\n") + strings.Repeat("\n", m.bottomPadLines)
-			} else {
-				m.bottomPadLines = 0
-			}
-		}
-	}
+	m.viewport.Width = layout.feedWidth
+	scrollToEntry := m.scrollToEntry != "" && (forceBottom || m.followLatest)
 	m.viewport.SetContent(content)
+	m.viewport.Height = desiredHeight
 	maxOffset := max(0, m.viewport.TotalLineCount()-m.viewport.Height)
 	switch {
 	case !m.didInitialFit:
 		m.viewport.YOffset = min(shellInitialViewportOffset(feed.blocks, m.viewport.Height), maxOffset)
 		m.didInitialFit = true
-	case m.scrollToEntry != "":
+	case scrollToEntry:
 		offset, ok := feed.entryOffsets[m.scrollToEntry]
 		if !ok {
 			m.viewport.GotoBottom()
 		} else {
 			m.viewport.YOffset = min(offset, maxOffset)
 		}
-	case atBottom:
+	case forceBottom || m.followLatest:
 		m.viewport.GotoBottom()
 	default:
 		if oldOffset > maxOffset {
@@ -729,6 +899,13 @@ func (m *shellModel) syncViewport(forceBottom bool) {
 	}
 	m.scrollToEntry = ""
 	m.lastContent = content
+	m.lastViewportWidth = layout.feedWidth
+	m.lastViewportHeight = desiredHeight
+	m.syncFollowLatest()
+}
+
+func (m shellModel) renderViewport(layout shellSurfaceLayout) string {
+	return indentBlock(m.viewport.View(), layout.padding)
 }
 
 func (m shellModel) renderFeedContent(width int) string {
@@ -755,7 +932,7 @@ func (m shellModel) renderedFeed(width int) renderedShellFeed {
 	}
 	lineOffset := 0
 	for idx, entry := range entries {
-		block := renderFeedEntry(entry, width)
+		block := m.renderFeedEntry(entry, width)
 		out.blocks = append(out.blocks, block)
 		if entry.Key != "" {
 			out.entryOffsets[entry.Key] = lineOffset
@@ -768,6 +945,13 @@ func (m shellModel) renderedFeed(width int) renderedShellFeed {
 	return out
 }
 
+func (m shellModel) renderFeedEntry(entry shellFeedEntry, width int) string {
+	if entry.Kind == shellFeedWorking {
+		return renderWorkingEntry(newShellStyles(), entry, width, m.spinner.View())
+	}
+	return renderFeedEntry(entry, width)
+}
+
 func shellFeedLineCount(blocks []string) int {
 	if len(blocks) == 0 {
 		return 0
@@ -775,6 +959,21 @@ func shellFeedLineCount(blocks []string) int {
 	total := 0
 	for i, block := range blocks {
 		total += len(splitLines(block))
+		if i < len(blocks)-1 {
+			total++
+		}
+	}
+	return total
+}
+
+func shellTailViewportLineCount(blocks []string) int {
+	if len(blocks) == 0 {
+		return 0
+	}
+	start := max(0, len(blocks)-shellTailViewportBlocks)
+	total := 0
+	for i := start; i < len(blocks); i++ {
+		total += len(splitLines(blocks[i]))
 		if i < len(blocks)-1 {
 			total++
 		}
@@ -820,6 +1019,9 @@ func (m shellModel) feedEntries(width int) []shellFeedEntry {
 				Preformatted: true,
 			})
 		}
+		if working := m.workingStateEntry(); working != nil {
+			entries = append(entries, *working)
+		}
 	}
 
 	if shellState := m.shellStateEntry(); shellState != nil {
@@ -858,6 +1060,8 @@ func (m shellModel) renderHeader(styles shellStyles, layout shellSurfaceLayout) 
 func (m shellModel) renderComposer(styles shellStyles, layout shellSurfaceLayout) string {
 	state := m.composerState()
 	m.composer.Placeholder = state.Placeholder
+	bodyWidth := layout.composerWidth
+	m.composer.Width = bodyWidth
 
 	box := styles.composerBox
 	if m.overlayKind != shellOverlayNone || state.SendMode == "worker" || state.SendMode == "scratch" {
@@ -870,10 +1074,13 @@ func (m shellModel) renderComposer(styles shellStyles, layout shellSurfaceLayout
 		max(10, layout.contentWidth-4),
 	)
 
-	line := styles.composerPrompt.Render("›") + " " + m.composer.View()
-	hint := styles.composerHint.Render(state.Hint)
-
-	content := strings.Join([]string{header, line, hint}, "\n")
+	composerView := m.composer.View()
+	line := styles.composerPrompt.Render("›") + " " + ansiPadToWidth(composerView, bodyWidth)
+	contentLines := []string{header, line}
+	for _, hint := range m.composerHintLines(layout) {
+		contentLines = append(contentLines, styles.composerHint.Render(hint))
+	}
+	content := strings.Join(contentLines, "\n")
 	return indentBlock(box.Width(layout.contentWidth).Render(content), layout.padding)
 }
 
@@ -897,7 +1104,38 @@ func (m shellModel) renderFooter(styles shellStyles, layout shellSurfaceLayout) 
 		styles.footerMuted.Render(right),
 		layout.contentWidth,
 	)
-	return indentBlock(line, layout.padding)
+	helpView := m.renderHelpView(layout.contentWidth)
+	if strings.TrimSpace(helpView) == "" {
+		return indentBlock(line, layout.padding)
+	}
+	return indentBlock(strings.Join([]string{line, helpView}, "\n"), layout.padding)
+}
+
+func (m shellModel) composerHintLines(layout shellSurfaceLayout) []string {
+	return nil
+}
+
+func (m shellModel) composerBlockHeight(layout shellSurfaceLayout) int {
+	baseLines := 2 + len(m.composerHintLines(layout))
+	frameHeight := newShellStyles().composerBox.GetVerticalFrameSize()
+	return baseLines + frameHeight
+}
+
+func (m shellModel) footerBlockHeight(layout shellSurfaceLayout) int {
+	height := 1
+	if helpView := m.renderHelpView(layout.contentWidth); strings.TrimSpace(helpView) != "" {
+		height += len(splitLines(helpView))
+	}
+	return height
+}
+
+func (m shellModel) renderHelpView(width int) string {
+	if width <= 0 {
+		return ""
+	}
+	helpModel := m.help
+	helpModel.Width = width
+	return helpModel.View(m.helpKeyMap())
 }
 
 func (m shellModel) renderOverlay(styles shellStyles, layout shellSurfaceLayout) string {
@@ -933,8 +1171,9 @@ func (m shellModel) renderOverlay(styles shellStyles, layout shellSurfaceLayout)
 			row := prefix + rowStyle.Render(ansiPadToWidth(name, 14)) + "  " + desc
 			lines = append(lines, row)
 		}
-		if len(items) > shellOverlayVisibleItems {
-			lines = append(lines, styles.menuDesc.Render(fmt.Sprintf("%d of %d", min(end, len(items)), len(items))))
+		if len(items) > 0 {
+			selected := max(0, min(m.menuSelected, len(items)-1)) + 1
+			lines = append(lines, styles.menuDesc.Render(fmt.Sprintf("%d of %d", selected, len(items))))
 		}
 	}
 	_ = maxOverlayLines
@@ -943,20 +1182,27 @@ func (m shellModel) renderOverlay(styles shellStyles, layout shellSurfaceLayout)
 
 func newShellStyles() shellStyles {
 	return shellStyles{
-		root:            lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")),
-		headerKicker:    lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true),
-		headerTitle:     lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")),
-		headerMeta:      lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")),
-		headerRule:      lipgloss.NewStyle().Foreground(lipgloss.Color("#374151")),
-		chip:            lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")),
-		chipAccent:      lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")),
-		chipPositive:    lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")),
-		chipCaution:     lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")),
-		chipMuted:       lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")),
-		feedTitle:       lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Bold(true),
-		feedBody:        lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")),
-		feedUserTitle:   lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true),
+		root:          lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")),
+		headerKicker:  lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true),
+		headerTitle:   lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")),
+		headerMeta:    lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")),
+		headerRule:    lipgloss.NewStyle().Foreground(lipgloss.Color("#374151")),
+		chip:          lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")),
+		chipAccent:    lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")),
+		chipPositive:  lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")),
+		chipCaution:   lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")),
+		chipMuted:     lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")),
+		feedTitle:     lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Bold(true),
+		feedBody:      lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")),
+		feedUserTitle: lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true),
+		feedUserStrip: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#F3F4F6")).
+			Background(lipgloss.Color("#1F2937")).
+			Padding(0, 1),
 		feedWorkerTitle: lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Bold(true),
+		feedWorkerMeta:  lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")),
+		feedActionVerb:  lipgloss.NewStyle().Foreground(lipgloss.Color("#F3F4F6")).Bold(true),
+		feedPath:        lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Underline(true),
 		feedNoteTitle:   lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB")).Bold(true),
 		feedWarnTitle:   lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Bold(true),
 		feedErrorTitle:  lipgloss.NewStyle().Foreground(lipgloss.Color("#F3A8A8")).Bold(true),
@@ -1211,10 +1457,14 @@ func (m shellModel) composerState() shellComposerState {
 		})
 	}
 	if m.ui.WorkerPromptPending {
+		hint := "Waiting for the live worker response. New prompts stay paused until this turn settles."
+		if m.hostCanInterrupt() {
+			hint = "Waiting for the live worker response. Esc sends an interrupt to the live worker."
+		}
 		return applyExitCue(shellComposerState{
 			Label:       "Live worker",
 			Status:      "worker running",
-			Hint:        "Waiting for the live worker response. New prompts stay paused until output lands.",
+			Hint:        hint,
 			Placeholder: "Waiting for the live worker reply…",
 			Tone:        "caution",
 			SendMode:    "blocked",
@@ -1364,6 +1614,32 @@ func (m shellModel) shellStateEntry() *shellFeedEntry {
 	return nil
 }
 
+func (m shellModel) workingStateEntry() *shellFeedEntry {
+	if !m.ui.WorkerPromptPending && m.ui.PrimaryActionInFlight == nil {
+		return nil
+	}
+	startedAt := m.ui.LastWorkerPromptAt
+	if inflight := m.ui.PrimaryActionInFlight; inflight != nil && !inflight.StartedAt.IsZero() {
+		startedAt = inflight.StartedAt
+	}
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	elapsed := formatShellElapsed(time.Since(startedAt))
+	line := "Working (" + elapsed + ")"
+	if m.ui.WorkerInterruptRequested {
+		line = "Working (" + elapsed + " • interrupt sent)"
+	} else if m.hostCanInterrupt() && m.ui.PrimaryActionInFlight == nil {
+		line = "Working (" + elapsed + " • Esc to interrupt)"
+	}
+	return &shellFeedEntry{
+		Key:   "working",
+		Kind:  shellFeedWorking,
+		Title: "Working",
+		Body:  []string{line},
+	}
+}
+
 func shellWorkerStateLabel(snapshot Snapshot, ui UIState, host WorkerHost) string {
 	if ui.PrimaryActionInFlight != nil {
 		return "tuku step running"
@@ -1473,16 +1749,46 @@ func shellInitialViewportOffset(blocks []string, viewportHeight int) int {
 func shellFooterHint(state shellComposerState) string {
 	switch state.SendMode {
 	case "worker":
-		return "Enter send to worker  •  / commands  •  PgUp/PgDn scroll  •  Esc dismiss"
+		return "ready"
 	case "canonical":
-		return "Enter send via Tuku  •  / commands  •  PgUp/PgDn scroll  •  Esc dismiss"
+		return "canonical"
 	case "scratch":
-		return "Enter save note  •  / commands  •  PgUp/PgDn scroll  •  Esc dismiss"
+		return "scratch"
 	case "blocked":
-		return "/ commands  •  PgUp/PgDn scroll  •  Esc dismiss"
+		if state.Status == "worker running" && strings.Contains(strings.ToLower(state.Hint), "interrupt") {
+			return "worker active"
+		}
+		return "paused"
 	default:
-		return "/ commands  •  PgUp/PgDn scroll  •  Esc dismiss"
+		return "shell"
 	}
+}
+
+func (m shellModel) helpKeyMap() shellKeyMap {
+	keys := m.keys
+	state := m.composerState()
+	keys.Send.SetEnabled(false)
+	keys.Select.SetEnabled(false)
+	keys.Dismiss.SetEnabled(false)
+	keys.Interrupt.SetEnabled(false)
+
+	switch {
+	case m.overlayKind == shellOverlayCommands || m.overlayKind == shellOverlayModel:
+		keys.Move.SetEnabled(true)
+		keys.Select.SetEnabled(true)
+		keys.Dismiss.SetEnabled(true)
+	default:
+		keys.Move.SetEnabled(false)
+		switch state.SendMode {
+		case "worker", "canonical", "scratch":
+			keys.Send.SetEnabled(true)
+		}
+		if state.Status == "worker running" && m.hostCanInterrupt() {
+			keys.Interrupt.SetEnabled(true)
+		}
+	}
+
+	return keys
 }
 
 func shellFeedNoiseLine(line string) bool {
@@ -1500,17 +1806,21 @@ func shellFeedNoiseLine(line string) bool {
 
 func renderFeedEntry(entry shellFeedEntry, width int) string {
 	styles := newShellStyles()
+	switch entry.Kind {
+	case shellFeedUser:
+		return renderUserPromptEntry(styles, entry, width)
+	case shellFeedWorking:
+		return renderWorkingEntry(styles, entry, width, styles.feedWorkerMeta.Render("•"))
+	}
 	bodyStyle := styles.feedBody
 	borderColor := lipgloss.Color("#374151")
 	labelTone := "muted"
 	contentWidth := max(8, width-2)
 	topPadding := 0
 	switch entry.Kind {
-	case shellFeedUser:
-		borderColor = lipgloss.Color("#9CA3AF")
-		labelTone = "accent"
 	case shellFeedWorker:
 		borderColor = lipgloss.Color("#4B5563")
+		topPadding = 1
 	case shellFeedTuku, shellFeedIntro:
 		borderColor = lipgloss.Color("#4B5563")
 		topPadding = 1
@@ -1526,15 +1836,19 @@ func renderFeedEntry(entry shellFeedEntry, width int) string {
 	if topPadding > 0 {
 		lines = append(lines, "")
 	}
-	for _, raw := range entry.Body {
-		var wrapped []string
-		if entry.Preformatted {
-			wrapped = wrapOutputLine(raw, contentWidth)
-		} else {
-			wrapped = wrapText(raw, contentWidth)
-		}
-		for _, line := range wrapped {
-			lines = append(lines, bodyStyle.Render(line))
+	if entry.Kind == shellFeedWorker {
+		lines = append(lines, renderWorkerEntryLines(styles, entry.Body, contentWidth)...)
+	} else {
+		for _, raw := range entry.Body {
+			var wrapped []string
+			if entry.Preformatted {
+				wrapped = wrapOutputLine(raw, contentWidth)
+			} else {
+				wrapped = wrapText(raw, contentWidth)
+			}
+			for _, line := range wrapped {
+				lines = append(lines, bodyStyle.Render(line))
+			}
 		}
 	}
 	return lipgloss.NewStyle().
@@ -1543,6 +1857,324 @@ func renderFeedEntry(entry shellFeedEntry, width int) string {
 		PaddingLeft(1).
 		Width(width).
 		Render(strings.Join(lines, "\n"))
+}
+
+func renderUserPromptEntry(styles shellStyles, entry shellFeedEntry, width int) string {
+	contentWidth := max(8, width-4)
+	lines := make([]string, 0, len(entry.Body))
+	for _, raw := range entry.Body {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		for idx, part := range wrapOutputLine(raw, contentWidth) {
+			prefix := "› "
+			if idx > 0 {
+				prefix = "  "
+			}
+			lines = append(lines, prefix+part)
+		}
+	}
+	for idx := range lines {
+		lines[idx] = ansiPadToWidth(styles.feedUserStrip.Render(lines[idx]), width)
+	}
+	return lipgloss.NewStyle().Width(width).Render(strings.Join(lines, "\n"))
+}
+
+func renderWorkingEntry(styles shellStyles, entry shellFeedEntry, width int, spinnerView string) string {
+	if len(entry.Body) == 0 {
+		return ""
+	}
+	line := strings.TrimSpace(entry.Body[0])
+	if line == "" {
+		return ""
+	}
+	if strings.TrimSpace(spinnerView) == "" {
+		spinnerView = styles.feedWorkerMeta.Render("•")
+	}
+	rendered := spinnerView + " " + styles.feedWorkerTitle.Render("Working") + styles.feedWorkerMeta.Render(strings.TrimPrefix(line, "Working"))
+	return lipgloss.NewStyle().Width(width).Render(rendered)
+}
+
+type workerRenderedLineKind int
+
+const (
+	workerRenderedBlank workerRenderedLineKind = iota
+	workerRenderedParagraph
+	workerRenderedHeader
+	workerRenderedAction
+	workerRenderedDetail
+	workerRenderedBullet
+)
+
+type workerRenderedLine struct {
+	Kind workerRenderedLineKind
+	Text string
+}
+
+func renderWorkerEntryLines(styles shellStyles, lines []string, width int) []string {
+	shaped := shapeWorkerTranscriptLines(lines)
+	out := make([]string, 0, len(shaped)+4)
+	previousKind := workerRenderedBlank
+	for _, line := range shaped {
+		if line.Kind == workerRenderedBlank {
+			if len(out) > 0 && out[len(out)-1] != "" {
+				out = append(out, "")
+			}
+			previousKind = workerRenderedBlank
+			continue
+		}
+		if workerNeedsBreathingRoom(previousKind, line.Kind, len(out)) && out[len(out)-1] != "" {
+			out = append(out, "")
+		}
+		out = append(out, renderWorkerLine(styles, line, width)...)
+		previousKind = line.Kind
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return out
+}
+
+func shapeWorkerTranscriptLines(lines []string) []workerRenderedLine {
+	if len(lines) == 0 {
+		return nil
+	}
+	out := make([]workerRenderedLine, 0, len(lines))
+	previousKind := workerRenderedBlank
+	for _, raw := range lines {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			out = append(out, workerRenderedLine{Kind: workerRenderedBlank})
+			previousKind = workerRenderedBlank
+			continue
+		}
+		bulletBody, isBullet := extractBulletText(trimmed)
+		switch {
+		case (previousKind == workerRenderedAction || previousKind == workerRenderedBullet) && (strings.HasPrefix(raw, "  ") || strings.HasPrefix(raw, "\t")):
+			out = append(out, workerRenderedLine{Kind: workerRenderedDetail, Text: trimmed})
+			previousKind = workerRenderedDetail
+		case isSectionHeaderLine(trimmed):
+			out = append(out, workerRenderedLine{Kind: workerRenderedHeader, Text: normalizeSectionHeader(trimmed)})
+			previousKind = workerRenderedHeader
+		case isActionTranscriptLine(trimmed):
+			out = append(out, workerRenderedLine{Kind: workerRenderedAction, Text: trimmed})
+			previousKind = workerRenderedAction
+		case isBullet:
+			out = append(out, workerRenderedLine{Kind: workerRenderedBullet, Text: bulletBody})
+			previousKind = workerRenderedBullet
+		default:
+			out = append(out, workerRenderedLine{Kind: workerRenderedParagraph, Text: trimmed})
+			previousKind = workerRenderedParagraph
+		}
+	}
+	return out
+}
+
+func renderWorkerLine(styles shellStyles, line workerRenderedLine, width int) []string {
+	switch line.Kind {
+	case workerRenderedHeader:
+		return renderWorkerWrappedLine(styles.feedWorkerTitle.Render(line.Text), width)
+	case workerRenderedAction:
+		verb, rest := splitWorkerAction(line.Text)
+		prefix := styles.feedWorkerMeta.Render("• ") + styles.feedActionVerb.Render(verb) + " "
+		return wrapStyledWorkerTextWithPrefix(styles, prefix, lipgloss.Width("• "+verb+" "), rest, width)
+	case workerRenderedDetail:
+		return wrapStyledWorkerText(styles, "└ ", line.Text, width)
+	case workerRenderedBullet:
+		return wrapStyledWorkerText(styles, "• ", line.Text, width)
+	default:
+		return wrapStyledWorkerText(styles, "", line.Text, width)
+	}
+}
+
+func renderWorkerWrappedLine(line string, width int) []string {
+	if width <= 0 {
+		return []string{line}
+	}
+	return []string{ansiTruncate(line, width)}
+}
+
+func wrapStyledWorkerText(styles shellStyles, prefix string, text string, width int) []string {
+	return wrapStyledWorkerTextWithPrefix(styles, styles.feedBody.Render(prefix), lipgloss.Width(prefix), text, width)
+}
+
+func wrapStyledWorkerTextWithPrefix(styles shellStyles, styledPrefix string, prefixWidth int, text string, width int) []string {
+	if width <= 0 {
+		return []string{styledPrefix + styleFileReferences(styles, text)}
+	}
+	available := max(1, width-prefixWidth)
+	parts := wrapText(text, available)
+	out := make([]string, 0, len(parts))
+	for idx, part := range parts {
+		linePrefix := styledPrefix
+		if idx > 0 {
+			linePrefix = strings.Repeat(" ", prefixWidth)
+		}
+		out = append(out, linePrefix+styles.feedBody.Render(styleFileReferences(styles, part)))
+	}
+	return out
+}
+
+func workerNeedsBreathingRoom(previous workerRenderedLineKind, current workerRenderedLineKind, renderedCount int) bool {
+	if renderedCount == 0 {
+		return false
+	}
+	if previous == workerRenderedBlank || current == workerRenderedBlank {
+		return false
+	}
+	if current == workerRenderedHeader || previous == workerRenderedHeader {
+		return true
+	}
+	if previous == workerRenderedAction && current == workerRenderedAction {
+		return true
+	}
+	if (previous == workerRenderedParagraph && current != workerRenderedDetail) || (current == workerRenderedParagraph && previous != workerRenderedDetail) {
+		return true
+	}
+	return false
+}
+
+func splitWorkerAction(line string) (string, string) {
+	parts := strings.Fields(line)
+	if len(parts) == 0 {
+		return "", ""
+	}
+	verb := parts[0]
+	if len(parts) == 1 {
+		return verb, ""
+	}
+	return verb, strings.TrimSpace(strings.TrimPrefix(line, verb))
+}
+
+func isActionTranscriptLine(line string) bool {
+	for _, prefix := range []string{
+		"Explored ",
+		"Read ",
+		"Opened ",
+		"Ran ",
+		"Waited ",
+		"Edited ",
+		"Updated ",
+		"Wrote ",
+		"Searched ",
+		"Checked ",
+		"Inspected ",
+	} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSectionHeaderLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "#") {
+		return true
+	}
+	if strings.HasSuffix(trimmed, ":") && runeLen(trimmed) <= 56 && !strings.Contains(trimmed, ".") {
+		return true
+	}
+	return false
+}
+
+func normalizeSectionHeader(line string) string {
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.TrimLeft(trimmed, "#")
+	return strings.TrimSpace(trimmed)
+}
+
+func extractBulletText(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	switch {
+	case strings.HasPrefix(trimmed, "- "):
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, "- ")), true
+	case strings.HasPrefix(trimmed, "* "):
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, "* ")), true
+	case strings.HasPrefix(trimmed, "• "):
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, "• ")), true
+	}
+	if len(trimmed) >= 3 && trimmed[0] >= '0' && trimmed[0] <= '9' {
+		for idx := 1; idx < len(trimmed); idx++ {
+			if trimmed[idx] == '.' && idx+1 < len(trimmed) && trimmed[idx+1] == ' ' {
+				return strings.TrimSpace(trimmed[idx+2:]), true
+			}
+			if trimmed[idx] < '0' || trimmed[idx] > '9' {
+				break
+			}
+		}
+	}
+	return "", false
+}
+
+var workerFileRefPattern = regexp.MustCompile(`^[A-Za-z0-9_./-]+(?::\d+(?::\d+)?)?$`)
+
+func styleFileReferences(styles shellStyles, line string) string {
+	if strings.TrimSpace(line) == "" {
+		return line
+	}
+	parts := strings.Fields(line)
+	if len(parts) == 0 {
+		return line
+	}
+	styled := make([]string, 0, len(parts))
+	for _, token := range parts {
+		styled = append(styled, styleFileReferenceToken(styles, token))
+	}
+	return strings.Join(styled, " ")
+}
+
+func styleFileReferenceToken(styles shellStyles, token string) string {
+	if token == "" {
+		return token
+	}
+	leading, core, trailing := splitTokenPunctuation(token)
+	if !looksLikeFileReference(core) {
+		return token
+	}
+	return leading + styles.feedPath.Render(core) + trailing
+}
+
+func splitTokenPunctuation(token string) (string, string, string) {
+	start := 0
+	for start < len(token) && strings.ContainsRune(`"'([{<`, rune(token[start])) {
+		start++
+	}
+	end := len(token)
+	for end > start && strings.ContainsRune(`"'.,;)]}>`, rune(token[end-1])) {
+		end--
+	}
+	return token[:start], token[start:end], token[end:]
+}
+
+func looksLikeFileReference(token string) bool {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return false
+	}
+	if strings.HasPrefix(token, "http://") || strings.HasPrefix(token, "https://") {
+		return false
+	}
+	if !workerFileRefPattern.MatchString(token) {
+		return false
+	}
+	base := token
+	if idx := strings.Index(base, ":"); idx >= 0 {
+		base = base[:idx]
+	}
+	if strings.EqualFold(base, "go.mod") || strings.EqualFold(base, "go.sum") || strings.EqualFold(base, "README.md") || strings.EqualFold(base, "AGENTS.md") {
+		return true
+	}
+	if strings.Contains(base, "/") {
+		return strings.Contains(filepath.Base(base), ".")
+	}
+	if strings.HasPrefix(base, "./") || strings.HasPrefix(base, "../") || strings.HasPrefix(base, "/") {
+		return true
+	}
+	return strings.Contains(filepath.Base(base), ".")
 }
 
 func overlayWindow(total int, selected int, limit int) (int, int) {
@@ -1787,6 +2419,10 @@ func shellRegistryTickCmd() tea.Cmd {
 	return tea.Tick(shellRegistryTickInterval, func(time.Time) tea.Msg { return shellRegistryTickMsg{} })
 }
 
+func shellWorkingTickCmd() tea.Cmd {
+	return tea.Tick(shellWorkingTickInterval, func(time.Time) tea.Msg { return shellWorkingTickMsg{} })
+}
+
 func shellTranscriptTickCmd() tea.Cmd {
 	return tea.Tick(shellTranscriptTickInterval, func(time.Time) tea.Msg { return shellTranscriptTickMsg{} })
 }
@@ -1837,7 +2473,7 @@ func (m *shellModel) pushError(title string, detail string) {
 
 func (m *shellModel) appendLocalEntry(entry shellFeedEntry) {
 	m.localEntries = append(m.localEntries, entry)
-	if entry.Key != "" {
+	if entry.Key != "" && m.followLatest {
 		m.scrollToEntry = entry.Key
 	}
 }
@@ -1868,6 +2504,96 @@ func RenderPreview(snapshot Snapshot, ui UIState, host WorkerHost, width int, he
 
 func (m *shellModel) exitConfirmActive() bool {
 	return !m.exitConfirmUntil.IsZero() && time.Now().UTC().Before(m.exitConfirmUntil)
+}
+
+type interruptibleWorkerHost interface {
+	CanInterrupt() bool
+	Interrupt() bool
+}
+
+type authoritativeWorkerTurnHost interface {
+	WorkerTurnActive() bool
+}
+
+func (m *shellModel) hostCanInterrupt() bool {
+	host, ok := m.host.(interruptibleWorkerHost)
+	return ok && host.CanInterrupt()
+}
+
+func (m *shellModel) requestWorkerInterrupt() bool {
+	host, ok := m.host.(interruptibleWorkerHost)
+	if !ok || !host.CanInterrupt() {
+		return false
+	}
+	if !host.Interrupt() {
+		return false
+	}
+	m.ui.WorkerInterruptRequested = true
+	m.pushWarning("Interrupt", []string{
+		"Interrupt signal sent to the live worker.",
+		"Tuku will only clear the running state when the host/runtime visibly settles.",
+	})
+	return true
+}
+
+func (m *shellModel) workerTurnStillActive(status HostStatus) bool {
+	if !m.ui.WorkerPromptPending {
+		return false
+	}
+	if host, ok := m.host.(authoritativeWorkerTurnHost); ok {
+		return host.WorkerTurnActive()
+	}
+	if !m.ui.WorkerResponseStarted {
+		return true
+	}
+	if status.LastOutputAt.IsZero() || (!m.ui.LastWorkerPromptAt.IsZero() && status.LastOutputAt.Before(m.ui.LastWorkerPromptAt)) {
+		return false
+	}
+	return time.Since(status.LastOutputAt) <= shellWorkerIdleGrace
+}
+
+func (m *shellModel) clearWorkerTurnState() {
+	if m.ui.WorkerPromptPending {
+		m.commitCurrentWorkerStream()
+	}
+	m.ui.WorkerPromptPending = false
+	m.ui.WorkerResponseStarted = false
+	m.ui.WorkerInterruptRequested = false
+	m.spinnerRunning = false
+}
+
+func (m *shellModel) syncFollowLatest() {
+	m.followLatest = m.viewport.AtBottom()
+}
+
+func (m *shellModel) spinnerActive() bool {
+	return m.ui.WorkerPromptPending || m.ui.PrimaryActionInFlight != nil
+}
+
+func (m *shellModel) ensureSpinnerTick() tea.Cmd {
+	if !m.spinnerActive() || m.spinnerRunning {
+		return nil
+	}
+	m.spinnerRunning = true
+	return m.spinner.Tick
+}
+
+func formatShellElapsed(elapsed time.Duration) string {
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	totalSeconds := int(elapsed / time.Second)
+	hours := totalSeconds / 3600
+	minutes := (totalSeconds % 3600) / 60
+	seconds := totalSeconds % 60
+	switch {
+	case hours > 0:
+		return fmt.Sprintf("%dh %02dm %02ds", hours, minutes, seconds)
+	case minutes > 0:
+		return fmt.Sprintf("%dm %02ds", minutes, seconds)
+	default:
+		return fmt.Sprintf("%ds", seconds)
+	}
 }
 
 func (m *shellModel) basePromptEntries() []shellFeedEntry {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -100,6 +101,132 @@ func TestMessageCreatesIntentAndBriefAndProof(t *testing.T) {
 	}
 	if !hasEvent(events, proof.EventBriefCreated) {
 		t.Fatal("expected brief created event")
+	}
+}
+
+func TestMessageTaskPromptTriageSharpensVagueBugRequest(t *testing.T) {
+	repoRoot := t.TempDir()
+	files := map[string]string{
+		"web/src/components/ProfileCard.tsx": "export function ProfileCard() {\n  return <section className=\"profile-card\">UI bug target</section>\n}\n",
+		"web/src/pages/Dashboard.tsx":        "export default function Dashboard() {\n  return <div className=\"dashboard-screen\">dashboard ui layout</div>\n}\n",
+		"internal/server/router.go":          "package server\n\nfunc RegisterRoutes() {}\n",
+	}
+	for rel, content := range files {
+		abs := filepath.Join(repoRoot, rel)
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", abs, err)
+		}
+		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", abs, err)
+		}
+	}
+
+	store := newTestStore(t)
+	provider := &staticAnchorProvider{snapshot: anchorgit.Snapshot{RepoRoot: repoRoot, Branch: "main", HeadSHA: "head-ui", WorkingTreeDirty: false, CapturedAt: time.Unix(1700001100, 0).UTC()}}
+	coord := newTestCoordinator(t, store, provider, newFakeAdapterSuccess())
+
+	start, err := coord.StartTask(context.Background(), "Fix frontend defect", repoRoot)
+	if err != nil {
+		t.Fatalf("start task: %v", err)
+	}
+	if _, err := coord.MessageTask(context.Background(), string(start.TaskID), "fix the UI bug"); err != nil {
+		t.Fatalf("message task: %v", err)
+	}
+
+	briefID := mustCurrentBriefID(t, store, start.TaskID)
+	gotBrief, err := store.Briefs().Get(briefID)
+	if err != nil {
+		t.Fatalf("get brief: %v", err)
+	}
+	if !gotBrief.PromptTriage.Applied {
+		t.Fatalf("expected prompt triage to apply, got %+v", gotBrief.PromptTriage)
+	}
+	if gotBrief.PromptTriage.FilesScanned < 2 {
+		t.Fatalf("expected files scanned metric, got %+v", gotBrief.PromptTriage)
+	}
+	if len(gotBrief.PromptTriage.CandidateFiles) == 0 {
+		t.Fatalf("expected ranked candidate files, got %+v", gotBrief.PromptTriage)
+	}
+	if !containsLine(gotBrief.PromptTriage.CandidateFiles, "web/src/components/ProfileCard.tsx") && !containsLine(gotBrief.PromptTriage.CandidateFiles, "web/src/pages/Dashboard.tsx") {
+		t.Fatalf("expected frontend candidate file, got %+v", gotBrief.PromptTriage.CandidateFiles)
+	}
+	if !strings.Contains(gotBrief.ScopeSummary, "repo-local triage") {
+		t.Fatalf("expected sharpened scope summary, got %q", gotBrief.ScopeSummary)
+	}
+	if containsLine(gotBrief.AmbiguityFlags, "scope_not_explicit") {
+		t.Fatalf("expected scope ambiguity to be cleared, got %+v", gotBrief.AmbiguityFlags)
+	}
+	if gotBrief.PromptTriage.SearchSpaceTokenEstimate <= 0 || gotBrief.PromptTriage.SelectedContextTokenEstimate <= 0 {
+		t.Fatalf("expected token estimates, got %+v", gotBrief.PromptTriage)
+	}
+	if gotBrief.TaskMemoryID == "" {
+		t.Fatalf("expected task memory id on brief, got %+v", gotBrief)
+	}
+	if !gotBrief.MemoryCompression.Applied || gotBrief.MemoryCompression.FullHistoryTokenEstimate <= 0 || gotBrief.MemoryCompression.ResumePromptTokenEstimate <= 0 {
+		t.Fatalf("expected brief memory compression metrics, got %+v", gotBrief.MemoryCompression)
+	}
+	if gotBrief.BenchmarkID == "" {
+		t.Fatalf("expected benchmark id on brief, got %+v", gotBrief)
+	}
+	if gotBrief.PromptIR.NormalizedTaskType == "" || len(gotBrief.PromptIR.RankedTargets) == 0 || strings.TrimSpace(gotBrief.PromptIR.Confidence.Level) == "" {
+		t.Fatalf("expected prompt ir packet on brief, got %+v", gotBrief.PromptIR)
+	}
+
+	taskMemory, err := store.TaskMemories().Get(gotBrief.TaskMemoryID)
+	if err != nil {
+		t.Fatalf("get task memory: %v", err)
+	}
+	if taskMemory.BriefID != gotBrief.BriefID || taskMemory.TaskID != start.TaskID {
+		t.Fatalf("unexpected task memory linkage: %+v", taskMemory)
+	}
+	if taskMemory.Summary == "" || len(taskMemory.CandidateFiles) == 0 || taskMemory.ResumePromptTokenEstimate <= 0 {
+		t.Fatalf("expected populated task memory snapshot, got %+v", taskMemory)
+	}
+	if !containsLine(taskMemory.CandidateFiles, "web/src/components/ProfileCard.tsx") && !containsLine(taskMemory.CandidateFiles, "web/src/pages/Dashboard.tsx") {
+		t.Fatalf("expected task memory candidate file from triage, got %+v", taskMemory.CandidateFiles)
+	}
+	benchmarkRecord, err := store.Benchmarks().Get(gotBrief.BenchmarkID)
+	if err != nil {
+		t.Fatalf("get benchmark: %v", err)
+	}
+	if benchmarkRecord.BriefID != gotBrief.BriefID || benchmarkRecord.DispatchPromptTokenEstimate <= 0 || benchmarkRecord.FilesScanned <= 0 {
+		t.Fatalf("expected populated benchmark record, got %+v", benchmarkRecord)
+	}
+	if benchmarkRecord.RankedTargetCount < len(gotBrief.PromptIR.RankedTargets) {
+		t.Fatalf("expected ranked target count to cover prompt ir, got %+v", benchmarkRecord)
+	}
+
+	readBrief, err := coord.ReadGeneratedBrief(context.Background(), ReadGeneratedBriefRequest{TaskID: string(start.TaskID)})
+	if err != nil {
+		t.Fatalf("read generated brief: %v", err)
+	}
+	if readBrief.CompiledBrief == nil || readBrief.CompiledBrief.PromptTriage == nil || !readBrief.CompiledBrief.PromptTriage.Applied {
+		t.Fatalf("expected compiled brief prompt triage projection, got %+v", readBrief.CompiledBrief)
+	}
+	if readBrief.CompiledBrief.MemoryCompression == nil || !readBrief.CompiledBrief.MemoryCompression.Applied || readBrief.CompiledBrief.MemoryCompression.ResumePromptTokenEstimate <= 0 {
+		t.Fatalf("expected compiled brief memory compression projection, got %+v", readBrief.CompiledBrief)
+	}
+	if readBrief.CompiledBrief.PromptIR == nil || len(readBrief.CompiledBrief.PromptIR.RankedTargets) == 0 {
+		t.Fatalf("expected compiled brief prompt ir projection, got %+v", readBrief.CompiledBrief)
+	}
+
+	benchmarkView, err := coord.ReadBenchmark(context.Background(), ReadBenchmarkRequest{TaskID: string(start.TaskID)})
+	if err != nil {
+		t.Fatalf("read benchmark: %v", err)
+	}
+	if benchmarkView.Benchmark == nil || benchmarkView.Benchmark.BenchmarkID != gotBrief.BenchmarkID {
+		t.Fatalf("expected benchmark read projection, got %+v", benchmarkView)
+	}
+	if benchmarkView.CompiledBrief == nil || benchmarkView.CompiledBrief.PromptIR == nil {
+		t.Fatalf("expected compiled brief in benchmark view, got %+v", benchmarkView)
+	}
+
+	events, err := store.Proofs().ListByTask(start.TaskID, 40)
+	if err != nil {
+		t.Fatalf("list proof events: %v", err)
+	}
+	if !hasEvent(events, proof.EventTaskMemoryUpdated) {
+		t.Fatalf("expected task memory updated proof event, got %+v", events)
 	}
 }
 
@@ -523,6 +650,20 @@ func TestRunRealSuccessCompletesAndRecordsEvidence(t *testing.T) {
 	if len(runRec.ValidationSignals) == 0 {
 		t.Fatal("expected durable validation signal evidence")
 	}
+	briefRec, err := store.Briefs().Get(runRec.BriefID)
+	if err != nil {
+		t.Fatalf("get brief for benchmark: %v", err)
+	}
+	benchmarkRecord, err := store.Benchmarks().Get(briefRec.BenchmarkID)
+	if err != nil {
+		t.Fatalf("get benchmark after run: %v", err)
+	}
+	if benchmarkRecord.RunID != res.RunID || len(benchmarkRecord.ChangedFiles) == 0 {
+		t.Fatalf("expected benchmark run linkage and changed files, got %+v", benchmarkRecord)
+	}
+	if benchmarkRecord.CandidateRecallAt3 < 0 || benchmarkRecord.CandidateRecallAt3 > 1 {
+		t.Fatalf("expected candidate recall in [0,1], got %+v", benchmarkRecord)
+	}
 
 	events, err := store.Proofs().ListByTask(taskID, 80)
 	if err != nil {
@@ -738,6 +879,35 @@ func TestRunDurablyRunningBeforeWorkerExecute(t *testing.T) {
 	}
 	if res.RunStatus != rundomain.StatusCompleted {
 		t.Fatalf("expected completed final status, got %s", res.RunStatus)
+	}
+}
+
+func TestStatusShowsActiveExecutionWhileWorkerIsStillRunning(t *testing.T) {
+	store := newTestStore(t)
+	adapter := newFakeAdapterSuccess()
+	var coord *Coordinator
+	var observedStatus StatusTaskResult
+	adapter.onExecute = func(req adapter_contract.ExecutionRequest) {
+		status, err := coord.StatusTask(context.Background(), string(req.TaskID))
+		if err != nil {
+			t.Fatalf("status during execute: %v", err)
+		}
+		observedStatus = status
+	}
+	coord = newTestCoordinator(t, store, defaultAnchor(), adapter)
+	taskID := setupTaskWithBrief(t, coord)
+
+	if _, err := coord.RunTask(context.Background(), RunTaskRequest{TaskID: string(taskID), Action: "start", Mode: "real"}); err != nil {
+		t.Fatalf("run start real: %v", err)
+	}
+	if observedStatus.RequiredNextOperatorAction != OperatorActionWaitForLocalRun {
+		t.Fatalf("expected wait-for-run required-next action, got %s", observedStatus.RequiredNextOperatorAction)
+	}
+	if observedStatus.LocalRunFinalizationState != LocalRunFinalizationActiveExecution {
+		t.Fatalf("expected active execution local run state, got %s", observedStatus.LocalRunFinalizationState)
+	}
+	if observedStatus.RecoveryClass != RecoveryClassRunInProgress {
+		t.Fatalf("expected run-in-progress recovery class, got %s", observedStatus.RecoveryClass)
 	}
 }
 
@@ -1215,11 +1385,14 @@ func TestRunTaskKeepsDurableRunningStateWhenFinalizationFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list proofs after: %v", err)
 	}
-	if len(eventsAfter) != len(eventsBefore)+2 {
-		t.Fatalf("expected only stage-1 run start events to persist: before=%d after=%d", len(eventsBefore), len(eventsAfter))
+	if len(eventsAfter) != len(eventsBefore)+4 {
+		t.Fatalf("expected stage-1 run start and policy events to persist: before=%d after=%d", len(eventsBefore), len(eventsAfter))
 	}
 	if !hasEvent(eventsAfter, proof.EventWorkerRunStarted) {
 		t.Fatal("expected durable worker run started event from stage-1 commit")
+	}
+	if !hasEvent(eventsAfter, proof.EventPolicyDecisionRequested) || !hasEvent(eventsAfter, proof.EventPolicyDecisionResolved) {
+		t.Fatal("expected durable policy decision proof from stage-1 commit")
 	}
 	if hasEvent(eventsAfter, proof.EventWorkerOutputCaptured) {
 		t.Fatal("worker output captured should rollback when finalization transaction fails")
@@ -4163,6 +4336,14 @@ func (s *faultInjectedStore) ContextPacks() storage.ContextPackStore {
 	return s.base.ContextPacks()
 }
 
+func (s *faultInjectedStore) TaskMemories() storage.TaskMemoryStore {
+	return s.base.TaskMemories()
+}
+
+func (s *faultInjectedStore) Benchmarks() storage.BenchmarkStore {
+	return s.base.Benchmarks()
+}
+
 func (s *faultInjectedStore) PolicyDecisions() storage.PolicyDecisionStore {
 	return s.base.PolicyDecisions()
 }
@@ -4232,6 +4413,14 @@ func (s *txCountingStore) RecoveryActions() storage.RecoveryActionStore {
 
 func (s *txCountingStore) ContextPacks() storage.ContextPackStore {
 	return s.base.ContextPacks()
+}
+
+func (s *txCountingStore) TaskMemories() storage.TaskMemoryStore {
+	return s.base.TaskMemories()
+}
+
+func (s *txCountingStore) Benchmarks() storage.BenchmarkStore {
+	return s.base.Benchmarks()
 }
 
 func (s *txCountingStore) PolicyDecisions() storage.PolicyDecisionStore {

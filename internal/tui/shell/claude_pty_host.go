@@ -191,6 +191,32 @@ func (h *ClaudePTYHost) CanAcceptInput() bool {
 	return h.status.State == HostStateLive && h.ptyFile != nil && h.status.InputLive
 }
 
+func (h *ClaudePTYHost) CanInterrupt() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.status.State == HostStateLive && h.status.InputLive && h.ptyFile != nil
+}
+
+func (h *ClaudePTYHost) Interrupt() bool {
+	h.mu.Lock()
+	ptmx := h.ptyFile
+	live := h.status.State == HostStateLive && h.status.InputLive
+	if live {
+		h.status.Note = "interrupt signal sent to claude"
+		h.status.StateChangedAt = time.Now().UTC()
+	}
+	h.mu.Unlock()
+	if !live || ptmx == nil {
+		return false
+	}
+	if _, err := ptmx.Write([]byte{3}); err != nil {
+		h.recordActivity("worker interrupt failed")
+		return false
+	}
+	h.recordActivity("worker interrupt signal sent")
+	return true
+}
+
 func (h *ClaudePTYHost) WriteInput(data []byte) bool {
 	h.mu.Lock()
 	ptmx := h.ptyFile

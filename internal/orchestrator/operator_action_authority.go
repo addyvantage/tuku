@@ -11,6 +11,7 @@ type OperatorAction string
 
 const (
 	OperatorActionNone                     OperatorAction = "NONE"
+	OperatorActionWaitForLocalRun          OperatorAction = "WAIT_FOR_LOCAL_RUN"
 	OperatorActionLocalMessageMutation     OperatorAction = "LOCAL_MESSAGE_MUTATION"
 	OperatorActionCreateCheckpoint         OperatorAction = "CREATE_CHECKPOINT"
 	OperatorActionStartLocalRun            OperatorAction = "START_LOCAL_RUN"
@@ -107,6 +108,8 @@ func deriveOperatorActionAuthoritySet(
 	}
 
 	switch recovery.RecoveryClass {
+	case RecoveryClassRunInProgress:
+		setActionBlocked(&set, OperatorActionStartLocalRun, runStartBlockedCanonical(recovery), ActiveBranchClassNotApplicable, "")
 	case RecoveryClassReadyNextRun:
 		setActionAllowed(&set, OperatorActionStartLocalRun, localRunStartReason(assessment, recovery))
 	case RecoveryClassInterruptedRunRecoverable:
@@ -204,6 +207,8 @@ func operatorActionFromRecovery(recovery RecoveryAssessment) OperatorAction {
 	switch recovery.RecommendedAction {
 	case RecoveryActionStartNextRun:
 		return OperatorActionStartLocalRun
+	case RecoveryActionWaitForLocalRun:
+		return OperatorActionWaitForLocalRun
 	case RecoveryActionResumeInterrupted:
 		return OperatorActionResumeInterruptedLineage
 	case RecoveryActionLaunchAcceptedHandoff:

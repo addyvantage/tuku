@@ -72,19 +72,28 @@ type ShellSnapshotResult struct {
 }
 
 type ShellBriefSummary struct {
-	BriefID                common.BriefID
-	Posture                brief.Posture
-	Objective              string
-	RequestedOutcome       string
-	NormalizedAction       string
-	ScopeSummary           string
-	Constraints            []string
-	DoneCriteria           []string
-	AmbiguityFlags         []string
-	ClarificationQuestions []string
-	RequiresClarification  bool
-	WorkerFraming          string
+	BriefID                 common.BriefID
+	Posture                 brief.Posture
+	Objective               string
+	RequestedOutcome        string
+	NormalizedAction        string
+	ScopeSummary            string
+	Constraints             []string
+	DoneCriteria            []string
+	AmbiguityFlags          []string
+	ClarificationQuestions  []string
+	RequiresClarification   bool
+	WorkerFraming           string
 	BoundedEvidenceMessages int
+	PromptTargets           []string
+	ValidatorCommands       []string
+	ConfidenceLevel         string
+	ConfidenceReason        string
+	EstimatedTokenSavings   int
+	DispatchPromptTokens    int
+	StructuredPromptTokens  int
+	DefaultSerializer       string
+	StructuredCheaper       bool
 }
 
 type ShellRunSummary struct {
@@ -360,20 +369,43 @@ func (c *Coordinator) ShellSnapshotTask(ctx context.Context, taskID string) (She
 	if b, ok, err := c.shellBrief(id, caps.CurrentBriefID); err != nil {
 		return ShellSnapshotResult{}, err
 	} else if ok {
+		estimatedSavings := 0
+		dispatchPromptTokens := 0
+		structuredPromptTokens := 0
+		defaultSerializer := ""
+		structuredCheaper := false
+		if benchmarkRecord, err := c.loadBenchmarkForTask(id, b.BenchmarkID); err != nil {
+			return ShellSnapshotResult{}, err
+		} else if benchmarkRecord != nil {
+			estimatedSavings = benchmarkRecord.EstimatedTokenSavings
+			dispatchPromptTokens = benchmarkRecord.DispatchPromptTokenEstimate
+			structuredPromptTokens = benchmarkRecord.StructuredPromptTokenEstimate
+			defaultSerializer = benchmarkRecord.DefaultSerializer
+			structuredCheaper = benchmarkRecord.StructuredCheaper
+		}
 		result.Brief = &ShellBriefSummary{
-			BriefID:                b.BriefID,
-			Posture:                b.Posture,
-			Objective:              b.Objective,
-			RequestedOutcome:       b.RequestedOutcome,
-			NormalizedAction:       b.NormalizedAction,
-			ScopeSummary:           b.ScopeSummary,
-			Constraints:            append([]string{}, b.Constraints...),
-			DoneCriteria:           append([]string{}, b.DoneCriteria...),
-			AmbiguityFlags:         append([]string{}, b.AmbiguityFlags...),
-			ClarificationQuestions: append([]string{}, b.ClarificationQuestions...),
-			RequiresClarification:  b.RequiresClarification,
-			WorkerFraming:          b.WorkerFraming,
+			BriefID:                 b.BriefID,
+			Posture:                 b.Posture,
+			Objective:               b.Objective,
+			RequestedOutcome:        b.RequestedOutcome,
+			NormalizedAction:        b.NormalizedAction,
+			ScopeSummary:            b.ScopeSummary,
+			Constraints:             append([]string{}, b.Constraints...),
+			DoneCriteria:            append([]string{}, b.DoneCriteria...),
+			AmbiguityFlags:          append([]string{}, b.AmbiguityFlags...),
+			ClarificationQuestions:  append([]string{}, b.ClarificationQuestions...),
+			RequiresClarification:   b.RequiresClarification,
+			WorkerFraming:           b.WorkerFraming,
 			BoundedEvidenceMessages: b.BoundedEvidenceMessages,
+			PromptTargets:           append([]string{}, promptIRTargetLabels(b.PromptIR.RankedTargets, 4)...),
+			ValidatorCommands:       append([]string{}, b.PromptIR.ValidatorPlan.Commands...),
+			ConfidenceLevel:         b.PromptIR.Confidence.Level,
+			ConfidenceReason:        b.PromptIR.Confidence.Reason,
+			EstimatedTokenSavings:   estimatedSavings,
+			DispatchPromptTokens:    dispatchPromptTokens,
+			StructuredPromptTokens:  structuredPromptTokens,
+			DefaultSerializer:       defaultSerializer,
+			StructuredCheaper:       structuredCheaper,
 		}
 	}
 

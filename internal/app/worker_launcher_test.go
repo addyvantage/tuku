@@ -7,26 +7,34 @@ import (
 	"testing"
 	"time"
 
+	"tuku/internal/domain/provider"
 	"tuku/internal/ipc"
 	tukushell "tuku/internal/tui/shell"
 )
 
 func TestPrimaryWorkerLauncherDefaultsToCodexOnFirstRun(t *testing.T) {
-	model := newPrimaryWorkerLauncherModel(tukushell.WorkerPreferenceAuto)
+	model := newPrimaryWorkerLauncherModel(primaryWorkerSelectionContext{Remembered: tukushell.WorkerPreferenceAuto})
 	if got := model.options[model.selected].Preference; got != tukushell.WorkerPreferenceCodex {
 		t.Fatalf("expected first-run default to codex, got %q", got)
 	}
 }
 
 func TestPrimaryWorkerLauncherUsesRememberedWorkerAsDefault(t *testing.T) {
-	model := newPrimaryWorkerLauncherModel(tukushell.WorkerPreferenceClaude)
+	model := newPrimaryWorkerLauncherModel(primaryWorkerSelectionContext{Remembered: tukushell.WorkerPreferenceClaude})
 	if got := model.options[model.selected].Preference; got != tukushell.WorkerPreferenceClaude {
 		t.Fatalf("expected remembered claude selection, got %q", got)
 	}
 }
 
 func TestPrimaryWorkerLauncherViewIsCompactTerminalSurface(t *testing.T) {
-	model := newPrimaryWorkerLauncherModel(tukushell.WorkerPreferenceAuto)
+	model := newPrimaryWorkerLauncherModel(primaryWorkerSelectionContext{
+		Remembered: tukushell.WorkerPreferenceAuto,
+		Recommendation: provider.Recommendation{
+			Worker:     provider.WorkerCodex,
+			Confidence: "high",
+			Reason:     "execution-ready brief favors direct implementation",
+		},
+	})
 	model.width = 80
 	model.height = 24
 
@@ -34,8 +42,11 @@ func TestPrimaryWorkerLauncherViewIsCompactTerminalSurface(t *testing.T) {
 	if strings.Contains(rendered, "╭") || strings.Contains(rendered, "╰") {
 		t.Fatalf("expected launcher to avoid modal card borders, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "Choose a worker for this session") || !strings.Contains(rendered, "› Launch with Codex") {
+	if !strings.Contains(rendered, "Choose a worker for this session") || !strings.Contains(rendered, "› Launch with Codex [recommended]") {
 		t.Fatalf("expected compact launcher copy and selected row, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Recommended: Codex (high)") {
+		t.Fatalf("expected recommendation callout in launcher view, got %q", rendered)
 	}
 }
 
@@ -72,14 +83,21 @@ func TestResolvePrimaryEntryWorkerPreferenceUsesLauncherForAuto(t *testing.T) {
 	}
 
 	var remembered tukushell.WorkerPreference
+	var recommended provider.WorkerKind
 	app := &CLIApplication{
-		chooseWorkerFn: func(_ context.Context, pref tukushell.WorkerPreference) (tukushell.WorkerPreference, error) {
-			remembered = pref
+		chooseWorkerFn: func(_ context.Context, selection primaryWorkerSelectionContext) (tukushell.WorkerPreference, error) {
+			remembered = selection.Remembered
+			recommended = selection.Recommendation.Worker
 			return tukushell.WorkerPreferenceClaude, nil
 		},
 	}
 
-	got, explicit, launcherUsed, err := resolvePrimaryEntryWorkerPreference(context.Background(), app, "", "auto", true)
+	got, explicit, launcherUsed, err := resolvePrimaryEntryWorkerPreference(context.Background(), app, "", "auto", true, primaryWorkerSelectionContext{
+		Remembered: tukushell.WorkerPreferenceClaude,
+		Recommendation: provider.Recommendation{
+			Worker: provider.WorkerClaude,
+		},
+	})
 	if err != nil {
 		t.Fatalf("resolve primary entry worker preference: %v", err)
 	}
@@ -92,23 +110,63 @@ func TestResolvePrimaryEntryWorkerPreferenceUsesLauncherForAuto(t *testing.T) {
 	if remembered != tukushell.WorkerPreferenceClaude {
 		t.Fatalf("expected remembered worker to seed launcher default, got %q", remembered)
 	}
+	if recommended != provider.WorkerClaude {
+		t.Fatalf("expected recommendation to reach launcher, got %q", recommended)
+	}
 	if got != tukushell.WorkerPreferenceClaude || saved != tukushell.WorkerPreferenceClaude {
 		t.Fatalf("expected claude to be chosen and persisted, got chosen=%q saved=%q", got, saved)
 	}
 }
 
 func TestRunPrimaryEntryLauncherCancelExitsCleanly(t *testing.T) {
+	origCall := ipcCall
+	origStart := startLocalDaemon
 	origGetwd := getWorkingDir
 	origResolveRepo := resolveRepoRootFromDir
 	origClear := clearPrimaryLauncherFn
+	origLoad := loadPrimaryWorkerPref
+	origSave := savePrimaryWorkerPref
+	origTimeout := daemonReadyTimeout
+	origInterval := daemonRetryInterval
 	defer func() {
+		ipcCall = origCall
+		startLocalDaemon = origStart
 		getWorkingDir = origGetwd
 		resolveRepoRootFromDir = origResolveRepo
 		clearPrimaryLauncherFn = origClear
+		loadPrimaryWorkerPref = origLoad
+		savePrimaryWorkerPref = origSave
+		daemonReadyTimeout = origTimeout
+		daemonRetryInterval = origInterval
 	}()
 
 	getWorkingDir = func() (string, error) { return "/tmp/repo", nil }
 	resolveRepoRootFromDir = func(_ context.Context, dir string) (string, error) { return dir, nil }
+	daemonReadyTimeout = 50 * time.Millisecond
+	daemonRetryInterval = 0
+	loadPrimaryWorkerPref = func() (tukushell.WorkerPreference, error) { return tukushell.WorkerPreferenceAuto, nil }
+	savePrimaryWorkerPref = func(preference tukushell.WorkerPreference) error { return nil }
+
+	var calls int
+	ipcCall = func(_ context.Context, _ string, req ipc.Request) (ipc.Response, error) {
+		calls++
+		if calls <= 2 {
+			return ipc.Response{}, daemonUnavailableErr()
+		}
+		switch req.Method {
+		case ipc.MethodResolveShellTaskForRepo:
+			return mustResolveShellTaskResponse(t, "tsk_launcher_cancel"), nil
+		case ipc.MethodTaskShellSnapshot:
+			return mustShellSnapshotResponse(t, "tsk_launcher_cancel"), nil
+		default:
+			t.Fatalf("unexpected ipc method %s", req.Method)
+			return ipc.Response{}, nil
+		}
+	}
+	startLocalDaemon = func() (<-chan error, error) {
+		ch := make(chan error)
+		return ch, nil
+	}
 
 	cleared := false
 	clearPrimaryLauncherFn = func(_ io.Writer) error {
@@ -118,7 +176,7 @@ func TestRunPrimaryEntryLauncherCancelExitsCleanly(t *testing.T) {
 
 	called := false
 	app := &CLIApplication{
-		chooseWorkerFn: func(_ context.Context, _ tukushell.WorkerPreference) (tukushell.WorkerPreference, error) {
+		chooseWorkerFn: func(_ context.Context, _ primaryWorkerSelectionContext) (tukushell.WorkerPreference, error) {
 			return "", errPrimaryWorkerSelectionCancelled
 		},
 		openShellFn: func(_ context.Context, _ string, _ string, _ tukushell.WorkerPreference) error {
@@ -181,7 +239,15 @@ func TestRunPrimaryShortcutCodexSkipsLauncher(t *testing.T) {
 		if calls <= 2 {
 			return ipc.Response{}, daemonUnavailableErr()
 		}
-		return mustResolveShellTaskResponse(t, "tsk_codex_shortcut"), nil
+		switch req.Method {
+		case ipc.MethodResolveShellTaskForRepo:
+			return mustResolveShellTaskResponse(t, "tsk_codex_shortcut"), nil
+		case ipc.MethodTaskShellSnapshot:
+			return mustShellSnapshotResponse(t, "tsk_codex_shortcut"), nil
+		default:
+			t.Fatalf("unexpected ipc method %s", req.Method)
+			return ipc.Response{}, nil
+		}
 	}
 	startLocalDaemon = func() (<-chan error, error) {
 		ch := make(chan error)
@@ -189,7 +255,7 @@ func TestRunPrimaryShortcutCodexSkipsLauncher(t *testing.T) {
 	}
 
 	app := &CLIApplication{
-		chooseWorkerFn: func(_ context.Context, _ tukushell.WorkerPreference) (tukushell.WorkerPreference, error) {
+		chooseWorkerFn: func(_ context.Context, _ primaryWorkerSelectionContext) (tukushell.WorkerPreference, error) {
 			t.Fatal("launcher should be skipped for explicit codex shortcut")
 			return "", nil
 		},
@@ -255,7 +321,15 @@ func TestRunPrimaryShortcutClaudeSkipsLauncher(t *testing.T) {
 		if calls <= 2 {
 			return ipc.Response{}, daemonUnavailableErr()
 		}
-		return mustResolveShellTaskResponse(t, "tsk_claude_shortcut"), nil
+		switch req.Method {
+		case ipc.MethodResolveShellTaskForRepo:
+			return mustResolveShellTaskResponse(t, "tsk_claude_shortcut"), nil
+		case ipc.MethodTaskShellSnapshot:
+			return mustShellSnapshotResponse(t, "tsk_claude_shortcut"), nil
+		default:
+			t.Fatalf("unexpected ipc method %s", req.Method)
+			return ipc.Response{}, nil
+		}
 	}
 	startLocalDaemon = func() (<-chan error, error) {
 		ch := make(chan error)
@@ -263,7 +337,7 @@ func TestRunPrimaryShortcutClaudeSkipsLauncher(t *testing.T) {
 	}
 
 	app := &CLIApplication{
-		chooseWorkerFn: func(_ context.Context, _ tukushell.WorkerPreference) (tukushell.WorkerPreference, error) {
+		chooseWorkerFn: func(_ context.Context, _ primaryWorkerSelectionContext) (tukushell.WorkerPreference, error) {
 			t.Fatal("launcher should be skipped for explicit claude shortcut")
 			return "", nil
 		},
@@ -325,7 +399,15 @@ func TestRunPrimaryChatShortcutClaudeSkipsLauncher(t *testing.T) {
 		if calls <= 2 {
 			return ipc.Response{}, daemonUnavailableErr()
 		}
-		return mustResolveShellTaskResponse(t, "tsk_chat_claude_shortcut"), nil
+		switch req.Method {
+		case ipc.MethodResolveShellTaskForRepo:
+			return mustResolveShellTaskResponse(t, "tsk_chat_claude_shortcut"), nil
+		case ipc.MethodTaskShellSnapshot:
+			return mustShellSnapshotResponse(t, "tsk_chat_claude_shortcut"), nil
+		default:
+			t.Fatalf("unexpected ipc method %s", req.Method)
+			return ipc.Response{}, nil
+		}
 	}
 	startLocalDaemon = func() (<-chan error, error) {
 		ch := make(chan error)
@@ -333,7 +415,7 @@ func TestRunPrimaryChatShortcutClaudeSkipsLauncher(t *testing.T) {
 	}
 
 	app := &CLIApplication{
-		chooseWorkerFn: func(_ context.Context, _ tukushell.WorkerPreference) (tukushell.WorkerPreference, error) {
+		chooseWorkerFn: func(_ context.Context, _ primaryWorkerSelectionContext) (tukushell.WorkerPreference, error) {
 			t.Fatal("launcher should be skipped for explicit chat claude shortcut")
 			return "", nil
 		},
@@ -387,7 +469,15 @@ func TestRunPrimaryEntryLauncherSelectionClearsBeforeShellOpens(t *testing.T) {
 		if calls <= 2 {
 			return ipc.Response{}, daemonUnavailableErr()
 		}
-		return mustResolveShellTaskResponse(t, "tsk_launcher_clear"), nil
+		switch req.Method {
+		case ipc.MethodResolveShellTaskForRepo:
+			return mustResolveShellTaskResponse(t, "tsk_launcher_clear"), nil
+		case ipc.MethodTaskShellSnapshot:
+			return mustShellSnapshotResponse(t, "tsk_launcher_clear"), nil
+		default:
+			t.Fatalf("unexpected ipc method %s", req.Method)
+			return ipc.Response{}, nil
+		}
 	}
 	startLocalDaemon = func() (<-chan error, error) {
 		ch := make(chan error)
@@ -401,7 +491,7 @@ func TestRunPrimaryEntryLauncherSelectionClearsBeforeShellOpens(t *testing.T) {
 	}
 
 	app := &CLIApplication{
-		chooseWorkerFn: func(_ context.Context, _ tukushell.WorkerPreference) (tukushell.WorkerPreference, error) {
+		chooseWorkerFn: func(_ context.Context, _ primaryWorkerSelectionContext) (tukushell.WorkerPreference, error) {
 			return tukushell.WorkerPreferenceCodex, nil
 		},
 		openShellFn: func(_ context.Context, _ string, _ string, _ tukushell.WorkerPreference) error {

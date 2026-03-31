@@ -105,6 +105,15 @@ type BriefSummary struct {
 	RequiresClarification   bool
 	WorkerFraming           string
 	BoundedEvidenceMessages int
+	PromptTargets           []string
+	ValidatorCommands       []string
+	ConfidenceLevel         string
+	ConfidenceReason        string
+	EstimatedTokenSavings   int
+	DispatchPromptTokens    int
+	StructuredPromptTokens  int
+	DefaultSerializer       string
+	StructuredCheaper       bool
 }
 
 type RunSummary struct {
@@ -825,6 +834,8 @@ type UIState struct {
 	LastWorkerPrompt               string
 	LastWorkerPromptAt             time.Time
 	WorkerPromptPending            bool
+	WorkerResponseStarted          bool
+	WorkerInterruptRequested       bool
 	PendingTaskMessage             string
 	PendingTaskMessageSource       string
 	PendingTaskMessageEditMode     bool

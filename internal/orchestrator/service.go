@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"tuku/internal/adapters/adapter_contract"
+	"tuku/internal/domain/benchmark"
 	"tuku/internal/domain/brief"
 	"tuku/internal/domain/capsule"
 	"tuku/internal/domain/checkpoint"
@@ -27,6 +29,7 @@ import (
 	"tuku/internal/domain/recoveryaction"
 	rundomain "tuku/internal/domain/run"
 	"tuku/internal/domain/shellsession"
+	"tuku/internal/domain/taskmemory"
 	anchorgit "tuku/internal/git/anchor"
 	"tuku/internal/response/canonical"
 	"tuku/internal/storage"
@@ -72,6 +75,7 @@ type ContinueOutcome string
 
 const (
 	ContinueOutcomeSafe                ContinueOutcome = "SAFE_RESUME_AVAILABLE"
+	ContinueOutcomeRunInProgress       ContinueOutcome = "ACTIVE_RUN_IN_PROGRESS"
 	ContinueOutcomeStaleReconciled     ContinueOutcome = "STALE_RUN_RECONCILED"
 	ContinueOutcomeNeedsDecision       ContinueOutcome = "RESUME_DECISION_REQUIRED"
 	ContinueOutcomeBlockedDrift        ContinueOutcome = "RESUME_BLOCKED_DRIFT"
@@ -124,9 +128,41 @@ type StatusTaskResult struct {
 	LatestRunArgs                               []string
 	LatestRunExitCode                           *int
 	LatestRunChangedFiles                       []string
+	LatestRunChangedFilesSemantics              string
+	LatestRunRepoDiffSummary                    string
+	LatestRunWorktreeSummary                    string
 	LatestRunValidationSignals                  []string
 	LatestRunOutputArtifactRef                  string
 	LatestRunStructuredSummary                  string
+	CurrentContextPackID                        common.ContextPackID
+	CurrentContextPackMode                      contextdomain.Mode
+	CurrentContextPackFileCount                 int
+	CurrentContextPackHash                      string
+	CurrentTaskMemoryID                         common.MemoryID
+	CurrentTaskMemorySource                     string
+	CurrentTaskMemorySummary                    string
+	CurrentTaskMemoryFullHistoryTokens          int
+	CurrentTaskMemoryResumePromptTokens         int
+	CurrentTaskMemoryCompactionRatio            float64
+	CurrentBenchmarkID                          common.BenchmarkID
+	CurrentBenchmarkSource                      string
+	CurrentBenchmarkSummary                     string
+	CurrentBenchmarkRawPromptTokens             int
+	CurrentBenchmarkDispatchPromptTokens        int
+	CurrentBenchmarkStructuredPromptTokens      int
+	CurrentBenchmarkSelectedContextTokens       int
+	CurrentBenchmarkEstimatedTokenSavings       int
+	CurrentBenchmarkFilesScanned                int
+	CurrentBenchmarkRankedTargetCount           int
+	CurrentBenchmarkCandidateRecallAt3          float64
+	CurrentBenchmarkDefaultSerializer           string
+	CurrentBenchmarkStructuredCheaper           bool
+	CurrentBenchmarkConfidenceValue             float64
+	CurrentBenchmarkConfidenceLevel             string
+	LatestPolicyDecisionID                      common.DecisionID
+	LatestPolicyDecisionStatus                  string
+	LatestPolicyDecisionRiskLevel               string
+	LatestPolicyDecisionReason                  string
 	RepoAnchor                                  anchorgit.Snapshot
 	LatestShellSessionID                        string
 	LatestShellSessionClass                     ShellSessionClass
@@ -234,6 +270,8 @@ type InspectTaskResult struct {
 	CompiledIntent                           *CompiledIntentSummary
 	Brief                                    *brief.ExecutionBrief
 	CompiledBrief                            *CompiledBriefSummary
+	TaskMemory                               *taskmemory.Snapshot
+	Benchmark                                *benchmark.Run
 	Run                                      *rundomain.ExecutionRun
 	Checkpoint                               *checkpoint.Checkpoint
 	Handoff                                  *handoff.Packet
@@ -300,6 +338,8 @@ type Coordinator struct {
 	shellSessionStaleAfter time.Duration
 	clock                  func() time.Time
 	idGenerator            func(prefix string) string
+	activeRunsMu           sync.RWMutex
+	activeRuns             map[common.TaskID]common.RunID
 }
 
 func NewCoordinator(deps Dependencies) (*Coordinator, error) {
@@ -342,6 +382,7 @@ func NewCoordinator(deps Dependencies) (*Coordinator, error) {
 		shellSessionStaleAfter: deps.ShellSessionStaleAfter,
 		clock:                  deps.Clock,
 		idGenerator:            deps.IDGenerator,
+		activeRuns:             map[common.TaskID]common.RunID{},
 	}, nil
 }
 
@@ -411,6 +452,28 @@ func (c *Coordinator) StartTask(ctx context.Context, goal string, repoRoot strin
 	return result, nil
 }
 
+func (c *Coordinator) markRunActive(taskID common.TaskID, runID common.RunID) {
+	c.activeRunsMu.Lock()
+	defer c.activeRunsMu.Unlock()
+	c.activeRuns[taskID] = runID
+}
+
+func (c *Coordinator) clearRunActive(taskID common.TaskID, runID common.RunID) {
+	c.activeRunsMu.Lock()
+	defer c.activeRunsMu.Unlock()
+	current, ok := c.activeRuns[taskID]
+	if ok && current == runID {
+		delete(c.activeRuns, taskID)
+	}
+}
+
+func (c *Coordinator) isRunActive(taskID common.TaskID, runID common.RunID) bool {
+	c.activeRunsMu.RLock()
+	defer c.activeRunsMu.RUnlock()
+	current, ok := c.activeRuns[taskID]
+	return ok && current == runID
+}
+
 func (c *Coordinator) MessageTask(ctx context.Context, taskID string, message string) (MessageTaskResult, error) {
 	if blocked, err := c.localMutationBlockedByClaudeHandoff(ctx, common.TaskID(taskID), "compile a new local execution brief"); err != nil {
 		return MessageTaskResult{}, err
@@ -468,6 +531,11 @@ func (c *Coordinator) MessageTask(ctx context.Context, taskID string, message st
 			return err
 		}
 		intentState.SourceMessageIDs = []common.MessageID{userMsg.MessageID}
+		triage, err := txc.sharpenPromptTriage(caps, intentState, message)
+		if err != nil {
+			return err
+		}
+		intentState = triage.IntentState
 		if err := txc.store.Intents().Save(intentState); err != nil {
 			return err
 		}
@@ -479,16 +547,59 @@ func (c *Coordinator) MessageTask(ctx context.Context, taskID string, message st
 		if err := txc.appendProof(caps, proof.EventIntentCompiled, proof.ActorSystem, "tuku-intent-stub", map[string]any{
 			"intent_id": intentState.IntentID, "class": intentState.Class,
 			"normalized_action": intentState.NormalizedAction, "confidence": intentState.Confidence,
+			"prompt_triage_applied":         triage.PromptTriage.Applied,
+			"prompt_triage_files_scanned":   triage.PromptTriage.FilesScanned,
+			"prompt_triage_candidate_count": len(triage.PromptTriage.CandidateFiles),
 		}, nil); err != nil {
 			return err
 		}
 
 		briefInput := buildBriefInputV2(caps, intentState, nil, caps.Version)
+		if len(triage.ScopeHints) > 0 {
+			briefInput.ScopeHints = dedupeNonEmpty(append(append([]string{}, triage.ScopeHints...), briefInput.ScopeHints...), 16)
+		}
+		if strings.TrimSpace(triage.WorkerFraming) != "" {
+			briefInput.WorkerFraming = triage.WorkerFraming
+		}
+		contextMode := contextModeForVerbosity(briefInput.Verbosity)
+		contextPack, err := txc.buildContextPack(caps, briefInput.ScopeHints, contextMode, tokenBudgetForContextMode(contextMode))
+		if err != nil {
+			return err
+		}
+		if err := txc.store.ContextPacks().Save(contextPack); err != nil {
+			return err
+		}
+		briefInput.PromptTriage = finalizePromptTriageTelemetry(triage.PromptTriage, briefInput, contextPack)
+		briefInput.ContextPackID = contextPack.ContextPackID
+		provisionalBrief, err := txc.briefBuilder.Build(briefInput)
+		if err != nil {
+			return err
+		}
+		taskMemorySnapshot, err := txc.buildTaskMemorySnapshot(caps, provisionalBrief, contextPack, nil, "brief_compiled")
+		if err != nil {
+			return err
+		}
+		briefInput.TaskMemoryID = taskMemorySnapshot.MemoryID
+		briefInput.MemoryCompression = memoryCompressionFromSnapshot(taskMemorySnapshot)
+		promptPacket, _, benchmarkRun, err := txc.buildPromptIRAndBenchmark(caps, intentState, briefInput, contextPack, taskMemorySnapshot, message)
+		if err != nil {
+			return err
+		}
+		briefInput.PromptIR = promptPacket
+		briefInput.BenchmarkID = benchmarkRun.BenchmarkID
 		briefArtifact, err := txc.briefBuilder.Build(briefInput)
 		if err != nil {
 			return err
 		}
+		taskMemorySnapshot.BriefID = briefArtifact.BriefID
+		if err := txc.store.TaskMemories().Save(taskMemorySnapshot); err != nil {
+			return err
+		}
 		if err := txc.store.Briefs().Save(briefArtifact); err != nil {
+			return err
+		}
+		benchmarkRun.BriefID = briefArtifact.BriefID
+		if err := txc.store.Benchmarks().Save(benchmarkRun); err != nil {
 			return err
 		}
 
@@ -511,12 +622,47 @@ func (c *Coordinator) MessageTask(ctx context.Context, taskID string, message st
 		}
 
 		if err := txc.appendProof(caps, proof.EventBriefCreated, proof.ActorSystem, "tuku-brief-builder", map[string]any{
-			"brief_id":                 briefArtifact.BriefID,
-			"brief_hash":               briefArtifact.BriefHash,
-			"intent_id":                intentState.IntentID,
-			"brief_posture":            briefArtifact.Posture,
-			"requires_clarification":   briefArtifact.RequiresClarification,
-			"bounded_evidence_messages": briefArtifact.BoundedEvidenceMessages,
+			"brief_id":                               briefArtifact.BriefID,
+			"brief_hash":                             briefArtifact.BriefHash,
+			"intent_id":                              intentState.IntentID,
+			"brief_posture":                          briefArtifact.Posture,
+			"requires_clarification":                 briefArtifact.RequiresClarification,
+			"context_pack_id":                        briefArtifact.ContextPackID,
+			"context_pack_hash":                      contextPack.PackHash,
+			"context_pack_file_count":                len(contextPack.IncludedFiles),
+			"context_pack_snippet_count":             len(contextPack.IncludedSnippets),
+			"task_memory_id":                         taskMemorySnapshot.MemoryID,
+			"task_memory_resume_prompt_tokens":       taskMemorySnapshot.ResumePromptTokenEstimate,
+			"task_memory_full_history_tokens":        taskMemorySnapshot.FullHistoryTokenEstimate,
+			"task_memory_compaction_ratio":           taskMemorySnapshot.MemoryCompactionRatio,
+			"benchmark_id":                           benchmarkRun.BenchmarkID,
+			"prompt_ir_target_count":                 len(briefArtifact.PromptIR.RankedTargets),
+			"prompt_ir_validator_count":              len(briefArtifact.PromptIR.ValidatorPlan.Commands),
+			"prompt_ir_confidence":                   briefArtifact.PromptIR.Confidence.Value,
+			"prompt_ir_confidence_level":             briefArtifact.PromptIR.Confidence.Level,
+			"benchmark_dispatch_prompt_tokens":       benchmarkRun.DispatchPromptTokenEstimate,
+			"benchmark_structured_prompt_tokens":     benchmarkRun.StructuredPromptTokenEstimate,
+			"benchmark_estimated_token_savings":      benchmarkRun.EstimatedTokenSavings,
+			"benchmark_default_serializer":           benchmarkRun.DefaultSerializer,
+			"bounded_evidence_messages":              briefArtifact.BoundedEvidenceMessages,
+			"prompt_triage_applied":                  briefArtifact.PromptTriage.Applied,
+			"prompt_triage_reason":                   briefArtifact.PromptTriage.Reason,
+			"prompt_triage_files_scanned":            briefArtifact.PromptTriage.FilesScanned,
+			"prompt_triage_candidate_count":          len(briefArtifact.PromptTriage.CandidateFiles),
+			"prompt_triage_context_savings_estimate": briefArtifact.PromptTriage.ContextTokenSavingsEstimate,
+		}, nil); err != nil {
+			return err
+		}
+		if err := txc.appendProof(caps, proof.EventTaskMemoryUpdated, proof.ActorSystem, "tuku-task-memory", map[string]any{
+			"memory_id":               taskMemorySnapshot.MemoryID,
+			"source":                  taskMemorySnapshot.Source,
+			"brief_id":                briefArtifact.BriefID,
+			"full_history_tokens":     taskMemorySnapshot.FullHistoryTokenEstimate,
+			"resume_prompt_tokens":    taskMemorySnapshot.ResumePromptTokenEstimate,
+			"memory_compaction_ratio": taskMemorySnapshot.MemoryCompactionRatio,
+			"confirmed_facts_count":   len(taskMemorySnapshot.ConfirmedFacts),
+			"validators_run_count":    len(taskMemorySnapshot.ValidatorsRun),
+			"candidate_files_count":   len(taskMemorySnapshot.CandidateFiles),
 		}, nil); err != nil {
 			return err
 		}
@@ -798,6 +944,26 @@ func (c *Coordinator) assessContinue(ctx context.Context, taskID common.TaskID) 
 	}
 
 	if snapshot.LatestRun != nil && snapshot.LatestRun.Status == rundomain.StatusRunning {
+		if c.isRunActive(taskID, snapshot.LatestRun.RunID) {
+			return continueAssessment{
+				TaskID:               taskID,
+				Capsule:              caps,
+				LatestRun:            snapshot.LatestRun,
+				LatestCheckpoint:     snapshot.LatestCheckpoint,
+				LatestHandoff:        snapshot.ActiveHandoff,
+				LatestLaunch:         snapshot.ActiveLaunch,
+				LatestAck:            snapshot.ActiveAcknowledgment,
+				LatestFollowThrough:  snapshot.ActiveFollowThrough,
+				LatestResolution:     snapshot.LatestResolution,
+				LatestRecoveryAction: snapshot.LatestRecoveryAction,
+				FreshAnchor:          anchor,
+				Outcome:              ContinueOutcomeRunInProgress,
+				Reason:               fmt.Sprintf("latest run %s is actively executing in the local runtime", snapshot.LatestRun.RunID),
+				Issues:               issues,
+				DriftClass:           checkpoint.DriftNone,
+				RequiresMutation:     false,
+			}, nil
+		}
 		return continueAssessment{
 			TaskID:               taskID,
 			Capsule:              caps,
@@ -1066,6 +1232,12 @@ func (c *Coordinator) noMutationContinueResult(assessment continueAssessment, re
 			base.CanonicalResponse = "Continuity is intact. No new checkpoint was created because recovery state is unchanged."
 		}
 		return base
+	case ContinueOutcomeRunInProgress:
+		base.CanonicalResponse = fmt.Sprintf(
+			"Local run %s is still actively executing. No recovery mutation was applied; wait for the current run to finish before reconciling, validating, or starting another bounded run.",
+			runID,
+		)
+		return base
 	case ContinueOutcomeNeedsDecision:
 		base.CanonicalResponse = fmt.Sprintf(
 			"Resume still requires a decision. I reused checkpoint %s and did not create a new one because the decision-gated continuity state is unchanged.",
@@ -1192,10 +1364,12 @@ func (c *Coordinator) canReuseInconsistencyCheckpoint(caps capsule.WorkCapsule, 
 }
 
 type preparedRealRun struct {
-	TaskID  common.TaskID
-	RunID   common.RunID
-	Brief   brief.ExecutionBrief
-	Capsule capsule.WorkCapsule
+	TaskID      common.TaskID
+	RunID       common.RunID
+	Brief       brief.ExecutionBrief
+	ContextPack contextdomain.Pack
+	TaskMemory  taskmemory.Snapshot
+	Capsule     capsule.WorkCapsule
 }
 
 func (c *Coordinator) assessRunStartRecovery(ctx context.Context, taskID common.TaskID) (RecoveryAssessment, bool, string, error) {
@@ -1221,8 +1395,14 @@ func (c *Coordinator) startRunRealStaged(ctx context.Context, req RunTaskRequest
 		return *immediateResult, nil
 	}
 
+	c.markRunActive(prepared.TaskID, prepared.RunID)
+	defer c.clearRunActive(prepared.TaskID, prepared.RunID)
+
 	execReq := c.buildExecutionRequest(prepared)
 	execResult, execErr := c.workerAdapter.Execute(ctx, execReq, nil)
+	if execErr == nil && execResult.ExitCode == 0 {
+		execResult = c.enrichExecutionResultWithValidation(ctx, prepared, execResult)
+	}
 
 	finalResult, finalizeErr := c.finalizeRealRun(ctx, prepared, execResult, execErr)
 	if finalizeErr != nil {
@@ -1282,6 +1462,13 @@ func (c *Coordinator) prepareRealRun(ctx context.Context, req RunTaskRequest) (*
 		if err != nil {
 			return err
 		}
+		contextPack, err := txc.resolveExecutionContextPack(caps, b)
+		if err != nil {
+			return err
+		}
+		if err := txc.recordRunStartPolicyDecision(caps, b, contextPack); err != nil {
+			return err
+		}
 		anchor := txc.anchorProvider.Capture(ctx, caps.RepoRoot)
 		caps.BranchName = anchor.Branch
 		caps.HeadSHA = anchor.HeadSHA
@@ -1339,11 +1526,17 @@ func (c *Coordinator) prepareRealRun(ctx context.Context, req RunTaskRequest) (*
 			return err
 		}
 
+		taskMemorySnapshot, err := txc.resolveExecutionTaskMemory(caps, b, contextPack)
+		if err != nil {
+			return err
+		}
 		prepared = preparedRealRun{
-			TaskID:  caps.TaskID,
-			RunID:   runID,
-			Brief:   b,
-			Capsule: caps,
+			TaskID:      caps.TaskID,
+			RunID:       runID,
+			Brief:       b,
+			ContextPack: contextPack,
+			TaskMemory:  taskMemorySnapshot,
+			Capsule:     caps,
 		}
 		return nil
 	})
@@ -1359,23 +1552,12 @@ func (c *Coordinator) prepareRealRun(ctx context.Context, req RunTaskRequest) (*
 func (c *Coordinator) buildExecutionRequest(prepared *preparedRealRun) adapter_contract.ExecutionRequest {
 	agentsChecksum, agentsInstructions := agentsMetadata(prepared.Capsule.RepoRoot)
 	return adapter_contract.ExecutionRequest{
-		RunID:  prepared.RunID,
-		TaskID: prepared.TaskID,
-		Worker: adapter_contract.WorkerCodex,
-		Brief:  prepared.Brief,
-		ContextPack: contextdomain.Pack{
-			ContextPackID:      "",
-			TaskID:             prepared.TaskID,
-			Mode:               contextdomain.ModeCompact,
-			TokenBudget:        0,
-			RepoAnchorHash:     prepared.Capsule.HeadSHA,
-			FreshnessState:     "current",
-			IncludedFiles:      prepared.Capsule.TouchedFiles,
-			IncludedSnippets:   []contextdomain.Snippet{},
-			SelectionRationale: []string{"placeholder context pack for bounded milestone 4 execution"},
-			PackHash:           "",
-			CreatedAt:          c.clock(),
-		},
+		RunID:       prepared.RunID,
+		TaskID:      prepared.TaskID,
+		Worker:      adapter_contract.WorkerCodex,
+		Brief:       prepared.Brief,
+		ContextPack: prepared.ContextPack,
+		TaskMemory:  prepared.TaskMemory,
 		RepoAnchor: checkpoint.RepoAnchor{
 			RepoRoot:      prepared.Capsule.RepoRoot,
 			WorktreePath:  prepared.Capsule.WorktreePath,
@@ -1387,7 +1569,7 @@ func (c *Coordinator) buildExecutionRequest(prepared *preparedRealRun) adapter_c
 		PolicyProfileID:    prepared.Brief.PolicyProfileID,
 		AgentsChecksum:     agentsChecksum,
 		AgentsInstructions: agentsInstructions,
-		ContextSummary:     fmt.Sprintf("phase=%s touched_files=%d", prepared.Capsule.CurrentPhase, len(prepared.Capsule.TouchedFiles)),
+		ContextSummary:     fmt.Sprintf("phase=%s context_files=%d context_snippets=%d memory_ratio=%.2fx history_tokens=%d resume_tokens=%d", prepared.Capsule.CurrentPhase, len(prepared.ContextPack.IncludedFiles), len(prepared.ContextPack.IncludedSnippets), prepared.TaskMemory.MemoryCompactionRatio, prepared.TaskMemory.FullHistoryTokenEstimate, prepared.TaskMemory.ResumePromptTokenEstimate),
 	}
 }
 
@@ -1415,6 +1597,8 @@ func (c *Coordinator) finalizeRealRun(ctx context.Context, prepared *preparedRea
 			"stderr_excerpt":          truncate(execResult.Stderr, 2000),
 			"changed_files":           execResult.ChangedFiles,
 			"changed_files_semantics": execResult.ChangedFilesSemantics,
+			"repo_diff_summary":       repoDiffSummaryFromExecution(execResult),
+			"worktree_summary":        worktreeSummaryFromExecution(execResult),
 			"validation_signals":      execResult.ValidationSignals,
 			"summary":                 execResult.Summary,
 			"error_message":           execResult.ErrorMessage,
@@ -1426,6 +1610,8 @@ func (c *Coordinator) finalizeRealRun(ctx context.Context, prepared *preparedRea
 				"run_id":                  prepared.RunID,
 				"changed_files":           execResult.ChangedFiles,
 				"changed_files_semantics": execResult.ChangedFilesSemantics,
+				"repo_diff_summary":       repoDiffSummaryFromExecution(execResult),
+				"worktree_summary":        worktreeSummaryFromExecution(execResult),
 				"count":                   len(execResult.ChangedFiles),
 			}, &prepared.RunID); err != nil {
 				return err
@@ -1434,14 +1620,35 @@ func (c *Coordinator) finalizeRealRun(ctx context.Context, prepared *preparedRea
 
 		if execErr != nil {
 			result, err = txc.markRunFailed(ctx, caps, runRec, execResult, execErr)
-			return err
+			if err != nil {
+				return err
+			}
+			finalRun, err := txc.store.Runs().Get(prepared.RunID)
+			if err != nil {
+				return err
+			}
+			return txc.updateBenchmarkOutcome(prepared.Brief, finalRun)
 		}
 		if execResult.ExitCode != 0 {
 			result, err = txc.markRunFailed(ctx, caps, runRec, execResult, fmt.Errorf("codex exit code %d", execResult.ExitCode))
-			return err
+			if err != nil {
+				return err
+			}
+			finalRun, err := txc.store.Runs().Get(prepared.RunID)
+			if err != nil {
+				return err
+			}
+			return txc.updateBenchmarkOutcome(prepared.Brief, finalRun)
 		}
 		result, err = txc.markRunCompleted(ctx, caps, runRec, execResult)
-		return err
+		if err != nil {
+			return err
+		}
+		finalRun, err := txc.store.Runs().Get(prepared.RunID)
+		if err != nil {
+			return err
+		}
+		return txc.updateBenchmarkOutcome(prepared.Brief, finalRun)
 	})
 	if err != nil {
 		return RunTaskResult{}, err
@@ -1516,6 +1723,13 @@ func (c *Coordinator) startRunNoop(ctx context.Context, caps capsule.WorkCapsule
 	if err := c.store.Runs().Update(r); err != nil {
 		return RunTaskResult{}, err
 	}
+	if b, err := c.store.Briefs().Get(r.BriefID); err == nil {
+		if err := c.updateBenchmarkOutcome(b, r); err != nil {
+			return RunTaskResult{}, err
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return RunTaskResult{}, err
+	}
 
 	caps.Version++
 	caps.UpdatedAt = c.clock()
@@ -1573,6 +1787,13 @@ func (c *Coordinator) completeRun(ctx context.Context, caps capsule.WorkCapsule,
 	if err := c.store.Runs().Update(r); err != nil {
 		return RunTaskResult{}, err
 	}
+	if b, err := c.store.Briefs().Get(r.BriefID); err == nil {
+		if err := c.updateBenchmarkOutcome(b, r); err != nil {
+			return RunTaskResult{}, err
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return RunTaskResult{}, err
+	}
 
 	caps.Version++
 	caps.UpdatedAt = now
@@ -1581,9 +1802,25 @@ func (c *Coordinator) completeRun(ctx context.Context, caps capsule.WorkCapsule,
 	if err := c.store.Capsules().Update(caps); err != nil {
 		return RunTaskResult{}, err
 	}
+	taskMemorySnapshot, err := c.refreshTaskMemoryForCurrentState(caps, &r, "run_completed_noop")
+	if err != nil {
+		return RunTaskResult{}, err
+	}
 
 	if err := c.appendProof(caps, proof.EventWorkerRunCompleted, proof.ActorSystem, "tuku-runner", map[string]any{"run_id": r.RunID, "status": r.Status}, &r.RunID); err != nil {
 		return RunTaskResult{}, err
+	}
+	if taskMemorySnapshot != nil {
+		if err := c.appendProof(caps, proof.EventTaskMemoryUpdated, proof.ActorSystem, "tuku-task-memory", map[string]any{
+			"memory_id":               taskMemorySnapshot.MemoryID,
+			"source":                  taskMemorySnapshot.Source,
+			"run_id":                  r.RunID,
+			"full_history_tokens":     taskMemorySnapshot.FullHistoryTokenEstimate,
+			"resume_prompt_tokens":    taskMemorySnapshot.ResumePromptTokenEstimate,
+			"memory_compaction_ratio": taskMemorySnapshot.MemoryCompactionRatio,
+		}, &r.RunID); err != nil {
+			return RunTaskResult{}, err
+		}
 	}
 	if err := c.appendProof(caps, proof.EventTaskPhaseTransitioned, proof.ActorSystem, "tuku-daemon", map[string]any{"phase": caps.CurrentPhase, "reason": "run completed"}, &r.RunID); err != nil {
 		return RunTaskResult{}, err
@@ -1638,9 +1875,25 @@ func (c *Coordinator) interruptRun(ctx context.Context, caps capsule.WorkCapsule
 	if err := c.store.Capsules().Update(caps); err != nil {
 		return RunTaskResult{}, err
 	}
+	taskMemorySnapshot, err := c.refreshTaskMemoryForCurrentState(caps, &r, "run_interrupted_noop")
+	if err != nil {
+		return RunTaskResult{}, err
+	}
 
 	if err := c.appendProof(caps, proof.EventRunInterrupted, proof.ActorSystem, "tuku-runner", map[string]any{"run_id": r.RunID, "reason": reason}, &r.RunID); err != nil {
 		return RunTaskResult{}, err
+	}
+	if taskMemorySnapshot != nil {
+		if err := c.appendProof(caps, proof.EventTaskMemoryUpdated, proof.ActorSystem, "tuku-task-memory", map[string]any{
+			"memory_id":               taskMemorySnapshot.MemoryID,
+			"source":                  taskMemorySnapshot.Source,
+			"run_id":                  r.RunID,
+			"full_history_tokens":     taskMemorySnapshot.FullHistoryTokenEstimate,
+			"resume_prompt_tokens":    taskMemorySnapshot.ResumePromptTokenEstimate,
+			"memory_compaction_ratio": taskMemorySnapshot.MemoryCompactionRatio,
+		}, &r.RunID); err != nil {
+			return RunTaskResult{}, err
+		}
 	}
 	if err := c.appendProof(caps, proof.EventTaskPhaseTransitioned, proof.ActorSystem, "tuku-daemon", map[string]any{"phase": caps.CurrentPhase, "reason": "run interrupted"}, &r.RunID); err != nil {
 		return RunTaskResult{}, err
@@ -1710,11 +1963,47 @@ func applyExecutionEvidence(runRec *rundomain.ExecutionRun, execResult adapter_c
 	runRec.Stderr = execResult.Stderr
 	runRec.ChangedFiles = append([]string{}, execResult.ChangedFiles...)
 	runRec.ChangedFilesSemantics = strings.TrimSpace(execResult.ChangedFilesSemantics)
+	runRec.RepoDiffSummary = strings.TrimSpace(repoDiffSummaryFromExecution(execResult))
+	runRec.WorktreeSummary = strings.TrimSpace(worktreeSummaryFromExecution(execResult))
 	runRec.ValidationSignals = append([]string{}, execResult.ValidationSignals...)
 	runRec.OutputArtifactRef = strings.TrimSpace(execResult.OutputArtifactRef)
 	runRec.StructuredSummary = strings.TrimSpace(execResult.StructuredSummary)
 	exitCode := execResult.ExitCode
 	runRec.ExitCode = &exitCode
+}
+
+func repoDiffSummaryFromExecution(execResult adapter_contract.ExecutionResult) string {
+	if summary, ok := extractExecutionStructuredField(execResult.StructuredSummary, "repo_diff_summary"); ok {
+		return summary
+	}
+	return ""
+}
+
+func worktreeSummaryFromExecution(execResult adapter_contract.ExecutionResult) string {
+	if summary, ok := extractExecutionStructuredField(execResult.StructuredSummary, "worktree_summary"); ok {
+		return summary
+	}
+	return ""
+}
+
+func extractExecutionStructuredField(raw string, field string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return "", false
+	}
+	value, ok := payload[field]
+	if !ok {
+		return "", false
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "" || text == "<nil>" {
+		return "", false
+	}
+	return text, true
 }
 
 func (c *Coordinator) markRunCompleted(ctx context.Context, caps capsule.WorkCapsule, r rundomain.ExecutionRun, execResult adapter_contract.ExecutionResult) (RunTaskResult, error) {
@@ -1735,6 +2024,10 @@ func (c *Coordinator) markRunCompleted(ctx context.Context, caps capsule.WorkCap
 	if err := c.store.Capsules().Update(caps); err != nil {
 		return RunTaskResult{}, err
 	}
+	taskMemorySnapshot, err := c.refreshTaskMemoryForCurrentState(caps, &r, "run_completed")
+	if err != nil {
+		return RunTaskResult{}, err
+	}
 
 	if err := c.appendProof(caps, proof.EventWorkerRunCompleted, proof.ActorSystem, "tuku-runner", map[string]any{
 		"run_id":                  r.RunID,
@@ -1742,10 +2035,34 @@ func (c *Coordinator) markRunCompleted(ctx context.Context, caps capsule.WorkCap
 		"exit_code":               execResult.ExitCode,
 		"changed_files":           execResult.ChangedFiles,
 		"changed_files_semantics": execResult.ChangedFilesSemantics,
+		"repo_diff_summary":       repoDiffSummaryFromExecution(execResult),
+		"worktree_summary":        worktreeSummaryFromExecution(execResult),
 		"summary":                 execResult.Summary,
 		"validation_hints":        execResult.ValidationSignals,
 	}, &r.RunID); err != nil {
 		return RunTaskResult{}, err
+	}
+	if taskMemorySnapshot != nil {
+		if err := c.appendProof(caps, proof.EventTaskMemoryUpdated, proof.ActorSystem, "tuku-task-memory", map[string]any{
+			"memory_id":               taskMemorySnapshot.MemoryID,
+			"source":                  taskMemorySnapshot.Source,
+			"run_id":                  r.RunID,
+			"full_history_tokens":     taskMemorySnapshot.FullHistoryTokenEstimate,
+			"resume_prompt_tokens":    taskMemorySnapshot.ResumePromptTokenEstimate,
+			"memory_compaction_ratio": taskMemorySnapshot.MemoryCompactionRatio,
+		}, &r.RunID); err != nil {
+			return RunTaskResult{}, err
+		}
+	}
+	if len(execResult.ValidationSignals) > 0 {
+		if err := c.appendProof(caps, proof.EventValidationResult, proof.ActorSystem, "tuku-validator", map[string]any{
+			"run_id":              r.RunID,
+			"signals":             execResult.ValidationSignals,
+			"output_artifact_ref": execResult.OutputArtifactRef,
+			"passed":              validationPassed(execResult.ValidationSignals),
+		}, &r.RunID); err != nil {
+			return RunTaskResult{}, err
+		}
 	}
 	if err := c.appendProof(caps, proof.EventTaskPhaseTransitioned, proof.ActorSystem, "tuku-daemon", map[string]any{"phase": caps.CurrentPhase, "reason": "run completed"}, &r.RunID); err != nil {
 		return RunTaskResult{}, err
@@ -1780,6 +2097,13 @@ func (c *Coordinator) markRunFailed(ctx context.Context, caps capsule.WorkCapsul
 		if err := c.store.Runs().Update(r); err != nil {
 			return RunTaskResult{}, err
 		}
+		if b, err := c.store.Briefs().Get(r.BriefID); err == nil {
+			if err := c.updateBenchmarkOutcome(b, r); err != nil {
+				return RunTaskResult{}, err
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return RunTaskResult{}, err
+		}
 		caps.Version++
 		caps.UpdatedAt = now
 		caps.CurrentPhase = phase.PhasePaused
@@ -1787,8 +2111,24 @@ func (c *Coordinator) markRunFailed(ctx context.Context, caps capsule.WorkCapsul
 		if err := c.store.Capsules().Update(caps); err != nil {
 			return RunTaskResult{}, err
 		}
+		taskMemorySnapshot, err := c.refreshTaskMemoryForCurrentState(caps, &r, "run_interrupted")
+		if err != nil {
+			return RunTaskResult{}, err
+		}
 		if err := c.appendProof(caps, proof.EventRunInterrupted, proof.ActorSystem, "tuku-runner", map[string]any{"run_id": r.RunID, "reason": runErr.Error()}, &r.RunID); err != nil {
 			return RunTaskResult{}, err
+		}
+		if taskMemorySnapshot != nil {
+			if err := c.appendProof(caps, proof.EventTaskMemoryUpdated, proof.ActorSystem, "tuku-task-memory", map[string]any{
+				"memory_id":               taskMemorySnapshot.MemoryID,
+				"source":                  taskMemorySnapshot.Source,
+				"run_id":                  r.RunID,
+				"full_history_tokens":     taskMemorySnapshot.FullHistoryTokenEstimate,
+				"resume_prompt_tokens":    taskMemorySnapshot.ResumePromptTokenEstimate,
+				"memory_compaction_ratio": taskMemorySnapshot.MemoryCompactionRatio,
+			}, &r.RunID); err != nil {
+				return RunTaskResult{}, err
+			}
 		}
 		if err := c.appendProof(caps, proof.EventTaskPhaseTransitioned, proof.ActorSystem, "tuku-daemon", map[string]any{"phase": caps.CurrentPhase, "reason": "run interrupted"}, &r.RunID); err != nil {
 			return RunTaskResult{}, err
@@ -1825,6 +2165,10 @@ func (c *Coordinator) markRunFailed(ctx context.Context, caps capsule.WorkCapsul
 	if err := c.store.Capsules().Update(caps); err != nil {
 		return RunTaskResult{}, err
 	}
+	taskMemorySnapshot, err := c.refreshTaskMemoryForCurrentState(caps, &r, "run_failed")
+	if err != nil {
+		return RunTaskResult{}, err
+	}
 
 	if err := c.appendProof(caps, proof.EventWorkerRunFailed, proof.ActorSystem, "tuku-runner", map[string]any{
 		"run_id":                  r.RunID,
@@ -1834,8 +2178,22 @@ func (c *Coordinator) markRunFailed(ctx context.Context, caps capsule.WorkCapsul
 		"stderr_excerpt":          truncate(execResult.Stderr, 2000),
 		"changed_files":           execResult.ChangedFiles,
 		"changed_files_semantics": execResult.ChangedFilesSemantics,
+		"repo_diff_summary":       repoDiffSummaryFromExecution(execResult),
+		"worktree_summary":        worktreeSummaryFromExecution(execResult),
 	}, &r.RunID); err != nil {
 		return RunTaskResult{}, err
+	}
+	if taskMemorySnapshot != nil {
+		if err := c.appendProof(caps, proof.EventTaskMemoryUpdated, proof.ActorSystem, "tuku-task-memory", map[string]any{
+			"memory_id":               taskMemorySnapshot.MemoryID,
+			"source":                  taskMemorySnapshot.Source,
+			"run_id":                  r.RunID,
+			"full_history_tokens":     taskMemorySnapshot.FullHistoryTokenEstimate,
+			"resume_prompt_tokens":    taskMemorySnapshot.ResumePromptTokenEstimate,
+			"memory_compaction_ratio": taskMemorySnapshot.MemoryCompactionRatio,
+		}, &r.RunID); err != nil {
+			return RunTaskResult{}, err
+		}
 	}
 	if err := c.appendProof(caps, proof.EventTaskPhaseTransitioned, proof.ActorSystem, "tuku-daemon", map[string]any{"phase": caps.CurrentPhase, "reason": "run failed"}, &r.RunID); err != nil {
 		return RunTaskResult{}, err
@@ -1894,10 +2252,49 @@ func (c *Coordinator) StatusTask(ctx context.Context, taskID string) (StatusTask
 		b, err := c.store.Briefs().Get(caps.CurrentBriefID)
 		if err == nil {
 			status.CurrentBriefHash = b.BriefHash
+			status.CurrentContextPackID = b.ContextPackID
 			status.CompiledBrief = compiledBriefSummaryFromBrief(b)
+			if benchmarkRecord, err := c.loadBenchmarkForTask(caps.TaskID, b.BenchmarkID); err == nil && benchmarkRecord != nil {
+				status.CurrentBenchmarkID = benchmarkRecord.BenchmarkID
+				status.CurrentBenchmarkSource = benchmarkRecord.Source
+				status.CurrentBenchmarkSummary = benchmarkRecord.Summary
+				status.CurrentBenchmarkRawPromptTokens = benchmarkRecord.RawPromptTokenEstimate
+				status.CurrentBenchmarkDispatchPromptTokens = benchmarkRecord.DispatchPromptTokenEstimate
+				status.CurrentBenchmarkStructuredPromptTokens = benchmarkRecord.StructuredPromptTokenEstimate
+				status.CurrentBenchmarkSelectedContextTokens = benchmarkRecord.SelectedContextTokenEstimate
+				status.CurrentBenchmarkEstimatedTokenSavings = benchmarkRecord.EstimatedTokenSavings
+				status.CurrentBenchmarkFilesScanned = benchmarkRecord.FilesScanned
+				status.CurrentBenchmarkRankedTargetCount = benchmarkRecord.RankedTargetCount
+				status.CurrentBenchmarkCandidateRecallAt3 = benchmarkRecord.CandidateRecallAt3
+				status.CurrentBenchmarkDefaultSerializer = benchmarkRecord.DefaultSerializer
+				status.CurrentBenchmarkStructuredCheaper = benchmarkRecord.StructuredCheaper
+				status.CurrentBenchmarkConfidenceValue = benchmarkRecord.ConfidenceValue
+				status.CurrentBenchmarkConfidenceLevel = benchmarkRecord.ConfidenceLevel
+			} else if err != nil {
+				return StatusTaskResult{}, err
+			}
+			if b.ContextPackID != "" {
+				if pack, err := c.store.ContextPacks().Get(b.ContextPackID); err == nil {
+					status.CurrentContextPackMode = pack.Mode
+					status.CurrentContextPackFileCount = len(pack.IncludedFiles)
+					status.CurrentContextPackHash = pack.PackHash
+				} else if !errors.Is(err, sql.ErrNoRows) {
+					return StatusTaskResult{}, err
+				}
+			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return StatusTaskResult{}, err
 		}
+	}
+	if snapshot, err := c.store.TaskMemories().LatestByTask(caps.TaskID); err == nil {
+		status.CurrentTaskMemoryID = snapshot.MemoryID
+		status.CurrentTaskMemorySource = snapshot.Source
+		status.CurrentTaskMemorySummary = snapshot.Summary
+		status.CurrentTaskMemoryFullHistoryTokens = snapshot.FullHistoryTokenEstimate
+		status.CurrentTaskMemoryResumePromptTokens = snapshot.ResumePromptTokenEstimate
+		status.CurrentTaskMemoryCompactionRatio = snapshot.MemoryCompactionRatio
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return StatusTaskResult{}, err
 	}
 
 	var latestRunForIncident *rundomain.ExecutionRun
@@ -1914,6 +2311,9 @@ func (c *Coordinator) StatusTask(ctx context.Context, taskID string) (StatusTask
 			status.LatestRunExitCode = &code
 		}
 		status.LatestRunChangedFiles = append([]string{}, latestRun.ChangedFiles...)
+		status.LatestRunChangedFilesSemantics = latestRun.ChangedFilesSemantics
+		status.LatestRunRepoDiffSummary = latestRun.RepoDiffSummary
+		status.LatestRunWorktreeSummary = latestRun.WorktreeSummary
 		status.LatestRunValidationSignals = append([]string{}, latestRun.ValidationSignals...)
 		status.LatestRunOutputArtifactRef = latestRun.OutputArtifactRef
 		status.LatestRunStructuredSummary = latestRun.StructuredSummary
@@ -2113,12 +2513,18 @@ func (c *Coordinator) StatusTask(ctx context.Context, taskID string) (StatusTask
 		applyContinuityIncidentFollowUpToOperatorExecutionPlan(status.OperatorExecutionPlan, status.ContinuityIncidentFollowUp)
 	}
 
-	events, err := c.store.Proofs().ListByTask(caps.TaskID, 1)
+	events, err := c.store.Proofs().ListByTask(caps.TaskID, 24)
 	if err == nil && len(events) > 0 {
 		last := events[len(events)-1]
 		status.LastEventID = last.EventID
 		status.LastEventType = last.Type
 		status.LastEventAt = last.Timestamp
+		if policySnapshot := latestPolicyDecisionSnapshot(events); policySnapshot != nil {
+			status.LatestPolicyDecisionID = policySnapshot.DecisionID
+			status.LatestPolicyDecisionStatus = policySnapshot.Status
+			status.LatestPolicyDecisionRiskLevel = policySnapshot.RiskLevel
+			status.LatestPolicyDecisionReason = policySnapshot.Reason
+		}
 	} else if err != nil {
 		return StatusTaskResult{}, err
 	}
@@ -2156,9 +2562,20 @@ func (c *Coordinator) InspectTask(ctx context.Context, taskID string) (InspectTa
 			briefCopy := b
 			out.Brief = &briefCopy
 			out.CompiledBrief = compiledBriefSummaryFromBrief(briefCopy)
+			if benchmarkRecord, err := c.loadBenchmarkForTask(caps.TaskID, b.BenchmarkID); err == nil && benchmarkRecord != nil {
+				out.Benchmark = benchmarkRecord
+			} else if err != nil {
+				return InspectTaskResult{}, err
+			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return InspectTaskResult{}, err
 		}
+	}
+	if snapshot, err := c.store.TaskMemories().LatestByTask(caps.TaskID); err == nil {
+		snapshotCopy := snapshot
+		out.TaskMemory = &snapshotCopy
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return InspectTaskResult{}, err
 	}
 
 	if latestRun, err := c.store.Runs().LatestByTask(caps.TaskID); err == nil {
@@ -2702,7 +3119,7 @@ func (c *Coordinator) createCheckpointWithOptions(caps capsule.WorkCapsule, runI
 		Anchor:             anchorFromCapsule(caps),
 		IntentID:           caps.CurrentIntentID,
 		BriefID:            caps.CurrentBriefID,
-		ContextPackID:      "",
+		ContextPackID:      c.contextPackIDForCheckpoint(caps),
 		LastEventID:        lastEventID,
 		PendingDecisionIDs: []common.DecisionID{},
 		ResumeDescriptor:   descriptor,
@@ -2721,16 +3138,25 @@ func (c *Coordinator) createCheckpointWithOptions(caps capsule.WorkCapsule, runI
 
 func (c *Coordinator) appendCheckpointCreatedProof(caps capsule.WorkCapsule, cp checkpoint.Checkpoint, runID *common.RunID) error {
 	checkpointID := cp.CheckpointID
+	diffSummary, worktreeSummary := captureRepoEvidence(caps.RepoRoot)
 	event := proof.Event{
-		EventID:        common.EventID(c.idGenerator("evt")),
-		TaskID:         caps.TaskID,
-		RunID:          runID,
-		CheckpointID:   &checkpointID,
-		Timestamp:      c.clock(),
-		Type:           proof.EventCheckpointCreated,
-		ActorType:      proof.ActorSystem,
-		ActorID:        "tuku-daemon",
-		PayloadJSON:    mustJSON(map[string]any{"checkpoint_id": cp.CheckpointID, "trigger": cp.Trigger, "resumable": cp.IsResumable, "descriptor": cp.ResumeDescriptor}),
+		EventID:      common.EventID(c.idGenerator("evt")),
+		TaskID:       caps.TaskID,
+		RunID:        runID,
+		CheckpointID: &checkpointID,
+		Timestamp:    c.clock(),
+		Type:         proof.EventCheckpointCreated,
+		ActorType:    proof.ActorSystem,
+		ActorID:      "tuku-daemon",
+		PayloadJSON: mustJSON(map[string]any{
+			"checkpoint_id":     cp.CheckpointID,
+			"trigger":           cp.Trigger,
+			"resumable":         cp.IsResumable,
+			"descriptor":        cp.ResumeDescriptor,
+			"context_pack_id":   cp.ContextPackID,
+			"repo_diff_summary": diffSummary,
+			"worktree_summary":  worktreeSummary,
+		}),
 		CapsuleVersion: caps.Version,
 	}
 	return c.store.Proofs().Append(event)
@@ -2756,6 +3182,17 @@ func anchorFromCapsule(caps capsule.WorkCapsule) checkpoint.RepoAnchor {
 		DirtyHash:     boolString(caps.WorkingTreeDirty),
 		UntrackedHash: "",
 	}
+}
+
+func (c *Coordinator) contextPackIDForCheckpoint(caps capsule.WorkCapsule) common.ContextPackID {
+	if caps.CurrentBriefID == "" {
+		return ""
+	}
+	briefRec, err := c.store.Briefs().Get(caps.CurrentBriefID)
+	if err != nil {
+		return ""
+	}
+	return briefRec.ContextPackID
 }
 
 func classifyAnchorDrift(baseline checkpoint.RepoAnchor, current anchorgit.Snapshot) checkpoint.DriftClass {
@@ -2786,6 +3223,56 @@ func runIDPointer(runID common.RunID) *common.RunID {
 	}
 	id := runID
 	return &id
+}
+
+type policyDecisionSnapshot struct {
+	DecisionID common.DecisionID
+	Status     string
+	RiskLevel  string
+	Reason     string
+}
+
+func latestPolicyDecisionSnapshot(events []proof.Event) *policyDecisionSnapshot {
+	out := &policyDecisionSnapshot{}
+	set := false
+	for i := len(events) - 1; i >= 0; i-- {
+		event := events[i]
+		switch event.Type {
+		case proof.EventPolicyDecisionResolved:
+			var payload struct {
+				DecisionID common.DecisionID `json:"decision_id"`
+				Status     string            `json:"status"`
+				Reason     string            `json:"reason"`
+			}
+			if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err == nil {
+				out.DecisionID = payload.DecisionID
+				out.Status = payload.Status
+				out.Reason = payload.Reason
+				set = true
+			}
+		case proof.EventPolicyDecisionRequested:
+			var payload struct {
+				DecisionID common.DecisionID `json:"decision_id"`
+				RiskLevel  string            `json:"risk_level"`
+			}
+			if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err == nil {
+				if out.DecisionID == "" {
+					out.DecisionID = payload.DecisionID
+				}
+				if out.RiskLevel == "" {
+					out.RiskLevel = payload.RiskLevel
+				}
+				set = true
+			}
+		}
+		if set && out.DecisionID != "" && out.Status != "" && out.RiskLevel != "" {
+			break
+		}
+	}
+	if !set {
+		return nil
+	}
+	return out
 }
 
 func (c *Coordinator) withTx(fn func(txc *Coordinator) error) error {

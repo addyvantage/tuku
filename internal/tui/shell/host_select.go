@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"tuku/internal/domain/provider"
 )
 
 type WorkerPreference string
@@ -38,7 +40,62 @@ func resolveWorkerPreference(preference WorkerPreference, snapshot Snapshot) Wor
 	if strings.EqualFold(snapshot.HandoffTargetWorker(), string(WorkerPreferenceClaude)) {
 		return WorkerPreferenceClaude
 	}
+	switch snapshotWorkerRecommendation(snapshot, WorkerPreferenceAuto).Worker {
+	case provider.WorkerClaude:
+		return WorkerPreferenceClaude
+	case provider.WorkerCodex:
+		return WorkerPreferenceCodex
+	}
 	return WorkerPreferenceCodex
+}
+
+func snapshotWorkerRecommendation(snapshot Snapshot, remembered WorkerPreference) provider.Recommendation {
+	briefPosture := ""
+	requiresClarification := false
+	validatorCount := 0
+	rankedTargets := 0
+	confidenceLevel := ""
+	estimatedSavings := 0
+	normalizedTaskType := ""
+	if snapshot.Brief != nil {
+		briefPosture = snapshot.Brief.Posture
+		requiresClarification = snapshot.Brief.RequiresClarification
+		validatorCount = len(snapshot.Brief.ValidatorCommands)
+		rankedTargets = len(snapshot.Brief.PromptTargets)
+		confidenceLevel = snapshot.Brief.ConfidenceLevel
+		estimatedSavings = snapshot.Brief.EstimatedTokenSavings
+	}
+	if snapshot.CompiledIntent != nil && strings.TrimSpace(snapshot.CompiledIntent.Class) != "" {
+		normalizedTaskType = snapshot.CompiledIntent.Class
+	}
+	return provider.Recommend(provider.Signals{
+		NormalizedTaskType:    normalizedTaskType,
+		BriefPosture:          briefPosture,
+		RequiresClarification: requiresClarification,
+		ValidatorCount:        validatorCount,
+		RankedTargetCount:     rankedTargets,
+		EstimatedTokenSavings: estimatedSavings,
+		ConfidenceLevel:       confidenceLevel,
+		LatestRunWorker:       provider.WorkerKind(strings.ToLower(strings.TrimSpace(snapshot.RunWorkerKind()))),
+		LatestRunStatus:       strings.ToUpper(strings.TrimSpace(runStatus(snapshot))),
+		HandoffTarget:         provider.WorkerKind(strings.ToLower(strings.TrimSpace(snapshot.HandoffTargetWorker()))),
+		HandoffStatus:         strings.ToUpper(strings.TrimSpace(handoffStatus(snapshot))),
+		RememberedWorker:      provider.WorkerKind(strings.ToLower(strings.TrimSpace(string(remembered)))),
+	})
+}
+
+func runStatus(snapshot Snapshot) string {
+	if snapshot.Run == nil {
+		return ""
+	}
+	return snapshot.Run.Status
+}
+
+func handoffStatus(snapshot Snapshot) string {
+	if snapshot.Handoff == nil {
+		return ""
+	}
+	return snapshot.Handoff.Status
 }
 
 func selectPreferredHost(preference WorkerPreference, snapshot Snapshot) (WorkerHost, WorkerPreference, error) {

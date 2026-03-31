@@ -19,8 +19,10 @@ import (
 
 	"tuku/internal/adapters/claude"
 	"tuku/internal/adapters/codex"
+	"tuku/internal/domain/benchmark"
 	"tuku/internal/domain/common"
 	"tuku/internal/domain/handoff"
+	"tuku/internal/domain/provider"
 	"tuku/internal/domain/recoveryaction"
 	rundomain "tuku/internal/domain/run"
 	anchorgit "tuku/internal/git/anchor"
@@ -37,7 +39,12 @@ import (
 type CLIApplication struct {
 	openShellFn         func(ctx context.Context, socketPath string, taskID string, preference tukushell.WorkerPreference) error
 	openFallbackShellFn func(ctx context.Context, cwd string, preference tukushell.WorkerPreference) error
-	chooseWorkerFn      func(ctx context.Context, remembered tukushell.WorkerPreference) (tukushell.WorkerPreference, error)
+	chooseWorkerFn      func(ctx context.Context, selection primaryWorkerSelectionContext) (tukushell.WorkerPreference, error)
+}
+
+type primaryWorkerSelectionContext struct {
+	Remembered     tukushell.WorkerPreference
+	Recommendation provider.Recommendation
 }
 
 type repoShellTaskResolution struct {
@@ -871,6 +878,52 @@ func (a *CLIApplication) Run(ctx context.Context, args []string) error {
 			return writeTaskBriefHuman(os.Stdout, out)
 		}
 		return writeJSON(os.Stdout, out)
+	case "plan":
+		fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+		task := fs.String("task", "", "task id")
+		human := fs.Bool("human", false, "render compact human-readable pre-dispatch plan view")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*task) == "" {
+			return errors.New("--task is required")
+		}
+		payload, _ := json.Marshal(ipc.TaskStatusRequest{TaskID: common.TaskID(strings.TrimSpace(*task))})
+		resp, err := ipcCall(ctx, socketPath, ipc.Request{RequestID: requestID(), Method: ipc.MethodTaskStatus, Payload: payload})
+		if err != nil {
+			return err
+		}
+		var out ipc.TaskStatusResponse
+		if err := json.Unmarshal(resp.Payload, &out); err != nil {
+			return err
+		}
+		if *human {
+			return writeTaskPlanHuman(os.Stdout, out)
+		}
+		return writeJSON(os.Stdout, taskPlanViewFromStatus(out))
+	case "benchmark":
+		fs := flag.NewFlagSet("benchmark", flag.ContinueOnError)
+		task := fs.String("task", "", "task id")
+		human := fs.Bool("human", false, "render compact human-readable benchmark view")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*task) == "" {
+			return errors.New("--task is required")
+		}
+		payload, _ := json.Marshal(ipc.TaskBenchmarkRequest{TaskID: common.TaskID(strings.TrimSpace(*task))})
+		resp, err := ipcCall(ctx, socketPath, ipc.Request{RequestID: requestID(), Method: ipc.MethodTaskBenchmark, Payload: payload})
+		if err != nil {
+			return err
+		}
+		var out ipc.TaskBenchmarkResponse
+		if err := json.Unmarshal(resp.Payload, &out); err != nil {
+			return err
+		}
+		if *human {
+			return writeTaskBenchmarkHuman(os.Stdout, out)
+		}
+		return writeJSON(os.Stdout, out)
 
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
@@ -878,7 +931,7 @@ func (a *CLIApplication) Run(ctx context.Context, args []string) error {
 }
 
 func cliUsage() string {
-	return "usage: tuku [chat|codex|claude] | tuku <ui|start|message|shell|shell-sessions|transition|incident|run|next|operator|continue|checkpoint|recovery|handoff-create|handoff-accept|handoff-launch|handoff-followthrough|handoff-resolve|status|inspect|intent|brief|help> [flags]\n       tuku chat [codex|claude] [--worker auto|codex|claude]\n       tuku ui [--worker auto|codex|claude]\n       tuku status --task <TASK_ID> [--human]\n       tuku inspect --task <TASK_ID> [--human]\n       tuku intent --task <TASK_ID>\n       tuku brief --task <TASK_ID> [--human]\n       tuku next --task <TASK_ID> [--human] [--ack-review-gap] [--ack-session <SHELL_SESSION_ID>] [--ack-kind missing_review_marker|stale_review|source_scoped_only|source_scoped_stale] [--ack-summary TEXT]\n       tuku run --task <TASK_ID> [--action start|complete|interrupt] [--mode real|noop] [--run-id <RUN_ID>] [--shell-session <SHELL_SESSION_ID>] [--simulate-interrupt] [--reason TEXT] [--human]\n       tuku shell-sessions --task <TASK_ID> [--human]\n       tuku continue --task <TASK_ID> [--human]\n       tuku checkpoint --task <TASK_ID> [--human]\n       tuku handoff-create --task <TASK_ID> [--target claude] [--mode resume|review|takeover] [--reason TEXT] [--note TEXT] [--human]\n       tuku handoff-accept --task <TASK_ID> --handoff <HANDOFF_ID> [--by claude] [--note TEXT] [--human]\n       tuku handoff-launch --task <TASK_ID> [--handoff <HANDOFF_ID>] [--target claude] [--human]\n       tuku handoff-followthrough --task <TASK_ID> --kind proof-of-life-observed|continuation-confirmed|continuation-unknown [--summary TEXT] [--note TEXT] [--human]\n       tuku handoff-resolve --task <TASK_ID> --kind superseded-by-local|completed-downstream|abandoned [--handoff <HANDOFF_ID>] [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery record --task <TASK_ID> --action <KIND> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery review-interrupted --task <TASK_ID> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery resume-interrupted --task <TASK_ID> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery continue --task <TASK_ID> [--human]\n       tuku recovery rebrief --task <TASK_ID> [--human]\n       tuku shell transcript --task <TASK_ID> --session <SHELL_SESSION_ID> [--limit N] [--before-seq SEQ] [--source worker_output|system_note|fallback_note]\n       tuku shell transcript review --task <TASK_ID> --session <SHELL_SESSION_ID> --up-to-seq <SEQ> [--source worker_output|system_note|fallback_note] [--summary TEXT]\n       tuku shell transcript history --task <TASK_ID> --session <SHELL_SESSION_ID> [--limit N] [--source worker_output|system_note|fallback_note]\n       tuku transition history --task <TASK_ID> [--limit N] [--before-receipt <RECEIPT_ID>] [--kind handoff_launch|handoff_resolution] [--handoff <HANDOFF_ID>]\n       tuku incident --task <TASK_ID> [--anchor-transition <RECEIPT_ID>] [--transitions N] [--runs N] [--recovery N] [--proofs N] [--acks N]\n       tuku incident triage --task <TASK_ID> [--anchor latest|receipt] [--receipt <RECEIPT_ID>] --posture triaged|needs_follow_up|deferred [--summary TEXT]\n       tuku incident triage history --task <TASK_ID> [--limit N] [--before-receipt <RECEIPT_ID>] [--anchor <TRANSITION_RECEIPT_ID>] [--posture triaged|needs_follow_up|deferred]\n       tuku incident followup --task <TASK_ID> [--anchor latest|receipt] [--receipt <TRANSITION_RECEIPT_ID>] [--triage-receipt <TRIAGE_RECEIPT_ID>] --action recorded_pending|progressed|closed|reopened [--summary TEXT]\n       tuku incident followup history --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>] [--anchor <TRANSITION_RECEIPT_ID>] [--triage-receipt <TRIAGE_RECEIPT_ID>] [--action recorded_pending|progressed|closed|reopened]\n       tuku incident closure --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>]\n       tuku incident risk --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>]\n       tuku operator acknowledge-review-gap --task <TASK_ID> [--session <SHELL_SESSION_ID>] [--kind missing_review_marker|stale_review|source_scoped_only|source_scoped_stale] [--summary TEXT]"
+	return "usage: tuku [chat|codex|claude] | tuku <ui|start|message|shell|shell-sessions|transition|incident|run|next|operator|continue|checkpoint|recovery|handoff-create|handoff-accept|handoff-launch|handoff-followthrough|handoff-resolve|status|inspect|intent|brief|plan|benchmark|help> [flags]\n       tuku chat [codex|claude] [--worker auto|codex|claude]\n       tuku ui [--worker auto|codex|claude]\n       tuku status --task <TASK_ID> [--human]\n       tuku inspect --task <TASK_ID> [--human]\n       tuku intent --task <TASK_ID>\n       tuku brief --task <TASK_ID> [--human]\n       tuku plan --task <TASK_ID> [--human]\n       tuku benchmark --task <TASK_ID> [--human]\n       tuku next --task <TASK_ID> [--human] [--ack-review-gap] [--ack-session <SHELL_SESSION_ID>] [--ack-kind missing_review_marker|stale_review|source_scoped_only|source_scoped_stale] [--ack-summary TEXT]\n       tuku run --task <TASK_ID> [--action start|complete|interrupt] [--mode real|noop] [--run-id <RUN_ID>] [--shell-session <SHELL_SESSION_ID>] [--simulate-interrupt] [--reason TEXT] [--human]\n       tuku shell-sessions --task <TASK_ID> [--human]\n       tuku continue --task <TASK_ID> [--human]\n       tuku checkpoint --task <TASK_ID> [--human]\n       tuku handoff-create --task <TASK_ID> [--target claude] [--mode resume|review|takeover] [--reason TEXT] [--note TEXT] [--human]\n       tuku handoff-accept --task <TASK_ID> --handoff <HANDOFF_ID> [--by claude] [--note TEXT] [--human]\n       tuku handoff-launch --task <TASK_ID> [--handoff <HANDOFF_ID>] [--target claude] [--human]\n       tuku handoff-followthrough --task <TASK_ID> --kind proof-of-life-observed|continuation-confirmed|continuation-unknown [--summary TEXT] [--note TEXT] [--human]\n       tuku handoff-resolve --task <TASK_ID> --kind superseded-by-local|completed-downstream|abandoned [--handoff <HANDOFF_ID>] [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery record --task <TASK_ID> --action <KIND> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery review-interrupted --task <TASK_ID> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery resume-interrupted --task <TASK_ID> [--summary TEXT] [--note TEXT] [--human]\n       tuku recovery continue --task <TASK_ID> [--human]\n       tuku recovery rebrief --task <TASK_ID> [--human]\n       tuku shell transcript --task <TASK_ID> --session <SHELL_SESSION_ID> [--limit N] [--before-seq SEQ] [--source worker_output|system_note|fallback_note]\n       tuku shell transcript review --task <TASK_ID> --session <SHELL_SESSION_ID> --up-to-seq <SEQ> [--source worker_output|system_note|fallback_note] [--summary TEXT]\n       tuku shell transcript history --task <TASK_ID> --session <SHELL_SESSION_ID> [--limit N] [--source worker_output|system_note|fallback_note]\n       tuku transition history --task <TASK_ID> [--limit N] [--before-receipt <RECEIPT_ID>] [--kind handoff_launch|handoff_resolution] [--handoff <HANDOFF_ID>]\n       tuku incident --task <TASK_ID> [--anchor-transition <RECEIPT_ID>] [--transitions N] [--runs N] [--recovery N] [--proofs N] [--acks N]\n       tuku incident triage --task <TASK_ID> [--anchor latest|receipt] [--receipt <RECEIPT_ID>] --posture triaged|needs_follow_up|deferred [--summary TEXT]\n       tuku incident triage history --task <TASK_ID> [--limit N] [--before-receipt <RECEIPT_ID>] [--anchor <TRANSITION_RECEIPT_ID>] [--posture triaged|needs_follow_up|deferred]\n       tuku incident followup --task <TASK_ID> [--anchor latest|receipt] [--receipt <TRANSITION_RECEIPT_ID>] [--triage-receipt <TRIAGE_RECEIPT_ID>] --action recorded_pending|progressed|closed|reopened [--summary TEXT]\n       tuku incident followup history --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>] [--anchor <TRANSITION_RECEIPT_ID>] [--triage-receipt <TRIAGE_RECEIPT_ID>] [--action recorded_pending|progressed|closed|reopened]\n       tuku incident closure --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>]\n       tuku incident risk --task <TASK_ID> [--limit N] [--before-receipt <FOLLOWUP_RECEIPT_ID>]\n       tuku operator acknowledge-review-gap --task <TASK_ID> [--session <SHELL_SESSION_ID>] [--kind missing_review_marker|stale_review|source_scoped_only|source_scoped_stale] [--summary TEXT]"
 }
 
 func parseRecoveryActionKind(value string) (recoveryaction.Kind, error) {
@@ -1063,7 +1116,31 @@ func (a *CLIApplication) runPrimaryEntry(ctx context.Context, socketPath string,
 	if err != nil {
 		return err
 	}
-	preference, explicit, launcherUsed, err := resolvePrimaryEntryWorkerPreference(ctx, a, explicitWorkerArg, *worker, repoDetected)
+	selection := primaryWorkerSelectionContext{}
+	resolution := repoShellTaskResolution{}
+	var source tukushell.SnapshotSource
+	if repoDetected {
+		remembered, loadErr := loadPrimaryWorkerPref()
+		if loadErr == nil {
+			selection.Remembered = remembered
+		}
+		if explicit, _, explicitErr := parsePrimaryEntryExplicitWorkerPreference(explicitWorkerArg, *worker); explicitErr != nil {
+			return explicitErr
+		} else if !explicit {
+			resolution, err = resolveShellTaskForRepoWithDaemonBootstrap(ctx, socketPath, repoRoot, orchestrator.DefaultRepoContinueGoal)
+			if err != nil {
+				return err
+			}
+			source, err = newPrimaryRepoSnapshotSource(socketPath, repoRoot, resolution.Created)
+			if err != nil {
+				return err
+			}
+			if snapshot, loadErr := source.Load(string(resolution.TaskID)); loadErr == nil {
+				selection.Recommendation = primaryEntryWorkerRecommendation(snapshot, selection.Remembered)
+			}
+		}
+	}
+	preference, explicit, launcherUsed, err := resolvePrimaryEntryWorkerPreference(ctx, a, explicitWorkerArg, *worker, repoDetected, selection)
 	if err != nil {
 		if errors.Is(err, errPrimaryWorkerSelectionCancelled) {
 			return nil
@@ -1080,9 +1157,11 @@ func (a *CLIApplication) runPrimaryEntry(ctx context.Context, socketPath string,
 	if explicit {
 		_ = savePrimaryWorkerPref(preference)
 	}
-	resolution, err := resolveShellTaskForRepoWithDaemonBootstrap(ctx, socketPath, repoRoot, orchestrator.DefaultRepoContinueGoal)
-	if err != nil {
-		return err
+	if resolution.TaskID == "" {
+		resolution, err = resolveShellTaskForRepoWithDaemonBootstrap(ctx, socketPath, repoRoot, orchestrator.DefaultRepoContinueGoal)
+		if err != nil {
+			return err
+		}
 	}
 	if launcherUsed {
 		if err := clearPrimaryLauncherFn(os.Stdout); err != nil {
@@ -1092,40 +1171,52 @@ func (a *CLIApplication) runPrimaryEntry(ctx context.Context, socketPath string,
 	if a.openShellFn != nil {
 		return a.openShellFn(ctx, socketPath, string(resolution.TaskID), preference)
 	}
-	source, err := newPrimaryRepoSnapshotSource(socketPath, repoRoot, resolution.Created)
-	if err != nil {
-		return err
+	if source == nil {
+		source, err = newPrimaryRepoSnapshotSource(socketPath, repoRoot, resolution.Created)
+		if err != nil {
+			return err
+		}
 	}
 	return a.openShellWithSource(ctx, string(resolution.TaskID), preference, "", source)
 }
 
-func resolvePrimaryEntryWorkerPreference(ctx context.Context, app *CLIApplication, positional string, flagValue string, repoDetected bool) (tukushell.WorkerPreference, bool, bool, error) {
+func parsePrimaryEntryExplicitWorkerPreference(positional string, flagValue string) (bool, tukushell.WorkerPreference, error) {
 	if raw := strings.TrimSpace(positional); raw != "" {
 		preference, err := parseShellWorkerPreference(raw)
 		if err != nil {
-			return "", false, false, err
+			return false, "", err
 		}
-		return preference, true, false, nil
+		return preference != tukushell.WorkerPreferenceAuto, preference, nil
 	}
 	preference, err := parseShellWorkerPreference(flagValue)
 	if err != nil {
+		return false, "", err
+	}
+	return preference != tukushell.WorkerPreferenceAuto, preference, nil
+}
+
+func resolvePrimaryEntryWorkerPreference(ctx context.Context, app *CLIApplication, positional string, flagValue string, repoDetected bool, selection primaryWorkerSelectionContext) (tukushell.WorkerPreference, bool, bool, error) {
+	explicit, preference, err := parsePrimaryEntryExplicitWorkerPreference(positional, flagValue)
+	if err != nil {
 		return "", false, false, err
 	}
-	if preference != tukushell.WorkerPreferenceAuto {
+	if explicit {
 		return preference, true, false, nil
 	}
 	if !repoDetected {
 		return tukushell.WorkerPreferenceAuto, false, false, nil
 	}
-	remembered, err := loadPrimaryWorkerPref()
-	if err != nil {
-		remembered = tukushell.WorkerPreferenceAuto
+	if selection.Remembered == "" {
+		selection.Remembered, err = loadPrimaryWorkerPref()
+		if err != nil {
+			selection.Remembered = tukushell.WorkerPreferenceAuto
+		}
 	}
 	chooser := runPrimaryWorkerLauncher
 	if app != nil && app.chooseWorkerFn != nil {
 		chooser = app.chooseWorkerFn
 	}
-	chosen, err := chooser(ctx, remembered)
+	chosen, err := chooser(ctx, selection)
 	if err != nil {
 		return "", false, true, err
 	}
@@ -1134,6 +1225,49 @@ func resolvePrimaryEntryWorkerPreference(ctx context.Context, app *CLIApplicatio
 	}
 	_ = savePrimaryWorkerPref(chosen)
 	return chosen, true, true, nil
+}
+
+func primaryEntryWorkerRecommendation(snapshot tukushell.Snapshot, remembered tukushell.WorkerPreference) provider.Recommendation {
+	briefPosture := ""
+	requiresClarification := false
+	validatorCount := 0
+	rankedTargets := 0
+	confidenceLevel := ""
+	estimatedSavings := 0
+	normalizedTaskType := ""
+	latestRunStatus := ""
+	handoffStatus := ""
+	if snapshot.Brief != nil {
+		briefPosture = snapshot.Brief.Posture
+		requiresClarification = snapshot.Brief.RequiresClarification
+		validatorCount = len(snapshot.Brief.ValidatorCommands)
+		rankedTargets = len(snapshot.Brief.PromptTargets)
+		confidenceLevel = snapshot.Brief.ConfidenceLevel
+		estimatedSavings = snapshot.Brief.EstimatedTokenSavings
+	}
+	if snapshot.CompiledIntent != nil && strings.TrimSpace(snapshot.CompiledIntent.Class) != "" {
+		normalizedTaskType = snapshot.CompiledIntent.Class
+	}
+	if snapshot.Run != nil {
+		latestRunStatus = snapshot.Run.Status
+	}
+	if snapshot.Handoff != nil {
+		handoffStatus = snapshot.Handoff.Status
+	}
+	return provider.Recommend(provider.Signals{
+		NormalizedTaskType:    normalizedTaskType,
+		BriefPosture:          briefPosture,
+		RequiresClarification: requiresClarification,
+		ValidatorCount:        validatorCount,
+		RankedTargetCount:     rankedTargets,
+		EstimatedTokenSavings: estimatedSavings,
+		ConfidenceLevel:       confidenceLevel,
+		LatestRunWorker:       provider.WorkerKind(strings.ToLower(strings.TrimSpace(snapshot.RunWorkerKind()))),
+		LatestRunStatus:       strings.ToUpper(strings.TrimSpace(latestRunStatus)),
+		HandoffTarget:         provider.WorkerKind(strings.ToLower(strings.TrimSpace(snapshot.HandoffTargetWorker()))),
+		HandoffStatus:         strings.ToUpper(strings.TrimSpace(handoffStatus)),
+		RememberedWorker:      provider.WorkerKind(strings.ToLower(strings.TrimSpace(string(remembered)))),
+	})
 }
 
 func (a *CLIApplication) runPrimaryBubbleEntry(ctx context.Context, socketPath string, args []string) error {
@@ -3070,14 +3204,106 @@ func writeOperatorReviewGapAcknowledgment(out *os.File, response ipc.TaskOperato
 }
 
 func writeTaskStatusHuman(out *os.File, response ipc.TaskStatusResponse) error {
+	var benchmarkView *benchmark.Run
+	if strings.TrimSpace(string(response.CurrentBenchmarkID)) != "" {
+		benchmarkView = &benchmark.Run{
+			BenchmarkID:                   response.CurrentBenchmarkID,
+			TaskID:                        response.TaskID,
+			Source:                        response.CurrentBenchmarkSource,
+			RawPromptTokenEstimate:        response.CurrentBenchmarkRawPromptTokens,
+			DispatchPromptTokenEstimate:   response.CurrentBenchmarkDispatchPromptTokens,
+			StructuredPromptTokenEstimate: response.CurrentBenchmarkStructuredPromptTokens,
+			SelectedContextTokenEstimate:  response.CurrentBenchmarkSelectedContextTokens,
+			EstimatedTokenSavings:         response.CurrentBenchmarkEstimatedTokenSavings,
+			FilesScanned:                  response.CurrentBenchmarkFilesScanned,
+			RankedTargetCount:             response.CurrentBenchmarkRankedTargetCount,
+			CandidateRecallAt3:            response.CurrentBenchmarkCandidateRecallAt3,
+			StructuredCheaper:             response.CurrentBenchmarkStructuredCheaper,
+			DefaultSerializer:             response.CurrentBenchmarkDefaultSerializer,
+			ConfidenceValue:               response.CurrentBenchmarkConfidenceValue,
+			ConfidenceLevel:               response.CurrentBenchmarkConfidenceLevel,
+			Summary:                       response.CurrentBenchmarkSummary,
+		}
+	}
 	lines := []string{
 		fmt.Sprintf("task %s", response.TaskID),
 		fmt.Sprintf("phase %s | status %s", nonEmpty(string(response.Phase), "UNKNOWN"), nonEmpty(response.Status, "UNKNOWN")),
 		fmt.Sprintf("required-next %s", nonEmpty(response.RequiredNextOperatorAction, "none")),
 	}
+	lines = append(lines, providerHumanLines(recommendationFromCompiledBrief(response.CompiledBrief, benchmarkView, "", string(response.LatestRunStatus), "", ""))...)
+	if response.CurrentContextPackID != "" {
+		lines = append(lines, fmt.Sprintf(
+			"context-pack %s | mode %s | files %d",
+			response.CurrentContextPackID,
+			nonEmpty(response.CurrentContextPackMode, "unknown"),
+			response.CurrentContextPackFileCount,
+		))
+		if response.CurrentContextPackHash != "" {
+			lines = append(lines, "context-pack hash "+response.CurrentContextPackHash)
+		}
+	}
+	if response.LatestPolicyDecisionID != "" {
+		lines = append(lines, fmt.Sprintf(
+			"policy %s | status %s | risk %s",
+			response.LatestPolicyDecisionID,
+			nonEmpty(response.LatestPolicyDecisionStatus, "unknown"),
+			nonEmpty(response.LatestPolicyDecisionRiskLevel, "unknown"),
+		))
+		if response.LatestPolicyDecisionReason != "" {
+			lines = append(lines, "policy reason "+response.LatestPolicyDecisionReason)
+		}
+	}
+	if response.LatestRunID != "" {
+		lines = append(lines, fmt.Sprintf(
+			"run %s | status %s | changed %d",
+			response.LatestRunID,
+			nonEmpty(string(response.LatestRunStatus), "unknown"),
+			len(response.LatestRunChangedFiles),
+		))
+		if response.LatestRunChangedFilesSemantics != "" {
+			lines = append(lines, "run changes "+response.LatestRunChangedFilesSemantics)
+		}
+		if response.LatestRunRepoDiffSummary != "" {
+			lines = append(lines, "repo diff "+response.LatestRunRepoDiffSummary)
+		}
+		if response.LatestRunWorktreeSummary != "" {
+			lines = append(lines, "worktree "+response.LatestRunWorktreeSummary)
+		}
+		if len(response.LatestRunValidationSignals) > 0 {
+			lines = append(lines, "validation "+strings.Join(response.LatestRunValidationSignals, " | "))
+		}
+		if response.LatestRunOutputArtifactRef != "" {
+			lines = append(lines, "artifact "+response.LatestRunOutputArtifactRef)
+		}
+	}
 	if response.OperatorDecision != nil && strings.TrimSpace(response.OperatorDecision.Headline) != "" {
 		lines = append(lines, "decision "+response.OperatorDecision.Headline)
 	}
+	lines = append(lines, taskMemoryHumanLines(
+		string(response.CurrentTaskMemoryID),
+		response.CurrentTaskMemorySource,
+		response.CurrentTaskMemorySummary,
+		response.CurrentTaskMemoryFullHistoryTokens,
+		response.CurrentTaskMemoryResumePromptTokens,
+		response.CurrentTaskMemoryCompactionRatio,
+	)...)
+	lines = append(lines, benchmarkHumanLines(
+		string(response.CurrentBenchmarkID),
+		response.CurrentBenchmarkSource,
+		response.CurrentBenchmarkSummary,
+		response.CurrentBenchmarkRawPromptTokens,
+		response.CurrentBenchmarkDispatchPromptTokens,
+		response.CurrentBenchmarkStructuredPromptTokens,
+		response.CurrentBenchmarkSelectedContextTokens,
+		response.CurrentBenchmarkEstimatedTokenSavings,
+		response.CurrentBenchmarkFilesScanned,
+		response.CurrentBenchmarkRankedTargetCount,
+		response.CurrentBenchmarkCandidateRecallAt3,
+		response.CurrentBenchmarkDefaultSerializer,
+		response.CurrentBenchmarkStructuredCheaper,
+		response.CurrentBenchmarkConfidenceLevel,
+		response.CurrentBenchmarkConfidenceValue,
+	)...)
 	lines = append(lines, intentHumanLines(response.CompiledIntent, false)...)
 	lines = append(lines, briefHumanLines(response.CompiledBrief, false)...)
 	lines = append(lines, followUpHumanLines(response.ContinuityIncidentFollowUp, response.ContinuityIncidentFollowUpHistoryRollup, false)...)
@@ -3097,6 +3323,7 @@ func writeTaskInspectHuman(out *os.File, response ipc.TaskInspectResponse) error
 			response.RepoAnchor.WorkingTreeDirty,
 		),
 	}
+	lines = append(lines, providerHumanLines(recommendationFromCompiledBrief(response.CompiledBrief, response.Benchmark, "", "", "", ""))...)
 	if response.OperatorDecision != nil && strings.TrimSpace(response.OperatorDecision.Headline) != "" {
 		lines = append(lines, "decision "+response.OperatorDecision.Headline)
 	}
@@ -3106,6 +3333,35 @@ func writeTaskInspectHuman(out *os.File, response ipc.TaskInspectResponse) error
 			nonEmpty(response.OperatorExecutionPlan.PrimaryStep.Action, "none"),
 			nonEmpty(response.OperatorExecutionPlan.PrimaryStep.Status, "unknown"),
 		))
+	}
+	if response.TaskMemory != nil {
+		lines = append(lines, taskMemoryHumanLines(
+			string(response.TaskMemory.MemoryID),
+			response.TaskMemory.Source,
+			response.TaskMemory.Summary,
+			response.TaskMemory.FullHistoryTokenEstimate,
+			response.TaskMemory.ResumePromptTokenEstimate,
+			response.TaskMemory.MemoryCompactionRatio,
+		)...)
+	}
+	if response.Benchmark != nil {
+		lines = append(lines, benchmarkHumanLines(
+			string(response.Benchmark.BenchmarkID),
+			response.Benchmark.Source,
+			response.Benchmark.Summary,
+			response.Benchmark.RawPromptTokenEstimate,
+			response.Benchmark.DispatchPromptTokenEstimate,
+			response.Benchmark.StructuredPromptTokenEstimate,
+			response.Benchmark.SelectedContextTokenEstimate,
+			response.Benchmark.EstimatedTokenSavings,
+			response.Benchmark.FilesScanned,
+			response.Benchmark.RankedTargetCount,
+			response.Benchmark.CandidateRecallAt3,
+			response.Benchmark.DefaultSerializer,
+			response.Benchmark.StructuredCheaper,
+			response.Benchmark.ConfidenceLevel,
+			response.Benchmark.ConfidenceValue,
+		)...)
 	}
 	lines = append(lines, intentHumanLines(response.CompiledIntent, true)...)
 	lines = append(lines, briefHumanLines(response.CompiledBrief, true)...)
@@ -3196,6 +3452,7 @@ func writeTaskBriefHuman(out *os.File, response ipc.TaskBriefResponse) error {
 	if response.Bounded {
 		lines = append(lines, "bounded read yes")
 	}
+	lines = append(lines, providerHumanLines(recommendationFromCompiledBrief(response.CompiledBrief, nil, "", "", "", ""))...)
 	lines = append(lines, briefHumanLines(response.CompiledBrief, true)...)
 	if response.Brief != nil && strings.TrimSpace(response.Brief.WorkerFraming) != "" {
 		lines = append(lines, "worker framing "+response.Brief.WorkerFraming)
@@ -3206,6 +3463,179 @@ func writeTaskBriefHuman(out *os.File, response ipc.TaskBriefResponse) error {
 	lines = append(lines, "truth generated briefs are bounded advisory execution framing only; they do not imply completion, correctness, or downstream worker completion")
 	_, err := fmt.Fprintln(out, strings.Join(lines, "\n"))
 	return err
+}
+
+type taskPlanView struct {
+	TaskID         common.TaskID                 `json:"task_id"`
+	Phase          string                        `json:"phase,omitempty"`
+	Status         string                        `json:"status,omitempty"`
+	Recommendation provider.Recommendation       `json:"recommendation"`
+	CompiledBrief  *ipc.TaskCompiledBriefSummary `json:"compiled_brief,omitempty"`
+	Benchmark      *benchmark.Run                `json:"benchmark,omitempty"`
+}
+
+func taskPlanViewFromStatus(response ipc.TaskStatusResponse) taskPlanView {
+	var benchmarkView *benchmark.Run
+	if strings.TrimSpace(string(response.CurrentBenchmarkID)) != "" {
+		benchmarkView = &benchmark.Run{
+			BenchmarkID:                   response.CurrentBenchmarkID,
+			TaskID:                        response.TaskID,
+			Source:                        response.CurrentBenchmarkSource,
+			RawPromptTokenEstimate:        response.CurrentBenchmarkRawPromptTokens,
+			DispatchPromptTokenEstimate:   response.CurrentBenchmarkDispatchPromptTokens,
+			StructuredPromptTokenEstimate: response.CurrentBenchmarkStructuredPromptTokens,
+			SelectedContextTokenEstimate:  response.CurrentBenchmarkSelectedContextTokens,
+			EstimatedTokenSavings:         response.CurrentBenchmarkEstimatedTokenSavings,
+			FilesScanned:                  response.CurrentBenchmarkFilesScanned,
+			RankedTargetCount:             response.CurrentBenchmarkRankedTargetCount,
+			CandidateRecallAt3:            response.CurrentBenchmarkCandidateRecallAt3,
+			StructuredCheaper:             response.CurrentBenchmarkStructuredCheaper,
+			DefaultSerializer:             response.CurrentBenchmarkDefaultSerializer,
+			ConfidenceValue:               response.CurrentBenchmarkConfidenceValue,
+			ConfidenceLevel:               response.CurrentBenchmarkConfidenceLevel,
+			Summary:                       response.CurrentBenchmarkSummary,
+		}
+	}
+	return taskPlanView{
+		TaskID:         response.TaskID,
+		Phase:          string(response.Phase),
+		Status:         response.Status,
+		Recommendation: recommendationFromCompiledBrief(response.CompiledBrief, benchmarkView, "", string(response.LatestRunStatus), "", ""),
+		CompiledBrief:  response.CompiledBrief,
+		Benchmark:      benchmarkView,
+	}
+}
+
+func writeTaskPlanHuman(out *os.File, response ipc.TaskStatusResponse) error {
+	plan := taskPlanViewFromStatus(response)
+	lines := []string{
+		fmt.Sprintf("task %s", response.TaskID),
+		"plan advisory",
+		fmt.Sprintf("phase %s | status %s", nonEmpty(plan.Phase, "UNKNOWN"), nonEmpty(plan.Status, "UNKNOWN")),
+	}
+	lines = append(lines, providerHumanLines(plan.Recommendation)...)
+	lines = append(lines, briefHumanLines(plan.CompiledBrief, true)...)
+	if plan.Benchmark != nil {
+		lines = append(lines, benchmarkHumanLines(
+			string(plan.Benchmark.BenchmarkID),
+			plan.Benchmark.Source,
+			plan.Benchmark.Summary,
+			plan.Benchmark.RawPromptTokenEstimate,
+			plan.Benchmark.DispatchPromptTokenEstimate,
+			plan.Benchmark.StructuredPromptTokenEstimate,
+			plan.Benchmark.SelectedContextTokenEstimate,
+			plan.Benchmark.EstimatedTokenSavings,
+			plan.Benchmark.FilesScanned,
+			plan.Benchmark.RankedTargetCount,
+			plan.Benchmark.CandidateRecallAt3,
+			plan.Benchmark.DefaultSerializer,
+			plan.Benchmark.StructuredCheaper,
+			plan.Benchmark.ConfidenceLevel,
+			plan.Benchmark.ConfidenceValue,
+		)...)
+	}
+	lines = append(lines, "truth plan output is bounded Tuku orchestration guidance only; it recommends routing and scoped execution framing rather than claiming downstream completion")
+	_, err := fmt.Fprintln(out, strings.Join(lines, "\n"))
+	return err
+}
+
+func writeTaskBenchmarkHuman(out *os.File, response ipc.TaskBenchmarkResponse) error {
+	lines := []string{
+		fmt.Sprintf("task %s", response.TaskID),
+		"benchmark advisory",
+	}
+	lines = append(lines, providerHumanLines(recommendationFromCompiledBrief(response.CompiledBrief, response.Benchmark, "", "", "", ""))...)
+	if response.Benchmark == nil {
+		lines = append(lines, "  digest none")
+	} else {
+		lines = append(lines,
+			fmt.Sprintf("  id %s | source %s", response.Benchmark.BenchmarkID, nonEmpty(response.Benchmark.Source, "unknown")),
+			fmt.Sprintf("  summary %s", nonEmpty(strings.TrimSpace(response.Benchmark.Summary), "benchmark summary unavailable")),
+			fmt.Sprintf("  tokens raw=%d dispatch=%d structured=%d selected-context=%d saved=%d",
+				response.Benchmark.RawPromptTokenEstimate,
+				response.Benchmark.DispatchPromptTokenEstimate,
+				response.Benchmark.StructuredPromptTokenEstimate,
+				response.Benchmark.SelectedContextTokenEstimate,
+				response.Benchmark.EstimatedTokenSavings,
+			),
+			fmt.Sprintf("  targeting files-scanned=%d ranked-targets=%d recall@3=%.2f",
+				response.Benchmark.FilesScanned,
+				response.Benchmark.RankedTargetCount,
+				response.Benchmark.CandidateRecallAt3,
+			),
+			fmt.Sprintf("  serializer %s | structured-cheaper=%t | confidence %s %.2f",
+				nonEmpty(response.Benchmark.DefaultSerializer, "natural_language"),
+				response.Benchmark.StructuredCheaper,
+				nonEmpty(response.Benchmark.ConfidenceLevel, "unknown"),
+				response.Benchmark.ConfidenceValue,
+			),
+		)
+		if len(response.Benchmark.ChangedFiles) > 0 {
+			lines = append(lines, "  changed "+strings.Join(response.Benchmark.ChangedFiles, ", "))
+		}
+	}
+	lines = append(lines, briefHumanLines(response.CompiledBrief, true)...)
+	lines = append(lines, "truth benchmark output is bounded Tuku telemetry only; it estimates prompt and context savings rather than provider-billed token counts")
+	_, err := fmt.Fprintln(out, strings.Join(lines, "\n"))
+	return err
+}
+
+func recommendationFromCompiledBrief(
+	compiled *ipc.TaskCompiledBriefSummary,
+	benchmarkView *benchmark.Run,
+	latestRunWorker string,
+	latestRunStatus string,
+	handoffTarget string,
+	handoffStatus string,
+) provider.Recommendation {
+	signals := provider.Signals{
+		LatestRunWorker: provider.WorkerKind(strings.ToLower(strings.TrimSpace(latestRunWorker))),
+		LatestRunStatus: strings.ToUpper(strings.TrimSpace(latestRunStatus)),
+		HandoffTarget:   provider.WorkerKind(strings.ToLower(strings.TrimSpace(handoffTarget))),
+		HandoffStatus:   strings.ToUpper(strings.TrimSpace(handoffStatus)),
+	}
+	if compiled != nil {
+		signals.BriefPosture = compiled.Posture
+		signals.RequiresClarification = compiled.RequiresClarification
+		if promptIR := compiled.PromptIR; promptIR != nil {
+			signals.NormalizedTaskType = promptIR.NormalizedTaskType
+			signals.ValidatorCount = len(promptIR.ValidatorPlan.Commands)
+			signals.RankedTargetCount = len(promptIR.RankedTargets)
+			signals.ConfidenceLevel = promptIR.Confidence.Level
+		}
+	}
+	if benchmarkView != nil {
+		signals.EstimatedTokenSavings = benchmarkView.EstimatedTokenSavings
+		if signals.ConfidenceLevel == "" {
+			signals.ConfidenceLevel = benchmarkView.ConfidenceLevel
+		}
+		if signals.RankedTargetCount == 0 {
+			signals.RankedTargetCount = benchmarkView.RankedTargetCount
+		}
+	}
+	return provider.Recommend(signals)
+}
+
+func providerHumanLines(recommendation provider.Recommendation) []string {
+	lines := []string{"worker routing"}
+	if recommendation.Worker == "" || recommendation.Worker == provider.WorkerUnknown {
+		return append(lines, "  digest none")
+	}
+	lines = append(lines, fmt.Sprintf(
+		"  recommended %s | confidence %s",
+		provider.Label(recommendation.Worker),
+		nonEmpty(recommendation.Confidence, "unknown"),
+	))
+	if reason := strings.TrimSpace(recommendation.Reason); reason != "" {
+		lines = append(lines, "  reason "+reason)
+	}
+	for _, why := range recommendation.Why {
+		if strings.EqualFold(strings.TrimSpace(why), strings.TrimSpace(recommendation.Reason)) {
+			continue
+		}
+		lines = append(lines, "  why "+why)
+	}
+	return lines
 }
 
 func writeTaskNextHuman(out *os.File, response ipc.TaskExecutePrimaryOperatorStepResponse) error {
@@ -3494,6 +3924,21 @@ func briefHumanLines(compiled *ipc.TaskCompiledBriefSummary, includeDetails bool
 	if compiled.BoundedEvidenceMessages > 0 {
 		lines = append(lines, fmt.Sprintf("  window bounded recent messages=%d", compiled.BoundedEvidenceMessages))
 	}
+	if triage := compiled.PromptTriage; triage != nil && triage.Applied {
+		lines = append(lines, fmt.Sprintf("  prompt sharpened yes | files scanned %d | candidates %d | saved context tokens %d", triage.FilesScanned, len(triage.CandidateFiles), triage.ContextTokenSavingsEstimate))
+	}
+	if memory := compiled.MemoryCompression; memory != nil && memory.Applied {
+		lines = append(lines, fmt.Sprintf("  task memory yes | history tokens %d | resume tokens %d | compaction %.2fx", memory.FullHistoryTokenEstimate, memory.ResumePromptTokenEstimate, memory.MemoryCompactionRatio))
+	}
+	if promptIR := compiled.PromptIR; promptIR != nil && (len(promptIR.RankedTargets) > 0 || len(promptIR.ValidatorPlan.Commands) > 0) {
+		lines = append(lines, fmt.Sprintf(
+			"  prompt ir yes | targets %d | validators %d | confidence %s %.2f",
+			len(promptIR.RankedTargets),
+			len(promptIR.ValidatorPlan.Commands),
+			nonEmpty(promptIR.Confidence.Level, "unknown"),
+			promptIR.Confidence.Value,
+		))
+	}
 	detail := strings.TrimSpace(compiled.Advisory)
 	if detail != "" {
 		lines = append(lines, "  detail "+detail)
@@ -3527,7 +3972,147 @@ func briefHumanLines(compiled *ipc.TaskCompiledBriefSummary, includeDetails bool
 		if framing := strings.TrimSpace(compiled.WorkerFraming); framing != "" {
 			lines = append(lines, "  framing "+framing)
 		}
+		if triage := compiled.PromptTriage; triage != nil && triage.Applied {
+			if summary := strings.TrimSpace(triage.Summary); summary != "" {
+				lines = append(lines, "  triage "+summary)
+			}
+			if len(triage.SearchTerms) > 0 {
+				lines = append(lines, "  search "+strings.Join(triage.SearchTerms, ", "))
+			}
+			if len(triage.CandidateFiles) > 0 {
+				lines = append(lines, "  candidates "+strings.Join(triage.CandidateFiles, ", "))
+			}
+			lines = append(lines, fmt.Sprintf("  token estimate raw=%d rewritten=%d search-space=%d selected-context=%d saved=%d",
+				triage.RawPromptTokenEstimate,
+				triage.RewrittenPromptTokenEstimate,
+				triage.SearchSpaceTokenEstimate,
+				triage.SelectedContextTokenEstimate,
+				triage.ContextTokenSavingsEstimate,
+			))
+		}
+		if memory := compiled.MemoryCompression; memory != nil && memory.Applied {
+			if summary := strings.TrimSpace(memory.Summary); summary != "" {
+				lines = append(lines, "  memory "+summary)
+			}
+			lines = append(lines, fmt.Sprintf("  memory tokens history=%d resume=%d compaction=%.2fx facts=%d touched=%d validators=%d candidates=%d rejected=%d unknowns=%d",
+				memory.FullHistoryTokenEstimate,
+				memory.ResumePromptTokenEstimate,
+				memory.MemoryCompactionRatio,
+				memory.ConfirmedFactsCount,
+				memory.TouchedFilesCount,
+				memory.ValidatorsRunCount,
+				memory.CandidateFilesCount,
+				memory.RejectedHypothesesCount,
+				memory.UnknownsCount,
+			))
+		}
+		if promptIR := compiled.PromptIR; promptIR != nil {
+			if taskType := strings.TrimSpace(promptIR.NormalizedTaskType); taskType != "" {
+				lines = append(lines, "  prompt ir type "+taskType)
+			}
+			if len(promptIR.RankedTargets) > 0 {
+				targets := make([]string, 0, min(len(promptIR.RankedTargets), 5))
+				for _, target := range promptIR.RankedTargets {
+					label := strings.TrimSpace(target.Path)
+					if strings.TrimSpace(target.Name) != "" {
+						if label != "" {
+							label = label + "#" + strings.TrimSpace(target.Name)
+						} else {
+							label = strings.TrimSpace(target.Name)
+						}
+					}
+					if label == "" {
+						continue
+					}
+					targets = append(targets, label)
+					if len(targets) >= 5 {
+						break
+					}
+				}
+				if len(targets) > 0 {
+					lines = append(lines, "  prompt ir targets "+strings.Join(targets, ", "))
+				}
+			}
+			if len(promptIR.OperationPlan) > 0 {
+				lines = append(lines, "  prompt ir plan "+strings.Join(promptIR.OperationPlan, " | "))
+			}
+			if len(promptIR.ValidatorPlan.Commands) > 0 {
+				lines = append(lines, "  validators "+strings.Join(promptIR.ValidatorPlan.Commands, " | "))
+			}
+			lines = append(lines, fmt.Sprintf(
+				"  serializer default=%s natural=%d structured=%d structured-cheaper=%t",
+				nonEmpty(string(promptIR.DefaultSerializer), "natural_language"),
+				promptIR.NaturalLanguageTokens,
+				promptIR.StructuredTokens,
+				promptIR.StructuredCheaper,
+			))
+			if reason := strings.TrimSpace(promptIR.Confidence.Reason); reason != "" {
+				lines = append(lines, "  confidence "+nonEmpty(promptIR.Confidence.Level, "unknown")+" "+reason)
+			}
+		}
 	}
+	return lines
+}
+
+func taskMemoryHumanLines(memoryID string, source string, summary string, fullHistoryTokens int, resumeTokens int, compactionRatio float64) []string {
+	lines := []string{"task memory"}
+	if strings.TrimSpace(memoryID) == "" {
+		return append(lines, "  digest none")
+	}
+	lines = append(lines, fmt.Sprintf("  id %s | source %s", memoryID, nonEmpty(source, "unknown")))
+	lines = append(lines, fmt.Sprintf("  history tokens %d | resume tokens %d | compaction %.2fx", fullHistoryTokens, resumeTokens, compactionRatio))
+	if strings.TrimSpace(summary) != "" {
+		lines = append(lines, "  summary "+summary)
+	}
+	return lines
+}
+
+func benchmarkHumanLines(
+	benchmarkID string,
+	source string,
+	summary string,
+	rawTokens int,
+	dispatchTokens int,
+	structuredTokens int,
+	selectedContextTokens int,
+	estimatedSavings int,
+	filesScanned int,
+	rankedTargets int,
+	recallAt3 float64,
+	defaultSerializer string,
+	structuredCheaper bool,
+	confidenceLevel string,
+	confidenceValue float64,
+) []string {
+	lines := []string{"benchmark"}
+	if strings.TrimSpace(benchmarkID) == "" {
+		return append(lines, "  digest none")
+	}
+	lines = append(lines, fmt.Sprintf("  id %s | source %s", benchmarkID, nonEmpty(source, "unknown")))
+	if strings.TrimSpace(summary) != "" {
+		lines = append(lines, "  summary "+summary)
+	}
+	lines = append(lines, fmt.Sprintf(
+		"  tokens raw=%d dispatch=%d structured=%d selected-context=%d saved=%d",
+		rawTokens,
+		dispatchTokens,
+		structuredTokens,
+		selectedContextTokens,
+		estimatedSavings,
+	))
+	lines = append(lines, fmt.Sprintf(
+		"  targeting files-scanned=%d ranked-targets=%d recall@3=%.2f",
+		filesScanned,
+		rankedTargets,
+		recallAt3,
+	))
+	lines = append(lines, fmt.Sprintf(
+		"  serializer %s | structured-cheaper=%t | confidence %s %.2f",
+		nonEmpty(defaultSerializer, "natural_language"),
+		structuredCheaper,
+		nonEmpty(confidenceLevel, "unknown"),
+		confidenceValue,
+	))
 	return lines
 }
 

@@ -3,6 +3,7 @@ package storage
 import (
 	"time"
 
+	"tuku/internal/domain/benchmark"
 	"tuku/internal/domain/brief"
 	"tuku/internal/domain/capsule"
 	"tuku/internal/domain/checkpoint"
@@ -17,6 +18,7 @@ import (
 	"tuku/internal/domain/proof"
 	"tuku/internal/domain/recoveryaction"
 	"tuku/internal/domain/run"
+	"tuku/internal/domain/taskmemory"
 	"tuku/internal/domain/transition"
 )
 
@@ -126,6 +128,18 @@ type ContextPackStore interface {
 	Get(id common.ContextPackID) (contextdomain.Pack, error)
 }
 
+type TaskMemoryStore interface {
+	Save(snapshot taskmemory.Snapshot) error
+	Get(memoryID common.MemoryID) (taskmemory.Snapshot, error)
+	LatestByTask(taskID common.TaskID) (taskmemory.Snapshot, error)
+}
+
+type BenchmarkStore interface {
+	Save(run benchmark.Run) error
+	Get(benchmarkID common.BenchmarkID) (benchmark.Run, error)
+	LatestByTask(taskID common.TaskID) (benchmark.Run, error)
+}
+
 type PolicyDecisionStore interface {
 	Save(decision policy.Decision) error
 	Get(decisionID common.DecisionID) (policy.Decision, error)
@@ -146,6 +160,8 @@ type Store interface {
 	IncidentTriages() IncidentTriageStore
 	IncidentFollowUps() IncidentFollowUpStore
 	ContextPacks() ContextPackStore
+	TaskMemories() TaskMemoryStore
+	Benchmarks() BenchmarkStore
 	PolicyDecisions() PolicyDecisionStore
 	WithTx(fn func(Store) error) error
 }

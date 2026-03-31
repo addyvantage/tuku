@@ -28,6 +28,7 @@ type Service interface {
 	ReadContinuityIncidentTaskRisk(ctx context.Context, req ReadContinuityIncidentTaskRiskRequest) (ReadContinuityIncidentTaskRiskResult, error)
 	ReadCompiledIntent(ctx context.Context, req ReadCompiledIntentRequest) (ReadCompiledIntentResult, error)
 	ReadGeneratedBrief(ctx context.Context, req ReadGeneratedBriefRequest) (ReadGeneratedBriefResult, error)
+	ReadBenchmark(ctx context.Context, req ReadBenchmarkRequest) (BenchmarkTaskResult, error)
 	StatusTask(ctx context.Context, taskID string) (StatusTaskResult, error)
 	InspectTask(ctx context.Context, taskID string) (InspectTaskResult, error)
 	ShellSnapshotTask(ctx context.Context, taskID string) (ShellSnapshotResult, error)

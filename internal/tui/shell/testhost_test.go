@@ -8,6 +8,8 @@ type stubHost struct {
 	lines        []string
 	activity     []string
 	canInput     bool
+	canInterrupt bool
+	interrupts   int
 	status       HostStatus
 	writes       [][]byte
 	resizes      [][2]int
@@ -48,6 +50,18 @@ func (h *stubHost) WriteInput(data []byte) bool {
 	}
 	cp := append([]byte{}, data...)
 	h.writes = append(h.writes, cp)
+	return true
+}
+
+func (h *stubHost) CanInterrupt() bool {
+	return h.canInterrupt
+}
+
+func (h *stubHost) Interrupt() bool {
+	if !h.canInterrupt {
+		return false
+	}
+	h.interrupts++
 	return true
 }
 

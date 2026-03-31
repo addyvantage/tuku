@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"tuku/internal/domain/provider"
 	tukushell "tuku/internal/tui/shell"
 )
 
@@ -30,8 +31,10 @@ type primaryWorkerPreferenceFile struct {
 }
 
 type primaryWorkerOption struct {
-	Preference tukushell.WorkerPreference
-	Title      string
+	Preference  tukushell.WorkerPreference
+	Title       string
+	Summary     string
+	Recommended bool
 }
 
 type primaryWorkerLauncherModel struct {
@@ -39,11 +42,12 @@ type primaryWorkerLauncherModel struct {
 	height    int
 	selected  int
 	options   []primaryWorkerOption
+	selection primaryWorkerSelectionContext
 	cancelled bool
 }
 
-func runPrimaryWorkerLauncher(ctx context.Context, remembered tukushell.WorkerPreference) (tukushell.WorkerPreference, error) {
-	model := newPrimaryWorkerLauncherModel(remembered)
+func runPrimaryWorkerLauncher(ctx context.Context, selection primaryWorkerSelectionContext) (tukushell.WorkerPreference, error) {
+	model := newPrimaryWorkerLauncherModel(selection)
 	finalModel, err := tea.NewProgram(
 		model,
 		tea.WithContext(ctx),
@@ -61,17 +65,45 @@ func runPrimaryWorkerLauncher(ctx context.Context, remembered tukushell.WorkerPr
 	return launcher.options[launcher.selected].Preference, nil
 }
 
-func newPrimaryWorkerLauncherModel(remembered tukushell.WorkerPreference) primaryWorkerLauncherModel {
+func newPrimaryWorkerLauncherModel(selection primaryWorkerSelectionContext) primaryWorkerLauncherModel {
 	selected := 0
-	if remembered == tukushell.WorkerPreferenceClaude {
+	if selection.Remembered == tukushell.WorkerPreferenceClaude {
+		selected = 1
+	} else if selection.Remembered == tukushell.WorkerPreferenceAuto && selection.Recommendation.Worker == provider.WorkerClaude {
 		selected = 1
 	}
-	return primaryWorkerLauncherModel{
-		selected: selected,
-		options: []primaryWorkerOption{
+	candidates := selection.Recommendation.Candidates
+	if len(candidates) == 0 {
+		candidates = provider.Registry()
+	}
+	options := make([]primaryWorkerOption, 0, len(candidates))
+	for _, candidate := range candidates {
+		preference := tukushell.WorkerPreferenceCodex
+		switch candidate.Worker {
+		case provider.WorkerClaude:
+			preference = tukushell.WorkerPreferenceClaude
+		case provider.WorkerCodex:
+			preference = tukushell.WorkerPreferenceCodex
+		default:
+			continue
+		}
+		options = append(options, primaryWorkerOption{
+			Preference:  preference,
+			Title:       "Launch with " + provider.Label(candidate.Worker),
+			Summary:     strings.TrimSpace(candidate.Summary),
+			Recommended: candidate.Worker == selection.Recommendation.Worker,
+		})
+	}
+	if len(options) == 0 {
+		options = []primaryWorkerOption{
 			{Preference: tukushell.WorkerPreferenceCodex, Title: "Launch with Codex"},
 			{Preference: tukushell.WorkerPreferenceClaude, Title: "Launch with Claude"},
-		},
+		}
+	}
+	return primaryWorkerLauncherModel{
+		selected:  selected,
+		options:   options,
+		selection: selection,
 	}
 }
 
@@ -114,18 +146,30 @@ func (m primaryWorkerLauncherModel) View() string {
 	subtitle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render("Pick one to open the shell.")
 	option := lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB"))
 	selected := lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true)
+	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF"))
+	recommended := lipgloss.NewStyle().Foreground(lipgloss.Color("#86EFAC")).Bold(true)
 	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("↑↓ move • Enter select • Esc cancel")
 
 	lines := []string{"", kicker, title, subtitle, ""}
+	if m.selection.Recommendation.Worker != "" && m.selection.Recommendation.Worker != provider.WorkerUnknown {
+		lines = append(lines, recommended.Render("Recommended: "+provider.Label(m.selection.Recommendation.Worker)+" ("+nonEmpty(strings.TrimSpace(m.selection.Recommendation.Confidence), "medium")+")"))
+		if reason := strings.TrimSpace(m.selection.Recommendation.Reason); reason != "" {
+			lines = append(lines, muted.Render("  "+reason))
+		}
+		lines = append(lines, "")
+	}
 	for idx, item := range m.options {
 		row := "  " + item.Title
-		if item.Preference == tukushell.WorkerPreferenceCodex && m.selected != idx {
-			row = "  Launch with Codex"
+		if item.Recommended {
+			row += " [recommended]"
 		}
 		if idx == m.selected {
 			lines = append(lines, selected.Render("› "+strings.TrimSpace(row)))
 		} else {
 			lines = append(lines, option.Render(row))
+		}
+		if summary := strings.TrimSpace(item.Summary); summary != "" {
+			lines = append(lines, muted.Render("    "+summary))
 		}
 	}
 	lines = append(lines, "", hint)

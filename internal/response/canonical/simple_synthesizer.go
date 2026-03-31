@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"tuku/internal/domain/capsule"
 	"tuku/internal/domain/proof"
@@ -20,11 +21,13 @@ func (s *SimpleSynthesizer) Synthesize(_ context.Context, c capsule.WorkCapsule,
 	briefSummary := "Execution brief has not been generated yet."
 	runSummary := "No active execution run."
 	evidenceSummary := "No worker execution evidence has been captured yet."
+	validationSummary := "Validation has not run yet."
 	unknownsSummary := "Unknowns remain until validation is performed."
 	intentSet := false
 	briefSet := false
 	runSet := false
 	evidenceSet := false
+	validationSet := false
 	for i := len(evidence) - 1; i >= 0; i-- {
 		e := evidence[i]
 		switch e.Type {
@@ -103,10 +106,10 @@ func (s *SimpleSynthesizer) Synthesize(_ context.Context, c capsule.WorkCapsule,
 				continue
 			}
 			var payload struct {
-				ExitCode             int      `json:"exit_code"`
-				Summary              string   `json:"summary"`
-				ChangedFiles         []string `json:"changed_files"`
-				ChangedFilesSemantics string  `json:"changed_files_semantics"`
+				ExitCode              int      `json:"exit_code"`
+				Summary               string   `json:"summary"`
+				ChangedFiles          []string `json:"changed_files"`
+				ChangedFilesSemantics string   `json:"changed_files_semantics"`
 			}
 			if err := json.Unmarshal([]byte(e.PayloadJSON), &payload); err == nil {
 				if payload.Summary != "" {
@@ -115,29 +118,59 @@ func (s *SimpleSynthesizer) Synthesize(_ context.Context, c capsule.WorkCapsule,
 					evidenceSummary = fmt.Sprintf("Worker evidence captured (exit code %d).", payload.ExitCode)
 				}
 				if len(payload.ChangedFiles) > 0 {
-					if payload.ChangedFilesSemantics != "" {
-						unknownsSummary = fmt.Sprintf("Worker reported %d changed-file hint(s) (%s); explicit validation remains unknown until validation logic runs.", len(payload.ChangedFiles), payload.ChangedFilesSemantics)
-					} else {
-						unknownsSummary = fmt.Sprintf("Worker reported %d changed file(s); explicit validation remains unknown until validation logic runs.", len(payload.ChangedFiles))
+					if !validationSet {
+						if payload.ChangedFilesSemantics != "" {
+							unknownsSummary = fmt.Sprintf("Worker reported %d changed-file hint(s) (%s); explicit validation remains unknown until validation logic runs.", len(payload.ChangedFiles), payload.ChangedFilesSemantics)
+						} else {
+							unknownsSummary = fmt.Sprintf("Worker reported %d changed file(s); explicit validation remains unknown until validation logic runs.", len(payload.ChangedFiles))
+						}
 					}
 				} else {
-					if payload.ChangedFilesSemantics != "" {
-						unknownsSummary = fmt.Sprintf("No changed-file hints were detected (%s); validation status remains unknown.", payload.ChangedFilesSemantics)
-					} else {
-						unknownsSummary = "No changed files were detected in captured evidence; validation status remains unknown."
+					if !validationSet {
+						if payload.ChangedFilesSemantics != "" {
+							unknownsSummary = fmt.Sprintf("No changed-file hints were detected (%s); validation status remains unknown.", payload.ChangedFilesSemantics)
+						} else {
+							unknownsSummary = "No changed files were detected in captured evidence; validation status remains unknown."
+						}
 					}
 				}
 				evidenceSet = true
+			}
+		case proof.EventValidationResult:
+			if validationSet {
+				continue
+			}
+			var payload struct {
+				Passed            bool     `json:"passed"`
+				Signals           []string `json:"signals"`
+				OutputArtifactRef string   `json:"output_artifact_ref"`
+			}
+			if err := json.Unmarshal([]byte(e.PayloadJSON), &payload); err == nil {
+				if payload.Passed {
+					validationSummary = "Validation passed on the current bounded evidence."
+					unknownsSummary = "Validation passed for the bounded automated checks that ran; broader manual verification may still remain."
+				} else {
+					validationSummary = "Validation reported follow-up issues on the current bounded evidence."
+					unknownsSummary = "Validation surfaced issues or incomplete checks; inspect the recorded signals before claiming completion."
+				}
+				if len(payload.Signals) > 0 {
+					validationSummary = fmt.Sprintf("%s Signals: %s.", strings.TrimSuffix(validationSummary, "."), strings.Join(payload.Signals, "; "))
+				}
+				if payload.OutputArtifactRef != "" {
+					validationSummary = fmt.Sprintf("%s Artifact: %s.", strings.TrimSuffix(validationSummary, "."), payload.OutputArtifactRef)
+				}
+				validationSet = true
 			}
 		}
 	}
 
 	return fmt.Sprintf(
-		"Tuku state updated. %s %s %s %s %s Current phase: %s. Next action: %s.",
+		"Tuku state updated. %s %s %s %s %s %s Current phase: %s. Next action: %s.",
 		intentSummary,
 		briefSummary,
 		runSummary,
 		evidenceSummary,
+		validationSummary,
 		unknownsSummary,
 		c.CurrentPhase,
 		c.NextAction,

@@ -15,6 +15,8 @@ import (
 	"tuku/internal/domain/checkpoint"
 	"tuku/internal/domain/common"
 	contextdomain "tuku/internal/domain/context"
+	"tuku/internal/domain/promptir"
+	"tuku/internal/domain/taskmemory"
 	"tuku/internal/runtime/process"
 )
 
@@ -92,7 +94,7 @@ func TestExecuteCapturesRunnerResultAndPrompt(t *testing.T) {
 	if runner.spec.WorkingDir != req.RepoAnchor.WorktreePath {
 		t.Fatalf("expected working dir %q, got %q", req.RepoAnchor.WorktreePath, runner.spec.WorkingDir)
 	}
-	if got := strings.Join(runner.spec.Args, " "); got != "-lc cat >/dev/null exec --color never -" {
+	if got := strings.Join(runner.spec.Args, " "); got != "-c model_reasoning_effort=\"high\" -lc cat >/dev/null exec --color never -" {
 		t.Fatalf("expected codex exec args to be appended for non-interactive runs, got %q", got)
 	}
 	if !strings.Contains(runner.spec.Stdin, "Task ID: tsk_test") {
@@ -107,7 +109,7 @@ func TestExecuteCapturesRunnerResultAndPrompt(t *testing.T) {
 	if res.Command != "sh" {
 		t.Fatalf("expected command sh, got %q", res.Command)
 	}
-	if got := strings.Join(res.Args, " "); got != "-lc cat >/dev/null exec --color never -" {
+	if got := strings.Join(res.Args, " "); got != "-c model_reasoning_effort=\"high\" -lc cat >/dev/null exec --color never -" {
 		t.Fatalf("expected execution result args to reflect codex exec invocation, got %q", got)
 	}
 	if res.Summary == "" {
@@ -118,6 +120,73 @@ func TestExecuteCapturesRunnerResultAndPrompt(t *testing.T) {
 	}
 	if res.ChangedFilesSemantics == "" {
 		t.Fatal("expected changed-file semantics to be populated")
+	}
+}
+
+func TestBuildPromptIncludesPromptTriageEvidence(t *testing.T) {
+	req := testExecutionRequest(t)
+	req.Brief.PromptTriage = brief.PromptTriage{
+		Applied:                      true,
+		Summary:                      "searched 18 repo-local file(s) and narrowed repair context to 2 ranked candidate(s)",
+		SearchTerms:                  []string{"ui", "component", "page"},
+		CandidateFiles:               []string{"web/src/pages/Dashboard.tsx", "web/src/components/ProfileCard.tsx"},
+		RawPromptTokenEstimate:       4,
+		RewrittenPromptTokenEstimate: 29,
+		SearchSpaceTokenEstimate:     540,
+		SelectedContextTokenEstimate: 160,
+		ContextTokenSavingsEstimate:  380,
+	}
+
+	prompt := buildPrompt(req)
+	if !strings.Contains(prompt, "Prompt triage: searched 18 repo-local file(s) and narrowed repair context to 2 ranked candidate(s)") {
+		t.Fatalf("expected prompt triage summary in prompt, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Prompt triage candidates: web/src/pages/Dashboard.tsx, web/src/components/ProfileCard.tsx") {
+		t.Fatalf("expected prompt triage candidates in prompt, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Prompt triage token estimates: raw=4 rewritten=29 search_space=540 selected_context=160 savings=380") {
+		t.Fatalf("expected prompt triage token estimates in prompt, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Task memory compaction: full_history_tokens=320 resume_prompt_tokens=96 ratio=3.33") {
+		t.Fatalf("expected task memory compaction metrics in prompt, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Task memory facts: brief posture: EXECUTION_READY | normalized action: apply brief") {
+		t.Fatalf("expected task memory facts in prompt, got %q", prompt)
+	}
+}
+
+func TestBuildPromptIncludesPromptIREvidence(t *testing.T) {
+	req := testExecutionRequest(t)
+	req.Brief.PromptIR = promptir.Packet{
+		Version:            1,
+		NormalizedTaskType: "BUG_FIX",
+		Objective:          "Implement bounded change",
+		Operation:          "apply brief",
+		RankedTargets: []promptir.Target{
+			{Path: "internal/orchestrator/service.go", Kind: promptir.TargetFile, Score: 100},
+			{Path: "internal/orchestrator/compiled_brief.go", Kind: promptir.TargetFile, Score: 95},
+		},
+		OperationPlan:         []string{"start from ranked targets", "avoid unrelated refactors"},
+		ValidatorPlan:         promptir.ValidatorPlan{Commands: []string{"go test ./internal/orchestrator", "gofmt -l internal/orchestrator/service.go"}},
+		Confidence:            promptir.ConfidenceScore{Level: "high", Value: 0.84, Reason: "repo triage and task memory agree"},
+		DefaultSerializer:     promptir.SerializerNaturalLanguage,
+		NaturalLanguageTokens: 110,
+		StructuredTokens:      98,
+		StructuredCheaper:     true,
+	}
+
+	prompt := buildPrompt(req)
+	if !strings.Contains(prompt, "Prompt IR task type: BUG_FIX") {
+		t.Fatalf("expected prompt ir task type in prompt, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Prompt IR targets: internal/orchestrator/service.go, internal/orchestrator/compiled_brief.go") {
+		t.Fatalf("expected prompt ir targets in prompt, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Prompt IR validators: go test ./internal/orchestrator | gofmt -l internal/orchestrator/service.go") {
+		t.Fatalf("expected prompt ir validators in prompt, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Prompt IR serializer benchmark: default=natural_language natural=110 structured=98 structured_cheaper=true") {
+		t.Fatalf("expected prompt ir serializer benchmark in prompt, got %q", prompt)
 	}
 }
 
@@ -133,8 +202,24 @@ func TestExecutePreservesExplicitSubcommandArgs(t *testing.T) {
 	if _, err := adapter.Execute(context.Background(), testExecutionRequest(t), nil); err != nil {
 		t.Fatalf("unexpected execute error: %v", err)
 	}
-	if got := strings.Join(runner.spec.Args, " "); got != "exec --json -" {
+	if got := strings.Join(runner.spec.Args, " "); got != "-c model_reasoning_effort=\"high\" exec --json -" {
 		t.Fatalf("expected explicit subcommand args to remain unchanged, got %q", got)
+	}
+}
+
+func TestCommandArgsDoesNotDuplicateReasoningEffortOverride(t *testing.T) {
+	adapter := NewAdapterWithConfig(Config{
+		Binary: "sh",
+		Args:   []string{"-c", `model_reasoning_effort="medium"`, "exec", "--json", "-"},
+		Runner: &fakeRunner{},
+	})
+
+	got := strings.Join(adapter.commandArgs(), " ")
+	if strings.Count(got, "model_reasoning_effort") != 1 {
+		t.Fatalf("expected a single reasoning override, got %q", got)
+	}
+	if !strings.Contains(got, `model_reasoning_effort="medium"`) {
+		t.Fatalf("expected explicit reasoning override to survive, got %q", got)
 	}
 }
 
@@ -235,6 +320,22 @@ func testExecutionRequestWithRepo(t *testing.T, repo string) adapter_contract.Ex
 			SelectionRationale: []string{"test rationale"},
 			PackHash:           "pack_hash",
 			CreatedAt:          now,
+		},
+		TaskMemory: taskmemory.Snapshot{
+			Version:                   1,
+			MemoryID:                  common.MemoryID("mem_test"),
+			TaskID:                    common.TaskID("tsk_test"),
+			BriefID:                   common.BriefID("brf_test"),
+			Source:                    "brief_compiled",
+			Summary:                   "phase=BRIEF_READY; action=apply brief; files=internal/orchestrator/service.go; next=run bounded implementation",
+			ConfirmedFacts:            []string{"brief posture: EXECUTION_READY", "normalized action: apply brief"},
+			Unknowns:                  []string{"runtime verification remains pending"},
+			CandidateFiles:            []string{"internal/orchestrator/service.go"},
+			NextSuggestedStep:         "run bounded implementation",
+			FullHistoryTokenEstimate:  320,
+			ResumePromptTokenEstimate: 96,
+			MemoryCompactionRatio:     3.33,
+			CreatedAt:                 now,
 		},
 		RepoAnchor: checkpoint.RepoAnchor{
 			RepoRoot:      repo,

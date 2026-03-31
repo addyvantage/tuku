@@ -24,10 +24,10 @@ func (h failingHost) Status() HostStatus {
 	}
 	return h.status
 }
-func (h failingHost) Title() string                             { return "failing" }
-func (h failingHost) WorkerLabel() string                       { return "" }
-func (h failingHost) Lines(_ int, _ int) []string               { return nil }
-func (h failingHost) ActivityLines(_ int) []string              { return nil }
+func (h failingHost) Title() string                { return "failing" }
+func (h failingHost) WorkerLabel() string          { return "" }
+func (h failingHost) Lines(_ int, _ int) []string  { return nil }
+func (h failingHost) ActivityLines(_ int) []string { return nil }
 
 func TestStartPreferredHostFallsBackToTranscript(t *testing.T) {
 	fallback := NewTranscriptHost()
@@ -137,6 +137,26 @@ func TestSelectPreferredHostChoosesClaudeFromSnapshotContext(t *testing.T) {
 	}
 	if resolved != WorkerPreferenceClaude {
 		t.Fatalf("expected claude resolution, got %q", resolved)
+	}
+	if _, ok := host.(*ClaudePTYHost); !ok {
+		t.Fatalf("expected claude host, got %T", host)
+	}
+}
+
+func TestSelectPreferredHostChoosesClaudeForPlanningOrientedSnapshot(t *testing.T) {
+	host, resolved, err := selectPreferredHost(WorkerPreferenceAuto, Snapshot{
+		CompiledIntent: &CompiledIntentSummary{Class: "PLAN"},
+		Brief: &BriefSummary{
+			Posture:               "PLANNING_ORIENTED",
+			RequiresClarification: true,
+			ConfidenceLevel:       "low",
+		},
+	})
+	if err != nil {
+		t.Fatalf("select host from planning snapshot: %v", err)
+	}
+	if resolved != WorkerPreferenceClaude {
+		t.Fatalf("expected claude resolution for planning snapshot, got %q", resolved)
 	}
 	if _, ok := host.(*ClaudePTYHost); !ok {
 		t.Fatalf("expected claude host, got %T", host)

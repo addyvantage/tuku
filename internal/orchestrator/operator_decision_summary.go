@@ -50,6 +50,9 @@ func deriveOperatorDecisionSummary(
 	}
 
 	switch recovery.RecoveryClass {
+	case RecoveryClassRunInProgress:
+		out.Headline = "Local run in progress"
+		out.Guidance = "Wait for the current local run to finish before taking another control-plane action."
 	case RecoveryClassReadyNextRun:
 		out.Headline = "Local fresh run ready"
 		out.Guidance = "Start the next bounded local run."

@@ -17,7 +17,9 @@ func CallUnix(ctx context.Context, socketPath string, req Request) (Response, er
 	}
 	defer conn.Close()
 
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
 	encoder := json.NewEncoder(conn)
 	decoder := json.NewDecoder(bufio.NewReader(conn))
 

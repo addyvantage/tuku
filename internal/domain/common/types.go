@@ -10,7 +10,9 @@ type BriefID string
 type EventID string
 type CheckpointID string
 type ContextPackID string
+type MemoryID string
 type DecisionID string
+type BenchmarkID string
 type RunID string
 type WorkerRunID string
 type CapsuleVersion int64

@@ -21,6 +21,7 @@ const (
 	MethodTaskInspect                           Method = "task.inspect"
 	MethodTaskIntent                            Method = "task.intent"
 	MethodTaskBrief                             Method = "task.brief"
+	MethodTaskBenchmark                         Method = "task.benchmark"
 	MethodTaskShellSnapshot                     Method = "task.shell.snapshot"
 	MethodTaskShellLifecycle                    Method = "task.shell.lifecycle"
 	MethodTaskShellTranscriptAppend             Method = "task.shell.transcript.append"
