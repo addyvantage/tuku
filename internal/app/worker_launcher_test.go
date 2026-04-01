@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -45,18 +46,114 @@ func TestPrimaryWorkerLauncherViewIsCompactTerminalSurface(t *testing.T) {
 	model.width = 80
 	model.height = 24
 
-	rendered := model.View()
+	rendered := stripANSIEscapeCodes(model.View())
 	if strings.Contains(rendered, "╭") || strings.Contains(rendered, "╰") {
 		t.Fatalf("expected launcher to avoid modal card borders, got %q", rendered)
 	}
 	if !strings.Contains(rendered, "Choose a worker for this session") || !strings.Contains(rendered, "› Launch with Codex [recommended]") {
 		t.Fatalf("expected compact launcher copy and selected row, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "Recommended: Codex (high)") {
+	if !strings.Contains(rendered, "Recommendation") || !strings.Contains(rendered, "Codex (high confidence)") {
 		t.Fatalf("expected recommendation callout in launcher view, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "ready: installed and signed in") {
+	if !strings.Contains(rendered, "Workers") || !strings.Contains(rendered, "↑↓ move • Enter select • Esc cancel") {
+		t.Fatalf("expected structured sections and controls in launcher view, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Ready: installed and signed in") {
 		t.Fatalf("expected worker readiness status in launcher view, got %q", rendered)
+	}
+}
+
+func TestPrimaryWorkerLauncherViewUsesWideTerminalWidthBeforeWrapping(t *testing.T) {
+	model := newPrimaryWorkerLauncherModel(primaryWorkerSelectionContext{
+		Remembered: tukushell.WorkerPreferenceAuto,
+		Recommendation: provider.Recommendation{
+			Worker:     provider.WorkerCodex,
+			Confidence: "high",
+			Reason:     "execution-ready brief favors direct implementation",
+		},
+		Prerequisites: map[tukushell.WorkerPreference]tukushell.WorkerPrerequisite{
+			tukushell.WorkerPreferenceCodex: {State: tukushell.WorkerPrerequisiteReady, Ready: true},
+		},
+	})
+	model.width = 120
+	model.options[0].Summary = "Best for implementation-heavy work when the brief is already narrowed for direct execution."
+
+	rendered := stripANSIEscapeCodes(model.View())
+	if !strings.Contains(rendered, "    Best for implementation-heavy work when the brief is already narrowed for direct execution.") {
+		t.Fatalf("expected wide picker to keep the codex summary on one line, got %q", rendered)
+	}
+	if longestRenderedLine(rendered) < 80 {
+		t.Fatalf("expected picker to use more of the available terminal width, longest line width=%d", longestRenderedLine(rendered))
+	}
+}
+
+func TestPrimaryWorkerLauncherViewWrapsDetailLinesWithStableIndent(t *testing.T) {
+	model := newPrimaryWorkerLauncherModel(primaryWorkerSelectionContext{
+		Remembered: tukushell.WorkerPreferenceAuto,
+		Recommendation: provider.Recommendation{
+			Worker: provider.WorkerCodex,
+		},
+		Prerequisites: map[tukushell.WorkerPreference]tukushell.WorkerPrerequisite{
+			tukushell.WorkerPreferenceCodex: {State: tukushell.WorkerPrerequisiteReady, Ready: true},
+		},
+	})
+	model.width = 62
+	model.options[0].Summary = "A longer explanation that wraps neatly under the option title without drifting awkwardly to the left edge."
+
+	lines := strings.Split(stripANSIEscapeCodes(model.View()), "\n")
+	headerIndex := -1
+	for idx, line := range lines {
+		if strings.Contains(line, "› Launch with Codex [recommended]") {
+			headerIndex = idx
+			break
+		}
+	}
+	if headerIndex == -1 {
+		t.Fatalf("expected selected codex option header in rendered picker, got %q", strings.Join(lines, "\n"))
+	}
+	detailLines := 0
+	for idx := headerIndex + 1; idx < len(lines); idx++ {
+		line := lines[idx]
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+		if strings.Contains(line, "Launch with Claude") || strings.Contains(line, "↑↓ move") {
+			break
+		}
+		if !strings.HasPrefix(line, "    ") {
+			t.Fatalf("expected wrapped detail line to keep a four-space block indent, got %q", line)
+		}
+		detailLines++
+	}
+	if detailLines < 2 {
+		t.Fatalf("expected summary and status detail lines under the selected option, got %d in %q", detailLines, strings.Join(lines, "\n"))
+	}
+}
+
+func TestPrimaryWorkerLauncherViewStaysReadableInNarrowTerminal(t *testing.T) {
+	model := newPrimaryWorkerLauncherModel(primaryWorkerSelectionContext{
+		Remembered: tukushell.WorkerPreferenceAuto,
+		Recommendation: provider.Recommendation{
+			Worker:     provider.WorkerCodex,
+			Confidence: "high",
+			Reason:     "implementation-heavy brief already narrowed for direct execution",
+		},
+		Prerequisites: map[tukushell.WorkerPreference]tukushell.WorkerPrerequisite{
+			tukushell.WorkerPreferenceCodex:  {State: tukushell.WorkerPrerequisiteReady, Ready: true},
+			tukushell.WorkerPreferenceClaude: {State: tukushell.WorkerPrerequisiteUnauthenticated},
+		},
+	})
+	model.width = 48
+
+	rendered := stripANSIEscapeCodes(model.View())
+	for _, line := range strings.Split(rendered, "\n") {
+		if renderedWidth(line) > model.width {
+			t.Fatalf("expected narrow picker lines to stay within the terminal width %d, got %q (%d)", model.width, line, renderedWidth(line))
+		}
+	}
+	if !strings.Contains(rendered, "Setup needed: installed, sign-in") || !strings.Contains(rendered, "required") {
+		t.Fatalf("expected narrow picker to keep prerequisite status visible, got %q", rendered)
 	}
 }
 
@@ -87,6 +184,27 @@ func TestPrimaryWorkerLauncherEnterOnMissingWorkerShowsSetupPrompt(t *testing.T)
 	if !strings.Contains(rendered, "Install Codex now") {
 		t.Fatalf("expected install action in setup prompt, got %q", rendered)
 	}
+}
+
+var ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func stripANSIEscapeCodes(value string) string {
+	return ansiEscapePattern.ReplaceAllString(value, "")
+}
+
+func longestRenderedLine(value string) int {
+	maxWidth := 0
+	for _, line := range strings.Split(value, "\n") {
+		width := renderedWidth(line)
+		if width > maxWidth {
+			maxWidth = width
+		}
+	}
+	return maxWidth
+}
+
+func renderedWidth(value string) int {
+	return len([]rune(value))
 }
 
 func TestRunPrimaryWorkerSetupActionUsesInstallCommand(t *testing.T) {

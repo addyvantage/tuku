@@ -156,6 +156,7 @@ func (a *App) Run(ctx context.Context) error {
 		tea.WithInput(a.Input),
 		tea.WithOutput(a.Output),
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
 
 	finalModel, runErr := program.Run()

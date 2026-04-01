@@ -516,6 +516,165 @@ func TestShellModelLiveWorkerHistoryScrollbackReachesTopOfLongOutput(t *testing.
 	}
 }
 
+func TestShellModelHomeAndEndJumpBetweenTopAndLatest(t *testing.T) {
+	history := make([]string, 0, 180)
+	for i := 0; i < 180; i++ {
+		history = append(history, fmt.Sprintf("jump line %03d", i))
+	}
+	host := &stubHost{
+		worker:       "codex",
+		canInput:     true,
+		historyLines: history,
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true, RenderVersion: 1},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_home_end"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 86
+	model.height = 14
+	model.resize()
+
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyHome})
+	model = updated.(*shellModel)
+	if model.viewport.YOffset != 0 {
+		t.Fatalf("expected Home to jump to the top of transcript history, got offset=%d", model.viewport.YOffset)
+	}
+	if model.followLatest {
+		t.Fatal("expected Home to leave live-follow mode")
+	}
+	if !strings.Contains(model.viewport.View(), "Connected to codex") {
+		t.Fatalf("expected Home to reveal the top of the transcript feed, got %q", model.viewport.View())
+	}
+
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyEnd})
+	model = updated.(*shellModel)
+	if !model.viewport.AtBottom() || !model.followLatest {
+		t.Fatalf("expected End to restore latest/follow mode, offset=%d follow=%v", model.viewport.YOffset, model.followLatest)
+	}
+	if !strings.Contains(model.viewport.View(), "jump line 179") {
+		t.Fatalf("expected End to reveal latest transcript content, got %q", model.viewport.View())
+	}
+}
+
+func TestShellModelArrowKeysScrollLineByLineOnlyWhenComposerIdle(t *testing.T) {
+	history := make([]string, 0, 120)
+	for i := 0; i < 120; i++ {
+		history = append(history, fmt.Sprintf("line scroll %03d", i))
+	}
+	host := &stubHost{
+		worker:       "codex",
+		canInput:     true,
+		historyLines: history,
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true, RenderVersion: 1},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_line_scroll"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 80
+	model.height = 12
+	model.resize()
+
+	startOffset := model.viewport.YOffset
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyUp})
+	model = updated.(*shellModel)
+	if model.viewport.YOffset >= startOffset {
+		t.Fatalf("expected Up to scroll one line upward when composer is idle, before=%d after=%d", startOffset, model.viewport.YOffset)
+	}
+
+	lineUpOffset := model.viewport.YOffset
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(*shellModel)
+	if model.viewport.YOffset <= lineUpOffset {
+		t.Fatalf("expected Down to scroll one line back toward the latest output, before=%d after=%d", lineUpOffset, model.viewport.YOffset)
+	}
+
+	model.composer.SetValue("draft message")
+	idleOffset := model.viewport.YOffset
+	updated, _ = model.updateKey(tea.KeyMsg{Type: tea.KeyUp})
+	model = updated.(*shellModel)
+	if model.viewport.YOffset != idleOffset {
+		t.Fatalf("expected Up to preserve transcript position while editing composer text, before=%d after=%d", idleOffset, model.viewport.YOffset)
+	}
+}
+
+func TestShellModelMouseWheelScrollsTranscriptWithoutTouchingComposer(t *testing.T) {
+	history := make([]string, 0, 140)
+	for i := 0; i < 140; i++ {
+		history = append(history, fmt.Sprintf("wheel line %03d", i))
+	}
+	host := &stubHost{
+		worker:       "codex",
+		canInput:     true,
+		historyLines: history,
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true, RenderVersion: 1},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_mouse_scroll"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 84
+	model.height = 14
+	model.resize()
+	model.composer.SetValue("keep this draft")
+
+	feedY := model.layout().headerHeight + 1
+	startOffset := model.viewport.YOffset
+	updated, _ := model.Update(tea.MouseMsg{
+		X:      4,
+		Y:      feedY,
+		Type:   tea.MouseWheelUp,
+		Button: tea.MouseButtonWheelUp,
+		Action: tea.MouseActionPress,
+	})
+	model = updated.(*shellModel)
+	if model.viewport.YOffset >= startOffset {
+		t.Fatalf("expected mouse wheel up to scroll transcript upward, before=%d after=%d", startOffset, model.viewport.YOffset)
+	}
+	if model.followLatest {
+		t.Fatal("expected mouse wheel inspection to leave live-follow mode")
+	}
+	if model.composer.Value() != "keep this draft" {
+		t.Fatalf("expected mouse wheel scrolling not to disturb composer text, got %q", model.composer.Value())
+	}
+
+	upOffset := model.viewport.YOffset
+	updated, _ = model.Update(tea.MouseMsg{
+		X:      4,
+		Y:      feedY,
+		Type:   tea.MouseWheelDown,
+		Button: tea.MouseButtonWheelDown,
+		Action: tea.MouseActionPress,
+	})
+	model = updated.(*shellModel)
+	if model.viewport.YOffset <= upOffset {
+		t.Fatalf("expected mouse wheel down to scroll back toward latest output, before=%d after=%d", upOffset, model.viewport.YOffset)
+	}
+}
+
+func TestShellModelMouseWheelOutsideViewportDoesNotScrollTranscript(t *testing.T) {
+	history := make([]string, 0, 140)
+	for i := 0; i < 140; i++ {
+		history = append(history, fmt.Sprintf("outside line %03d", i))
+	}
+	host := &stubHost{
+		worker:       "codex",
+		canInput:     true,
+		historyLines: history,
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true, RenderVersion: 1},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_mouse_ignore"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 84
+	model.height = 14
+	model.resize()
+
+	startOffset := model.viewport.YOffset
+	outsideY := model.layout().headerHeight + model.viewport.Height + 2
+	updated, _ := model.Update(tea.MouseMsg{
+		X:      4,
+		Y:      outsideY,
+		Type:   tea.MouseWheelUp,
+		Button: tea.MouseButtonWheelUp,
+		Action: tea.MouseActionPress,
+	})
+	model = updated.(*shellModel)
+	if model.viewport.YOffset != startOffset {
+		t.Fatalf("expected mouse wheel outside the transcript viewport to leave scroll position unchanged, before=%d after=%d", startOffset, model.viewport.YOffset)
+	}
+}
+
 func TestShellModelResizeWhileScrolledUpKeepsHistoricalContentVisible(t *testing.T) {
 	history := make([]string, 0, 180)
 	for i := 0; i < 180; i++ {

@@ -284,60 +284,71 @@ func (m primaryWorkerLauncherModel) View() string {
 }
 
 func (m primaryWorkerLauncherModel) selectionView() string {
-	contentWidth := min(58, max(40, m.width-4))
-	kicker := lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true).Render("TUKU")
-	title := lipgloss.NewStyle().Foreground(lipgloss.Color("#F3F4F6")).Bold(true).Render("Choose a worker for this session")
-	subtitle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF")).Render("Pick one to open the shell.")
-	option := lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB"))
-	selected := lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true)
+	layout := primaryWorkerSurfaceLayoutForWidth(m.width)
+	kickerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true)
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F3F4F6")).Bold(true)
+	subtitleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF"))
+	sectionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Bold(true)
+	optionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB"))
+	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true)
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF"))
 	recommended := lipgloss.NewStyle().Foreground(lipgloss.Color("#86EFAC")).Bold(true)
 	info := lipgloss.NewStyle().Foreground(lipgloss.Color("#FDE68A")).Bold(true)
-	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("↑↓ move • Enter select • Esc cancel")
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 
-	lines := []string{"", kicker, title, subtitle, ""}
+	lines := []string{
+		"",
+		kickerStyle.Render("TUKU"),
+		titleStyle.Render("Choose a worker for this session"),
+		subtitleStyle.Render("Pick one to open the shell."),
+	}
 	if notice := strings.TrimSpace(m.selection.Notice); notice != "" {
-		lines = append(lines, info.Render(notice), "")
+		lines = append(lines, "")
+		lines = append(lines, renderPrimaryWorkerParagraph(info, notice, layout.contentWidth, "")...)
 	}
 	if m.selection.Recommendation.Worker != "" && m.selection.Recommendation.Worker != provider.WorkerUnknown {
-		lines = append(lines, recommended.Render("Recommended: "+provider.Label(m.selection.Recommendation.Worker)+" ("+nonEmpty(strings.TrimSpace(m.selection.Recommendation.Confidence), "medium")+")"))
-		if reason := strings.TrimSpace(m.selection.Recommendation.Reason); reason != "" {
-			lines = append(lines, muted.Render("  "+reason))
-		}
 		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render("Recommendation"))
+		lines = append(lines, recommended.Render(provider.Label(m.selection.Recommendation.Worker)+" ("+nonEmpty(strings.TrimSpace(m.selection.Recommendation.Confidence), "medium")+" confidence)"))
+		if reason := strings.TrimSpace(m.selection.Recommendation.Reason); reason != "" {
+			lines = append(lines, renderPrimaryWorkerParagraph(muted, "Why: "+reason, layout.contentWidth, "  ")...)
+		}
 	}
+	lines = append(lines, "", sectionStyle.Render("Workers"))
 	for idx, item := range m.options {
-		row := "  " + item.Title
+		if idx > 0 {
+			lines = append(lines, "")
+		}
+		row := item.Title
 		if item.Recommended {
 			row += " [recommended]"
 		}
 		if idx == m.selected {
-			lines = append(lines, selected.Render("› "+strings.TrimSpace(row)))
+			lines = append(lines, selectedStyle.Render("› "+strings.TrimSpace(row)))
 		} else {
-			lines = append(lines, option.Render(row))
+			lines = append(lines, optionStyle.Render("  "+strings.TrimSpace(row)))
 		}
 		if summary := strings.TrimSpace(item.Summary); summary != "" {
-			lines = append(lines, muted.Render("    "+summary))
+			lines = append(lines, renderPrimaryWorkerParagraph(muted, summary, layout.contentWidth, "    ")...)
 		}
 		if statusLine, statusStyle := renderPrimaryWorkerPrereq(item.Prereq); statusLine != "" {
-			lines = append(lines, statusStyle.Render("    "+statusLine))
+			lines = append(lines, renderPrimaryWorkerParagraph(statusStyle, statusLine, layout.contentWidth, "    ")...)
 		}
 	}
-	lines = append(lines, "", hint)
-	return lipgloss.NewStyle().
-		Width(contentWidth).
-		Render(strings.Join(lines, "\n"))
+	lines = append(lines, "", hintStyle.Render("↑↓ move • Enter select • Esc cancel"))
+	return primaryWorkerSurfaceFrame(layout, strings.Join(lines, "\n"))
 }
 
 func (m primaryWorkerLauncherModel) setupView() string {
-	contentWidth := min(72, max(48, m.width-4))
-	kicker := lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true).Render("TUKU")
+	layout := primaryWorkerSurfaceLayoutForWidth(m.width)
+	kicker := lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true)
 	title := lipgloss.NewStyle().Foreground(lipgloss.Color("#F3F4F6")).Bold(true)
+	section := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Bold(true)
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#9CA3AF"))
 	selected := lipgloss.NewStyle().Foreground(lipgloss.Color("#F9FAFB")).Bold(true)
 	option := lipgloss.NewStyle().Foreground(lipgloss.Color("#D1D5DB"))
 	info := lipgloss.NewStyle().Foreground(lipgloss.Color("#FDE68A")).Bold(true)
-	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280")).Render("↑↓ move • Enter select • Esc back")
+	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 
 	setup := m.activeSetupOption()
 	if setup == nil {
@@ -346,39 +357,47 @@ func (m primaryWorkerLauncherModel) setupView() string {
 
 	lines := []string{
 		"",
-		kicker,
+		kicker.Render("TUKU"),
 		title.Render(setup.Prereq.WorkerLabel + " needs a quick setup"),
-		muted.Render(strings.TrimSpace(setup.Prereq.Summary)),
-		"",
+	}
+	if summary := strings.TrimSpace(setup.Prereq.Summary); summary != "" {
+		lines = append(lines, renderPrimaryWorkerParagraph(muted, summary, layout.contentWidth, "")...)
 	}
 	if detail := strings.TrimSpace(setup.Prereq.Detail); detail != "" {
-		lines = append(lines, muted.Render(detail), "")
+		lines = append(lines, "")
+		lines = append(lines, renderPrimaryWorkerParagraph(muted, detail, layout.contentWidth, "")...)
 	}
 	if notice := strings.TrimSpace(m.selection.Notice); notice != "" {
-		lines = append(lines, info.Render(notice), "")
+		lines = append(lines, "")
+		lines = append(lines, renderPrimaryWorkerParagraph(info, notice, layout.contentWidth, "")...)
 	}
 	if len(setup.Prereq.InstallCommand) > 0 && setup.Prereq.State == tukushell.WorkerPrerequisiteMissingBinary {
-		lines = append(lines, muted.Render("Install command: "+strings.Join(setup.Prereq.InstallCommand, " ")))
+		lines = append(lines, "")
+		lines = append(lines, section.Render("Setup"))
+		lines = append(lines, renderPrimaryWorkerParagraph(muted, "Install command: "+strings.Join(setup.Prereq.InstallCommand, " "), layout.contentWidth, "  ")...)
 	}
 	if len(setup.Prereq.LoginCommand) > 0 && setup.Prereq.State == tukushell.WorkerPrerequisiteUnauthenticated {
-		lines = append(lines, muted.Render("Login command: "+strings.Join(setup.Prereq.LoginCommand, " ")))
-	}
-	if len(setup.Prereq.InstallCommand) > 0 || len(setup.Prereq.LoginCommand) > 0 {
 		lines = append(lines, "")
+		lines = append(lines, section.Render("Setup"))
+		lines = append(lines, renderPrimaryWorkerParagraph(muted, "Login command: "+strings.Join(setup.Prereq.LoginCommand, " "), layout.contentWidth, "  ")...)
 	}
+	lines = append(lines, "", section.Render("Actions"))
 	for idx, action := range m.setupOptions() {
-		row := "  " + action.Title
+		if idx > 0 {
+			lines = append(lines, "")
+		}
+		row := action.Title
 		if idx == m.setupSelected {
 			lines = append(lines, selected.Render("› "+row))
 		} else {
-			lines = append(lines, option.Render(row))
+			lines = append(lines, option.Render("  "+row))
 		}
 		if summary := strings.TrimSpace(action.Summary); summary != "" {
-			lines = append(lines, muted.Render("    "+summary))
+			lines = append(lines, renderPrimaryWorkerParagraph(muted, summary, layout.contentWidth, "    ")...)
 		}
 	}
-	lines = append(lines, "", hint)
-	return lipgloss.NewStyle().Width(contentWidth).Render(strings.Join(lines, "\n"))
+	lines = append(lines, "", hint.Render("↑↓ move • Enter select • Esc back"))
+	return primaryWorkerSurfaceFrame(layout, strings.Join(lines, "\n"))
 }
 
 func (m primaryWorkerLauncherModel) activeSetupOption() *primaryWorkerOption {
@@ -433,17 +452,121 @@ func renderPrimaryWorkerPrereq(prereq tukushell.WorkerPrerequisite) (string, lip
 	alert := lipgloss.NewStyle().Foreground(lipgloss.Color("#FCA5A5"))
 	switch prereq.State {
 	case tukushell.WorkerPrerequisiteReady:
-		return "ready: installed and signed in", ok
+		return "Ready: installed and signed in", ok
 	case tukushell.WorkerPrerequisiteMissingBinary:
-		return "setup needed: not installed yet", alert
+		return "Setup needed: not installed yet", alert
 	case tukushell.WorkerPrerequisiteUnauthenticated:
-		return "setup needed: installed, sign-in required", warn
+		return "Setup needed: installed, sign-in required", warn
 	default:
 		if strings.TrimSpace(prereq.Summary) == "" {
 			return "", warn
 		}
 		return strings.TrimSpace(prereq.Summary), warn
 	}
+}
+
+type primaryWorkerSurfaceLayout struct {
+	leftPad      int
+	contentWidth int
+}
+
+func primaryWorkerSurfaceLayoutForWidth(width int) primaryWorkerSurfaceLayout {
+	if width <= 0 {
+		width = 80
+	}
+	contentWidth := min(96, width-4)
+	if width >= 72 {
+		contentWidth = min(96, width-6)
+	}
+	if contentWidth < 36 {
+		contentWidth = max(24, width-2)
+	}
+	leftPad := max(1, (width-contentWidth)/2)
+	return primaryWorkerSurfaceLayout{
+		leftPad:      leftPad,
+		contentWidth: contentWidth,
+	}
+}
+
+func primaryWorkerSurfaceFrame(layout primaryWorkerSurfaceLayout, body string) string {
+	return lipgloss.NewStyle().PaddingLeft(layout.leftPad).Render(body)
+}
+
+func renderPrimaryWorkerParagraph(style lipgloss.Style, text string, width int, indent string) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	usableWidth := width - lipgloss.Width(indent)
+	if usableWidth < 12 {
+		usableWidth = max(8, width)
+	}
+	wrapped := primaryWorkerWrapText(text, usableWidth)
+	lines := make([]string, 0, len(wrapped))
+	for _, line := range wrapped {
+		lines = append(lines, style.Render(indent+line))
+	}
+	return lines
+}
+
+func primaryWorkerWrapText(text string, width int) []string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if text == "" {
+		return nil
+	}
+	if width <= 1 {
+		return []string{text}
+	}
+	words := strings.Fields(text)
+	lines := make([]string, 0, len(words))
+	current := ""
+	appendWord := func(word string) {
+		if lipgloss.Width(word) <= width {
+			current = word
+			return
+		}
+		chunks := primaryWorkerSplitLongWord(word, width)
+		if len(chunks) == 0 {
+			return
+		}
+		lines = append(lines, chunks[:len(chunks)-1]...)
+		current = chunks[len(chunks)-1]
+	}
+	for _, word := range words {
+		if current == "" {
+			appendWord(word)
+			continue
+		}
+		candidate := current + " " + word
+		if lipgloss.Width(candidate) <= width {
+			current = candidate
+			continue
+		}
+		lines = append(lines, current)
+		current = ""
+		appendWord(word)
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
+}
+
+func primaryWorkerSplitLongWord(word string, width int) []string {
+	if word == "" {
+		return nil
+	}
+	if width <= 1 {
+		return []string{word}
+	}
+	runes := []rune(word)
+	lines := make([]string, 0, (len(runes)/width)+1)
+	for len(runes) > 0 {
+		chunkWidth := min(width, len(runes))
+		lines = append(lines, string(runes[:chunkWidth]))
+		runes = runes[chunkWidth:]
+	}
+	return lines
 }
 
 func enrichPrimaryWorkerSelectionContext(selection primaryWorkerSelectionContext) primaryWorkerSelectionContext {

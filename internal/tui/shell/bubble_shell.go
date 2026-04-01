@@ -336,6 +336,8 @@ func (m *shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.resize()
 		return m, nil
+	case tea.MouseMsg:
+		return m.updateMouse(msg)
 	case tea.KeyMsg:
 		return m.updateKey(msg)
 	case shellHostTickMsg:
@@ -468,22 +470,23 @@ func (m *shellModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, nil
-	case "pgdown":
-		m.viewport.ViewDown()
-		m.syncFollowLatest()
-		return m, nil
-	case "pgup":
-		m.viewport.ViewUp()
-		m.followLatest = m.viewport.AtBottom()
-		return m, nil
-	case "ctrl+d":
-		m.viewport.HalfViewDown()
-		m.syncFollowLatest()
-		return m, nil
-	case "ctrl+u":
-		m.viewport.HalfViewUp()
-		m.followLatest = m.viewport.AtBottom()
-		return m, nil
+	case "pgdown", "pgup", "ctrl+d", "ctrl+u":
+		if m.handleViewportKey(msg) {
+			return m, nil
+		}
+	case "home", "end", "up", "down":
+		if m.overlayKind == shellOverlayNone && strings.TrimSpace(m.composer.Value()) == "" && m.handleViewportKey(msg) {
+			return m, nil
+		}
+	}
+
+	if m.overlayKind == shellOverlayNone && strings.TrimSpace(m.composer.Value()) == "" {
+		switch msg.Type {
+		case tea.KeyPgDown, tea.KeyPgUp, tea.KeyCtrlD, tea.KeyCtrlU, tea.KeyHome, tea.KeyEnd, tea.KeyUp, tea.KeyDown:
+			if m.handleViewportKey(msg) {
+				return m, nil
+			}
+		}
 	}
 
 	if m.overlayKind != shellOverlayNone {
@@ -497,6 +500,21 @@ func (m *shellModel) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.composer, cmd = m.composer.Update(msg)
 	m.syncOverlayFromComposer()
+	return m, cmd
+}
+
+func (m *shellModel) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.overlayKind != shellOverlayNone || !m.mouseWithinViewport(msg) {
+		return m, nil
+	}
+	switch msg.Button {
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+	default:
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.viewport, cmd = m.viewport.Update(msg)
+	m.syncFollowLatest()
 	return m, cmd
 }
 
@@ -1107,10 +1125,7 @@ func (m shellModel) renderFooter(styles shellStyles, layout shellSurfaceLayout) 
 	if refresh := m.ui.LastRefresh; !refresh.IsZero() {
 		leftParts = append(leftParts, "refreshed "+refresh.Local().Format("15:04"))
 	}
-	right := shellFooterHint(state)
-	if !m.followLatest && m.viewport.TotalLineCount() > m.viewport.Height {
-		right = "PgDn to return to latest"
-	}
+	right := m.footerNavigationHint(state)
 	if m.exitConfirmActive() {
 		right = "Press Ctrl-C again to exit"
 	}
@@ -1319,7 +1334,7 @@ func shellIntroEntry(snapshot Snapshot, host WorkerHost) shellFeedEntry {
 	lines := []string{
 		fmt.Sprintf("Connected to %s for %s.", effectiveWorkerLabel(snapshot, host), shellRepoSummary(snapshot.Repo)),
 		"Ask for a change, a reading, or the next bounded step.",
-		"Type / for commands. PgUp and PgDn scroll history without leaving the composer.",
+		"Type / for commands. PgUp, PgDn, Home, and End scroll history without leaving the composer.",
 	}
 	if state := shellWorkerStateLabel(snapshot, UIState{}, host); state != "" {
 		lines = append(lines, "Current state: "+state+".")
@@ -1357,7 +1372,9 @@ func shellHelpLines() []string {
 	return []string{
 		"Type in the bottom composer and press Enter to submit.",
 		"Type / to open the command palette immediately.",
-		"PgUp, PgDn, Ctrl+U, and Ctrl+D scroll history without leaving the composer.",
+		"PgUp, PgDn, Ctrl+U, and Ctrl+D scroll transcript history without leaving the composer.",
+		"When the composer is empty, Up/Down step through history and Home/End jump to top or latest.",
+		"Mouse wheel scrolls the transcript when the terminal reports mouse events to Tuku.",
 		"Esc closes overlays and menus cleanly.",
 		"Press Ctrl-C twice to exit the shell.",
 		"/next executes Tuku's current primary operator step when a direct path is exposed.",
@@ -1779,6 +1796,58 @@ func shellFooterHint(state shellComposerState) string {
 	default:
 		return "shell"
 	}
+}
+
+func (m *shellModel) handleViewportKey(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "pgdown":
+		m.viewport.ViewDown()
+	case "pgup":
+		m.viewport.ViewUp()
+	case "ctrl+d":
+		m.viewport.HalfViewDown()
+	case "ctrl+u":
+		m.viewport.HalfViewUp()
+	case "home":
+		m.viewport.GotoTop()
+	case "end":
+		m.viewport.GotoBottom()
+	case "up":
+		m.viewport.LineUp(1)
+	case "down":
+		m.viewport.LineDown(1)
+	default:
+		return false
+	}
+	m.syncFollowLatest()
+	return true
+}
+
+func (m shellModel) mouseWithinViewport(msg tea.MouseMsg) bool {
+	layout := m.layout()
+	if m.viewport.Height <= 0 {
+		return false
+	}
+	top := layout.headerHeight
+	bottom := top + m.viewport.Height - 1
+	return msg.Y >= top && msg.Y <= bottom
+}
+
+func (m shellModel) footerNavigationHint(state shellComposerState) string {
+	if m.viewport.TotalLineCount() > m.viewport.Height {
+		if !m.followLatest {
+			switch {
+			case m.viewport.AtTop():
+				return "At top • PgDn/End latest"
+			case m.viewport.AtBottom():
+				return "At latest"
+			default:
+				return "Viewing history • PgDn/End latest"
+			}
+		}
+		return "PgUp/PgDn history • Home top • End latest"
+	}
+	return shellFooterHint(state)
 }
 
 func (m shellModel) helpKeyMap() shellKeyMap {
