@@ -25,14 +25,21 @@ Tuku remains the canonical response owner:
 
 ## Prerequisites
 - macOS (current focus)
-- Go toolchain installed and on `PATH`
-- `codex` executable installed and on `PATH` for the live PTY shell path
+- Go toolchain installed and on `PATH` for local source builds and repository development
+- `codex` executable installed and on `PATH` for direct live PTY shell usage
   - Optional override: `TUKU_SHELL_CODEX_BIN=/absolute/path/to/codex`
   - Optional args: `TUKU_SHELL_CODEX_ARGS="..."`
 - `claude` executable installed and on `PATH` for real handoff launch tests
   - Optional override: `TUKU_CLAUDE_BIN=/absolute/path/to/claude`
   - Optional args: `TUKU_CLAUDE_ARGS="--your --flags"`
   - Optional timeout: `TUKU_CLAUDE_TIMEOUT_SEC=90`
+
+For end users installing from npm, Go is not required and Codex/Claude are optional on first run. Tuku now:
+- boots from bundled native `tuku` and `tukud` binaries
+- opens the worker picker even on a fresh machine
+- checks whether Codex or Claude is installed and signed in
+- offers to install the selected worker with npm if it is missing
+- offers to run the worker login flow if it is installed but not signed in
 
 ## Build
 ```bash
@@ -60,6 +67,9 @@ How it works:
 - if a bundled binary is unavailable for the current machine, it falls back to GitHub release download
 - if release binaries are unavailable too, it finally falls back to building from bundled Go source automatically (requires `go` on PATH)
 - then it executes native `tuku` and ensures `tukud` is on PATH for daemon bootstrap
+- when you choose Codex or Claude in the primary launcher, Tuku checks whether that worker is installed and signed in before opening the live shell
+- if the worker is missing, Tuku shows an in-terminal setup prompt and can run the npm install for you
+- if the worker is installed but not signed in, Tuku shows an in-terminal sign-in prompt before continuing
 
 Release asset naming convention expected by the fallback downloader:
 - `tuku-tuku-darwin-arm64`
@@ -71,12 +81,12 @@ Release asset naming convention expected by the fallback downloader:
 - `tuku-tuku-linux-amd64`
 - `tuku-tukud-linux-amd64`
 
-These assets should be uploaded to GitHub Releases at tag `v<version>` in the repo configured by `releaseRepo` (default: `kagaya/Tuku` in `package.json`).
+These assets should be uploaded to GitHub Releases at tag `v<version>` in the repo configured by `releaseRepo` (default: `addyvantage/tuku` in `package.json`).
 
 Optional environment overrides:
 - `TUKU_RELEASE_REPO=owner/repo` (override release source repo)
 - `TUKU_ASSET_PREFIX=tuku` (override asset name prefix)
-- `TUKU_CLI_VERSION=0.1.0` (force specific release version)
+- `TUKU_CLI_VERSION=0.1.2` (force specific release version)
 - `TUKU_INSTALL_ROOT=/custom/path` (override install root)
 
 ## Start Local Daemon
@@ -90,7 +100,7 @@ This manual daemon path remains useful for debugging and development. The primar
 
 Default local paths:
 - SQLite DB: `~/Library/Application Support/Tuku/tuku.db`
-- Unix socket: `~/Library/Application Support/Tuku/run/tukud.sock`
+- Unix socket: a short temp-backed run root such as `/tmp/tuku/<user-hash>/tukud.sock` on implicit defaults, or `TUKU_RUN_DIR/tukud.sock` when `TUKU_RUN_DIR` is set
 - Scratch intake notes: `~/Library/Application Support/Tuku/scratch/`
 
 Optional runtime path overrides (recommended for isolated dev/test runs):

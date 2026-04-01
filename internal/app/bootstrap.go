@@ -44,7 +44,10 @@ type CLIApplication struct {
 
 type primaryWorkerSelectionContext struct {
 	Remembered     tukushell.WorkerPreference
+	Preferred      tukushell.WorkerPreference
 	Recommendation provider.Recommendation
+	Notice         string
+	Prerequisites  map[tukushell.WorkerPreference]tukushell.WorkerPrerequisite
 }
 
 type repoShellTaskResolution struct {
@@ -1068,11 +1071,15 @@ func defaultRunRoot() (string, error) {
 	if configured := cleanPathFromEnv("TUKU_RUN_DIR"); configured != "" {
 		return configured, nil
 	}
-	root, err := defaultDataRoot()
+	if configuredDataRoot := cleanPathFromEnv("TUKU_DATA_DIR"); configuredDataRoot != "" {
+		return filepath.Join(configuredDataRoot, "run"), nil
+	}
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(root, "run"), nil
+	digest := sha256.Sum256([]byte(home))
+	return filepath.Join(os.TempDir(), "tuku", fmt.Sprintf("%x", digest[:6])), nil
 }
 
 func defaultCacheRoot() (string, error) {

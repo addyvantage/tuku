@@ -137,6 +137,31 @@ func TestDefaultRunAndScratchRootsFallBackToDataRoot(t *testing.T) {
 	}
 }
 
+func TestDefaultRunRootUsesShortTempNamespaceWhenDataRootIsImplicit(t *testing.T) {
+	t.Setenv("TUKU_DATA_DIR", "")
+	t.Setenv("TUKU_RUN_DIR", "")
+	t.Setenv("HOME", "/Users/example/very/long/home/path/for/socket/testing")
+
+	runRoot, err := defaultRunRoot()
+	if err != nil {
+		t.Fatalf("default run root: %v", err)
+	}
+	if strings.Contains(runRoot, "Application Support") {
+		t.Fatalf("expected short temp-backed run root, got %q", runRoot)
+	}
+	if !strings.Contains(runRoot, string(os.PathSeparator)+"tuku"+string(os.PathSeparator)) {
+		t.Fatalf("expected namespaced temp run root, got %q", runRoot)
+	}
+
+	socketPath, err := defaultSocketPath()
+	if err != nil {
+		t.Fatalf("default socket path: %v", err)
+	}
+	if len(socketPath) >= 100 {
+		t.Fatalf("expected socket path to stay below common unix socket limits, got %q (%d)", socketPath, len(socketPath))
+	}
+}
+
 func TestCLIShellTranscriptCommandRoutesReadRequestAndPrintsTruthfulSummary(t *testing.T) {
 	origCall := ipcCall
 	defer func() { ipcCall = origCall }()

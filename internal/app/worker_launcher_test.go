@@ -3,9 +3,12 @@ package app
 import (
 	"context"
 	"io"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"tuku/internal/domain/provider"
 	"tuku/internal/ipc"
@@ -34,6 +37,10 @@ func TestPrimaryWorkerLauncherViewIsCompactTerminalSurface(t *testing.T) {
 			Confidence: "high",
 			Reason:     "execution-ready brief favors direct implementation",
 		},
+		Prerequisites: map[tukushell.WorkerPreference]tukushell.WorkerPrerequisite{
+			tukushell.WorkerPreferenceCodex:  {State: tukushell.WorkerPrerequisiteReady, Ready: true},
+			tukushell.WorkerPreferenceClaude: {State: tukushell.WorkerPrerequisiteMissingBinary},
+		},
 	})
 	model.width = 80
 	model.height = 24
@@ -47,6 +54,75 @@ func TestPrimaryWorkerLauncherViewIsCompactTerminalSurface(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "Recommended: Codex (high)") {
 		t.Fatalf("expected recommendation callout in launcher view, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "ready: installed and signed in") {
+		t.Fatalf("expected worker readiness status in launcher view, got %q", rendered)
+	}
+}
+
+func TestPrimaryWorkerLauncherEnterOnMissingWorkerShowsSetupPrompt(t *testing.T) {
+	model := newPrimaryWorkerLauncherModel(primaryWorkerSelectionContext{
+		Remembered: tukushell.WorkerPreferenceCodex,
+		Prerequisites: map[tukushell.WorkerPreference]tukushell.WorkerPrerequisite{
+			tukushell.WorkerPreferenceCodex: {
+				Preference:     tukushell.WorkerPreferenceCodex,
+				WorkerLabel:    "Codex",
+				State:          tukushell.WorkerPrerequisiteMissingBinary,
+				Summary:        "Codex is not installed on this machine yet.",
+				Detail:         "Tuku can install Codex for you.",
+				InstallCommand: []string{"npm", "install", "-g", "@openai/codex"},
+			},
+			tukushell.WorkerPreferenceClaude: {State: tukushell.WorkerPrerequisiteReady, Ready: true},
+		},
+	})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	launcher := updated.(primaryWorkerLauncherModel)
+	if launcher.mode != primaryWorkerLauncherModeSetup {
+		t.Fatalf("expected setup mode after selecting missing worker, got %s", launcher.mode)
+	}
+	rendered := launcher.View()
+	if !strings.Contains(rendered, "Codex needs a quick setup") {
+		t.Fatalf("expected setup prompt title, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "Install Codex now") {
+		t.Fatalf("expected install action in setup prompt, got %q", rendered)
+	}
+}
+
+func TestRunPrimaryWorkerSetupActionUsesInstallCommand(t *testing.T) {
+	origDetect := detectPrimaryWorkerPrereq
+	origCommand := workerSetupCommandContext
+	defer func() {
+		detectPrimaryWorkerPrereq = origDetect
+		workerSetupCommandContext = origCommand
+	}()
+
+	detectPrimaryWorkerPrereq = func(preference tukushell.WorkerPreference) tukushell.WorkerPrerequisite {
+		return tukushell.WorkerPrerequisite{
+			Preference:     preference,
+			WorkerLabel:    "Codex",
+			InstallCommand: []string{"npm", "install", "-g", "@openai/codex"},
+		}
+	}
+
+	var captured []string
+	workerSetupCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		captured = append([]string{name}, args...)
+		return exec.CommandContext(ctx, "sh", "-c", "exit 0")
+	}
+
+	notice, err := runPrimaryWorkerSetupAction(context.Background(), primaryWorkerSetupAction{
+		Preference: tukushell.WorkerPreferenceCodex,
+		Kind:       primaryWorkerSetupActionInstall,
+	})
+	if err != nil {
+		t.Fatalf("run setup action: %v", err)
+	}
+	if strings.Join(captured, " ") != "npm install -g @openai/codex" {
+		t.Fatalf("expected npm install command, got %q", strings.Join(captured, " "))
+	}
+	if !strings.Contains(notice, "installed") {
+		t.Fatalf("expected install completion notice, got %q", notice)
 	}
 }
 

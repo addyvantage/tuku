@@ -224,6 +224,34 @@ func TestCodexPTYHostStartRequiresRepoRoot(t *testing.T) {
 	}
 }
 
+func TestCodexPTYHostStartBlocksWhenAuthIsMissing(t *testing.T) {
+	origLookPath := workerPrereqLookPath
+	defer func() { workerPrereqLookPath = origLookPath }()
+
+	bin := writeWorkerProbeScript(t, `#!/bin/sh
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+  echo "Not logged in"
+  exit 1
+fi
+echo "unexpected"
+exit 0
+`)
+	workerPrereqLookPath = func(string) (string, error) { return bin, nil }
+
+	host := NewDefaultCodexPTYHost()
+	host.mode = "exec"
+	err := host.Start(context.Background(), Snapshot{Repo: RepoAnchor{RepoRoot: t.TempDir()}})
+	if err == nil {
+		t.Fatal("expected unauthenticated codex to block PTY host start")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "sign") && !strings.Contains(strings.ToLower(err.Error()), "logged") {
+		t.Fatalf("expected auth-related error, got %q", err)
+	}
+	if host.Status().State != HostStateFailed {
+		t.Fatalf("expected failed host state, got %s", host.Status().State)
+	}
+}
+
 func TestCodexExecArgsIncludeSafeReasoningEffortOverride(t *testing.T) {
 	host := NewDefaultCodexPTYHost()
 	args := host.execArgsForPrompt("fix the bug")

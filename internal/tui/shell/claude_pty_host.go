@@ -64,12 +64,23 @@ func (h *ClaudePTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 		return fmt.Errorf("repo root is required for claude PTY host")
 	}
 
+	prereq := DetectWorkerPrerequisite(WorkerPreferenceClaude)
+	if !prereq.Ready {
+		note := strings.TrimSpace(nonEmpty(prereq.Detail, prereq.Summary))
+		h.setStatus(HostStateFailed, note, nil, false)
+		return fmt.Errorf(note)
+	}
+
 	claudeBin := h.binPath
 	if claudeBin == "" {
-		path, err := exec.LookPath("claude")
-		if err != nil {
-			h.setStatus(HostStateFailed, "claude binary not found", nil, false)
-			return fmt.Errorf("claude binary not found: %w", err)
+		path := strings.TrimSpace(prereq.BinaryPath)
+		if path == "" {
+			var err error
+			path, err = exec.LookPath("claude")
+			if err != nil {
+				h.setStatus(HostStateFailed, "claude binary not found", nil, false)
+				return fmt.Errorf("claude binary not found: %w", err)
+			}
 		}
 		claudeBin = path
 	}

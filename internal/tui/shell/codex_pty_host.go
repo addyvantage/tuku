@@ -74,12 +74,23 @@ func (h *CodexPTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 		return fmt.Errorf("repo root is required for codex PTY host")
 	}
 
+	prereq := DetectWorkerPrerequisite(WorkerPreferenceCodex)
+	if !prereq.Ready {
+		note := strings.TrimSpace(nonEmpty(prereq.Detail, prereq.Summary))
+		h.setStatus(HostStateFailed, note, nil, false)
+		return fmt.Errorf(note)
+	}
+
 	codexBin := h.binPath
 	if codexBin == "" {
-		path, err := exec.LookPath("codex")
-		if err != nil {
-			h.setStatus(HostStateFailed, "codex binary not found", nil, false)
-			return fmt.Errorf("codex binary not found: %w", err)
+		path := strings.TrimSpace(prereq.BinaryPath)
+		if path == "" {
+			var err error
+			path, err = exec.LookPath("codex")
+			if err != nil {
+				h.setStatus(HostStateFailed, "codex binary not found", nil, false)
+				return fmt.Errorf("codex binary not found: %w", err)
+			}
 		}
 		codexBin = path
 	}
