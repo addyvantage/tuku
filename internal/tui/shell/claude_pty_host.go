@@ -129,7 +129,9 @@ func (h *ClaudePTYHost) Start(ctx context.Context, snapshot Snapshot) error {
 	h.status.InputLive = true
 	h.status.ExitCode = nil
 	h.status.LastOutputAt = time.Time{}
-	h.status.StateChangedAt = time.Now().UTC()
+	h.status.LastActivityAt = time.Now().UTC()
+	h.status.StateChangedAt = h.status.LastActivityAt
+	h.status.RenderVersion++
 	h.mu.Unlock()
 	h.recordActivity("worker host started: claude PTY session is live")
 
@@ -145,6 +147,8 @@ func (h *ClaudePTYHost) Stop() error {
 	cmd := h.cmd
 	live := h.status.State == HostStateLive || h.status.State == HostStateStarting
 	h.status.InputLive = false
+	h.status.LastActivityAt = time.Now().UTC()
+	h.status.RenderVersion++
 	h.mu.Unlock()
 
 	if ptmx != nil {
@@ -189,6 +193,8 @@ func (h *ClaudePTYHost) Resize(width int, height int) bool {
 		h.mu.Lock()
 		if h.status.Note == "" {
 			h.status.Note = fmt.Sprintf("resize update failed: %v", err)
+			h.status.LastActivityAt = time.Now().UTC()
+			h.status.RenderVersion++
 		}
 		h.mu.Unlock()
 		return false
@@ -215,6 +221,8 @@ func (h *ClaudePTYHost) Interrupt() bool {
 	if live {
 		h.status.Note = "interrupt signal sent to claude"
 		h.status.StateChangedAt = time.Now().UTC()
+		h.status.LastActivityAt = h.status.StateChangedAt
+		h.status.RenderVersion++
 	}
 	h.mu.Unlock()
 	if !live || ptmx == nil {
@@ -275,12 +283,18 @@ func (h *ClaudePTYHost) WorkerLabel() string {
 }
 
 func (h *ClaudePTYHost) Lines(height int, width int) []string {
+	lines := h.HistoryLines(width)
+	return fitBottom(lines, height)
+}
+
+func (h *ClaudePTYHost) HistoryLines(width int) []string {
 	h.mu.Lock()
 	lines := append([]string{}, h.lines...)
 	partial := h.partial
 	state := h.status.State
 	note := h.status.Note
 	lastOutputAt := h.status.LastOutputAt
+	lastActivityAt := h.status.LastActivityAt
 	stateChangedAt := h.status.StateChangedAt
 	h.mu.Unlock()
 
@@ -290,6 +304,7 @@ func (h *ClaudePTYHost) Lines(height int, width int) []string {
 		Label:          "claude live",
 		Note:           note,
 		LastOutputAt:   lastOutputAt,
+		LastActivityAt: lastActivityAt,
 		StateChangedAt: stateChangedAt,
 	}
 
@@ -316,7 +331,7 @@ func (h *ClaudePTYHost) Lines(height int, width int) []string {
 	for _, line := range lines {
 		wrapped = append(wrapped, wrapOutputLine(line, width)...)
 	}
-	return fitBottom(wrapped, height)
+	return wrapped
 }
 
 func (h *ClaudePTYHost) ActivityLines(limit int) []string {
@@ -358,6 +373,8 @@ func (h *ClaudePTYHost) readStream(file *os.File) {
 				h.mu.Lock()
 				if h.status.State == HostStateLive {
 					h.status.Note = "worker host stream ended unexpectedly"
+					h.status.LastActivityAt = time.Now().UTC()
+					h.status.RenderVersion++
 				}
 				h.mu.Unlock()
 			}
@@ -391,6 +408,9 @@ func (h *ClaudePTYHost) wait() {
 		h.status.State = HostStateFailed
 		h.status.Label = "claude failed"
 		h.status.Note = fmt.Sprintf("claude exited with code %d", exitCode)
+		h.status.StateChangedAt = time.Now().UTC()
+		h.status.LastActivityAt = h.status.StateChangedAt
+		h.status.RenderVersion++
 		h.mu.Unlock()
 		h.recordActivity(fmt.Sprintf("worker host exited with code %d", exitCode))
 		return
@@ -398,6 +418,9 @@ func (h *ClaudePTYHost) wait() {
 	h.status.State = HostStateExited
 	h.status.Label = "claude exited"
 	h.status.Note = fmt.Sprintf("claude exited cleanly with code %d", exitCode)
+	h.status.StateChangedAt = time.Now().UTC()
+	h.status.LastActivityAt = h.status.StateChangedAt
+	h.status.RenderVersion++
 	h.mu.Unlock()
 	h.recordActivity(fmt.Sprintf("worker host exited cleanly with code %d", exitCode))
 }
@@ -405,31 +428,42 @@ func (h *ClaudePTYHost) wait() {
 func (h *ClaudePTYHost) appendOutput(chunk []byte) {
 	h.mu.Lock()
 	prevPartial := h.partial
+	now := time.Now().UTC()
 	result := normalizeTerminalChunkWithState(h.partial, h.parserState, chunk)
 	h.partial = result.partial
 	h.parserState = result.state
 	visibleOutput := false
+	changed := len(chunk) > 0
 	for _, line := range result.lines {
 		if detected, source := detectWorkerSessionIDWithSource(line); detected != "" && strings.TrimSpace(h.status.WorkerSessionID) == "" {
 			h.status.WorkerSessionID = detected
 			h.status.WorkerSessionIDSource = source
+			changed = true
 		}
 		if h.appendLineLocked(line) {
 			visibleOutput = true
+			changed = true
 		}
 	}
 	if detected, source := detectWorkerSessionIDWithSource(result.partial); detected != "" && strings.TrimSpace(h.status.WorkerSessionID) == "" {
 		h.status.WorkerSessionID = detected
 		h.status.WorkerSessionIDSource = source
+		changed = true
 	}
 	if !visibleOutput {
 		currentPartial := sanitizeRenderedLine(result.partial)
 		if currentPartial != "" && !isLikelyCursorNoiseLine(currentPartial) && !isLikelyFrameNoiseLine(currentPartial) && currentPartial != sanitizeRenderedLine(prevPartial) {
 			visibleOutput = true
+			changed = true
 		}
 	}
+	if changed {
+		h.status.LastActivityAt = now
+		h.status.RenderVersion++
+	}
 	if visibleOutput {
-		h.status.LastOutputAt = time.Now().UTC()
+		h.status.LastOutputAt = now
+		h.status.LastActivityAt = now
 	}
 	h.mu.Unlock()
 }
@@ -465,7 +499,10 @@ func (h *ClaudePTYHost) appendLineLocked(line string) bool {
 func (h *ClaudePTYHost) recordActivity(message string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	stamped := fmt.Sprintf("%s  %s", time.Now().UTC().Format("15:04:05"), message)
+	now := time.Now().UTC()
+	h.status.LastActivityAt = now
+	h.status.RenderVersion++
+	stamped := fmt.Sprintf("%s  %s", now.Format("15:04:05"), message)
 	h.activity = append(h.activity, stamped)
 	if len(h.activity) > hostMaxActivity {
 		h.activity = h.activity[len(h.activity)-hostMaxActivity:]
@@ -481,6 +518,8 @@ func (h *ClaudePTYHost) setStatus(state HostState, note string, exitCode *int, i
 	h.status.InputLive = inputLive
 	h.status.ExitCode = exitCode
 	h.status.StateChangedAt = time.Now().UTC()
+	h.status.LastActivityAt = h.status.StateChangedAt
+	h.status.RenderVersion++
 	switch state {
 	case HostStateStarting:
 		h.status.Label = "claude starting"

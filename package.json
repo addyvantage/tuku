@@ -1,6 +1,6 @@
 {
   "name": "tukuai",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Tuku CLI launcher that installs native binaries and runs Tuku from your terminal.",
   "license": "UNLICENSED",
   "type": "commonjs",

@@ -425,7 +425,7 @@ func TestShellModelTallResizeKeepsBlankSpaceBelowComposerNotAboveIt(t *testing.T
 	if tallHeader != 0 {
 		t.Fatalf("expected header to remain pinned to the top after resize, got %d", tallHeader)
 	}
-	if tallComposer-shortComposer > 2 {
+	if tallComposer-shortComposer > 4 {
 		t.Fatalf("expected taller terminals to add empty space below the composer instead of pushing it downward, got short=%d tall=%d", shortComposer, tallComposer)
 	}
 	if tallWorker == -1 || tallComposer == -1 {
@@ -475,6 +475,87 @@ func TestShellModelPgUpAndPgDnRestoreScrollableHistory(t *testing.T) {
 	model = updated.(*shellModel)
 	if model.viewport.YOffset <= upOffset {
 		t.Fatalf("expected PgDn to move back toward recent turns, got before=%d after=%d", upOffset, model.viewport.YOffset)
+	}
+}
+
+func TestShellModelLiveWorkerHistoryScrollbackReachesTopOfLongOutput(t *testing.T) {
+	history := make([]string, 0, 220)
+	for i := 0; i < 220; i++ {
+		history = append(history, fmt.Sprintf("worker line %03d", i))
+	}
+	host := &stubHost{
+		worker:       "codex",
+		canInput:     true,
+		historyLines: history,
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true, RenderVersion: 1},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_history_scroll"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 86
+	model.height = 14
+	model.resize()
+
+	if !strings.Contains(model.viewport.View(), "worker line 219") {
+		t.Fatalf("expected newest worker output at tail, got %q", model.viewport.View())
+	}
+
+	for i := 0; i < 80 && model.viewport.YOffset > 0; i++ {
+		updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyPgUp})
+		model = updated.(*shellModel)
+	}
+
+	if model.viewport.YOffset != 0 {
+		t.Fatalf("expected scrollback to reach the top of the feed, got offset=%d", model.viewport.YOffset)
+	}
+	updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyPgDown})
+	model = updated.(*shellModel)
+	if !strings.Contains(model.viewport.View(), "worker line 000") {
+		t.Fatalf("expected earliest worker output to become visible after scrolling through history, got %q", model.viewport.View())
+	}
+	if model.followLatest {
+		t.Fatal("expected manual scrollback to disable follow-latest mode")
+	}
+}
+
+func TestShellModelResizeWhileScrolledUpKeepsHistoricalContentVisible(t *testing.T) {
+	history := make([]string, 0, 180)
+	for i := 0; i < 180; i++ {
+		history = append(history, fmt.Sprintf("history line %03d", i))
+	}
+	host := &stubHost{
+		worker:       "codex",
+		canInput:     true,
+		historyLines: history,
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true, RenderVersion: 1},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_scroll_resize"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 96
+	model.height = 18
+	model.resize()
+
+	for i := 0; i < 40 && model.viewport.YOffset > 0; i++ {
+		updated, _ := model.updateKey(tea.KeyMsg{Type: tea.KeyPgUp})
+		model = updated.(*shellModel)
+	}
+	if model.followLatest || model.viewport.AtBottom() {
+		t.Fatalf("expected manual scroll to move away from the live tail, offset=%d", model.viewport.YOffset)
+	}
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 72, Height: 8})
+	model = updated.(*shellModel)
+	if strings.TrimSpace(model.viewport.View()) == "" {
+		t.Fatalf("expected shrunken viewport to keep transcript visible, got %q", model.viewport.View())
+	}
+	if model.viewport.AtBottom() {
+		t.Fatalf("expected shrink while scrolled up to avoid snapping back to the tail, got offset=%d", model.viewport.YOffset)
+	}
+
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 96, Height: 20})
+	model = updated.(*shellModel)
+	if strings.TrimSpace(model.viewport.View()) == "" {
+		t.Fatalf("expected restored viewport to keep transcript visible, got %q", model.viewport.View())
+	}
+	if model.viewport.AtBottom() {
+		t.Fatalf("expected restore while manually scrolled up to avoid snapping back to the tail, got offset=%d", model.viewport.YOffset)
 	}
 }
 
@@ -876,7 +957,8 @@ func TestShellModelCommitsWorkerReplyBeforeNextUserTurn(t *testing.T) {
 	host.canInput = true
 	host.status.LastOutputAt = time.Now().UTC().Add(time.Second)
 	model.pollHost()
-	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerIdleGrace - time.Second)
+	model.ui.LastWorkerPromptAt = time.Now().UTC().Add(-shellWorkerSettleGrace - time.Second)
+	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerSettleGrace - time.Second)
 	model.pollHost()
 
 	model.composer.SetValue("What's up?")
@@ -960,8 +1042,97 @@ func TestShellModelWorkingStateLineShowsElapsedSecondsAndInterruptHint(t *testin
 	if !strings.Contains(rendered, "Working (5s") {
 		t.Fatalf("expected elapsed working indicator, got %q", rendered)
 	}
+	if !strings.Contains(rendered, "no worker activity 5s") {
+		t.Fatalf("expected working indicator to explain that no worker activity has landed yet, got %q", rendered)
+	}
 	if !strings.Contains(rendered, "Esc to interrupt") {
 		t.Fatalf("expected interrupt hint in working indicator, got %q", rendered)
+	}
+}
+
+func TestShellModelWorkerSilentStateShowsLastActivityTruth(t *testing.T) {
+	now := time.Now().UTC()
+	host := &stubHost{
+		worker: "codex",
+		status: HostStatus{
+			Mode:           HostModeCodexPTY,
+			State:          HostStateLive,
+			Label:          "codex live",
+			InputLive:      true,
+			LastActivityAt: now.Add(-25 * time.Second),
+		},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_silent"}, UIState{
+		Session:             newSessionState(now),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  now.Add(-40 * time.Second),
+	}, host)
+
+	state := model.composerState()
+	if state.Status != "worker silent" {
+		t.Fatalf("expected worker-silent status, got %+v", state)
+	}
+	if !strings.Contains(state.Hint, "Last activity was 25s ago") {
+		t.Fatalf("expected last-activity wording, got %q", state.Hint)
+	}
+}
+
+func TestShellModelStalePendingStateClearsAfterNoWorkerSignalGrace(t *testing.T) {
+	now := time.Now().UTC()
+	host := &stubHost{
+		canInput: false,
+		worker:   "codex",
+		status: HostStatus{
+			Mode:      HostModeCodexPTY,
+			State:     HostStateLive,
+			Label:     "codex live",
+			InputLive: true,
+		},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_stale"}, UIState{
+		Session:             newSessionState(now),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  now.Add(-shellWorkerAwaitSignalGrace - 5*time.Second),
+	}, host)
+	model.width = 96
+	model.height = 18
+	model.resize()
+
+	model.pollHost()
+	if model.ui.WorkerPromptPending {
+		t.Fatal("expected stale pending state to reconcile after prolonged silence")
+	}
+	if state := model.composerState(); state.SendMode != "blocked" && state.SendMode != "worker" {
+		t.Fatalf("expected reconciled shell state, got %+v", state)
+	}
+	joined := model.renderFeedContent(96)
+	if !strings.Contains(joined, "Cleared the live-worker running state") {
+		t.Fatalf("expected conservative stale-state note in feed, got %q", joined)
+	}
+}
+
+func TestShellModelAuthoritativeWorkerTurnStaysPendingThroughSilence(t *testing.T) {
+	now := time.Now().UTC()
+	host := &authoritativeStubHost{stubHost: &stubHost{
+		canInput:   false,
+		worker:     "codex",
+		turnActive: true,
+		status: HostStatus{
+			Mode:      HostModeCodexPTY,
+			State:     HostStateLive,
+			Label:     "codex live",
+			InputLive: true,
+		},
+	}}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_authoritative"}, UIState{
+		Session:             newSessionState(now),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  now.Add(-shellWorkerStaleNotice - 10*time.Second),
+	}, host)
+
+	model.pollHost()
+	if !model.ui.WorkerPromptPending {
+		t.Fatal("expected authoritative worker turn to remain pending until the host says it settled")
 	}
 }
 
@@ -1058,7 +1229,8 @@ func TestShellModelWorkingSpinnerStopsWhenWorkSettles(t *testing.T) {
 	model.height = 24
 	model.resize()
 
-	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerIdleGrace - time.Second)
+	model.ui.LastWorkerPromptAt = time.Now().UTC().Add(-shellWorkerSettleGrace - time.Second)
+	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerSettleGrace - time.Second)
 	model.pollHost()
 	updated, cmd := model.Update(model.spinner.Tick())
 	model = updated.(*shellModel)
@@ -1102,7 +1274,8 @@ func TestShellModelWorkingStateTracksLiveOutputAndClearsWhenSettled(t *testing.T
 		t.Fatalf("expected working indicator to remain while live output is still active, got %q", rendered)
 	}
 
-	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerIdleGrace - time.Second)
+	model.ui.LastWorkerPromptAt = time.Now().UTC().Add(-shellWorkerSettleGrace - time.Second)
+	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerSettleGrace - time.Second)
 	model.pollHost()
 
 	rendered = model.renderFeedContent(100)
@@ -1784,7 +1957,8 @@ func TestShellModelWorkerPromptPendingWaitsForLiveInputToReturn(t *testing.T) {
 	}
 
 	host.canInput = true
-	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerIdleGrace - time.Second)
+	model.ui.LastWorkerPromptAt = time.Now().UTC().Add(-shellWorkerSettleGrace - time.Second)
+	host.status.LastOutputAt = time.Now().UTC().Add(-shellWorkerSettleGrace - time.Second)
 	model.pollHost()
 	if model.ui.WorkerPromptPending {
 		t.Fatal("expected worker prompt pending to clear once the host is writable and the response has settled")

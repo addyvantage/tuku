@@ -106,7 +106,12 @@ func (h *LocalScratchHost) WorkerLabel() string {
 }
 
 func (h *LocalScratchHost) Lines(height int, width int) []string {
-	if height < 1 {
+	lines := h.HistoryLines(width)
+	return fitBottom(lines, height)
+}
+
+func (h *LocalScratchHost) HistoryLines(width int) []string {
+	if width < 1 {
 		return nil
 	}
 	lines := make([]string, 0, len(h.snapshot.RecentConversation)*2+4)
@@ -125,7 +130,7 @@ func (h *LocalScratchHost) Lines(height int, width int) []string {
 	} else {
 		lines = append(lines, wrapText("you> "+string(h.draft), width)...)
 	}
-	return fitBottom(lines, height)
+	return lines
 }
 
 func (h *LocalScratchHost) ActivityLines(limit int) []string {
@@ -139,6 +144,8 @@ func (h *LocalScratchHost) applySnapshot(base Snapshot) {
 	notes, err := loadScratchNotes(h.path)
 	h.savedNotes = notes
 	h.snapshot = mergeScratchSnapshot(base, notes)
+	h.status.LastActivityAt = h.clock()
+	h.status.RenderVersion++
 	if err != nil {
 		h.lastSaveErr = err.Error()
 		h.status.Note = "local scratch history could not be read; starting with a clean intake view"
@@ -171,6 +178,8 @@ func (h *LocalScratchHost) commitDraft() error {
 	h.draft = h.draft[:0]
 	h.lastSaveErr = ""
 	h.status.Note = fmt.Sprintf("saved %d local scratch note(s) on this machine", len(h.savedNotes))
+	h.status.LastActivityAt = h.clock()
+	h.status.RenderVersion++
 	h.recordActivity("saved local scratch note")
 	return nil
 }
@@ -187,7 +196,10 @@ func (h *LocalScratchHost) snapshotBase() Snapshot {
 }
 
 func (h *LocalScratchHost) recordActivity(message string) {
-	stamped := fmt.Sprintf("%s  %s", h.clock().Format("15:04:05"), message)
+	now := h.clock()
+	h.status.LastActivityAt = now
+	h.status.RenderVersion++
+	stamped := fmt.Sprintf("%s  %s", now.Format("15:04:05"), message)
 	h.activity = append(h.activity, stamped)
 	if len(h.activity) > hostMaxActivity {
 		h.activity = h.activity[len(h.activity)-hostMaxActivity:]

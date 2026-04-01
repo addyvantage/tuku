@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -147,10 +148,33 @@ func TestCodexPTYHostAppendOutputMarksActivityFromPartialOnly(t *testing.T) {
 	host := NewDefaultCodexPTYHost()
 	host.status.State = HostStateLive
 	host.status.LastOutputAt = time.Time{}
+	host.status.LastActivityAt = time.Time{}
 
 	host.appendOutput([]byte("partial activity without newline"))
 	if host.Status().LastOutputAt.IsZero() {
 		t.Fatal("expected partial output to update last output timestamp")
+	}
+	if host.Status().LastActivityAt.IsZero() {
+		t.Fatal("expected partial output to update last activity timestamp")
+	}
+}
+
+func TestCodexPTYHostHistoryLinesRetainOlderOutputBeyondViewportHeight(t *testing.T) {
+	host := NewDefaultCodexPTYHost()
+	host.status.State = HostStateLive
+	for i := 0; i < 80; i++ {
+		host.lines = append(host.lines, fmt.Sprintf("line %02d", i))
+	}
+
+	lines := host.HistoryLines(80)
+	if len(lines) < 80 {
+		t.Fatalf("expected full retained history, got %d lines", len(lines))
+	}
+	if lines[0] != "line 00" || lines[len(lines)-1] != "line 79" {
+		t.Fatalf("expected full ordered history, got first=%q last=%q", lines[0], lines[len(lines)-1])
+	}
+	if bottomOnly := host.Lines(5, 80); len(bottomOnly) != 5 {
+		t.Fatalf("expected compact Lines call to remain bottom-fitted, got %d lines", len(bottomOnly))
 	}
 }
 

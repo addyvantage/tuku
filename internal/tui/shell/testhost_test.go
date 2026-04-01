@@ -7,8 +7,10 @@ type stubHost struct {
 	worker       string
 	lines        []string
 	activity     []string
+	historyLines []string
 	canInput     bool
 	canInterrupt bool
+	turnActive   bool
 	interrupts   int
 	status       HostStatus
 	writes       [][]byte
@@ -50,6 +52,7 @@ func (h *stubHost) WriteInput(data []byte) bool {
 	}
 	cp := append([]byte{}, data...)
 	h.writes = append(h.writes, cp)
+	h.status.RenderVersion++
 	return true
 }
 
@@ -85,6 +88,16 @@ func (h *stubHost) WorkerLabel() string {
 }
 
 func (h *stubHost) Lines(_ int, _ int) []string {
+	if len(h.historyLines) > 0 {
+		return append([]string{}, h.historyLines...)
+	}
+	return append([]string{}, h.lines...)
+}
+
+func (h *stubHost) HistoryLines(_ int) []string {
+	if len(h.historyLines) > 0 {
+		return append([]string{}, h.historyLines...)
+	}
 	return append([]string{}, h.lines...)
 }
 
@@ -93,4 +106,12 @@ func (h *stubHost) ActivityLines(limit int) []string {
 		return append([]string{}, h.activity...)
 	}
 	return append([]string{}, h.activity[len(h.activity)-limit:]...)
+}
+
+type authoritativeStubHost struct {
+	*stubHost
+}
+
+func (h *authoritativeStubHost) WorkerTurnActive() bool {
+	return h.turnActive
 }

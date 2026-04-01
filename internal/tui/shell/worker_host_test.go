@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -104,5 +105,27 @@ func TestTranscriptHostRendersDurableTranscriptEvidenceChunks(t *testing.T) {
 	}
 	if !strings.Contains(lines, "Evidence fallback reason persisted") {
 		t.Fatalf("expected fallback evidence transcript line, got %q", lines)
+	}
+}
+
+func TestTranscriptHostHistoryLinesRetainEarlierConversationBeyondViewportHeight(t *testing.T) {
+	host := NewTranscriptHost()
+	host.markTranscriptOnly("")
+	conversation := make([]ConversationItem, 0, 40)
+	for i := 0; i < 20; i++ {
+		conversation = append(conversation,
+			ConversationItem{Role: "user", Body: fmt.Sprintf("prompt %02d", i)},
+			ConversationItem{Role: "worker", Body: fmt.Sprintf("reply %02d", i)},
+		)
+	}
+	host.UpdateSnapshot(Snapshot{RecentConversation: conversation})
+
+	lines := host.HistoryLines(80)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "prompt 00") || !strings.Contains(joined, "reply 19") {
+		t.Fatalf("expected full transcript history, got %q", joined)
+	}
+	if compact := strings.Join(host.Lines(6, 80), "\n"); strings.Contains(compact, "prompt 00") {
+		t.Fatalf("expected compact Lines call to remain bottom-fitted, got %q", compact)
 	}
 }

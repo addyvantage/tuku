@@ -28,6 +28,8 @@ func NewTranscriptHost() *TranscriptHost {
 
 func (h *TranscriptHost) Start(_ context.Context, snapshot Snapshot) error {
 	h.snapshot = snapshot
+	h.status.LastActivityAt = time.Now().UTC()
+	h.status.RenderVersion++
 	if h.status.State == "" {
 		h.markTranscriptOnly("")
 	} else {
@@ -42,6 +44,8 @@ func (h *TranscriptHost) Stop() error {
 
 func (h *TranscriptHost) UpdateSnapshot(snapshot Snapshot) {
 	h.snapshot = snapshot
+	h.status.LastActivityAt = time.Now().UTC()
+	h.status.RenderVersion++
 }
 
 func (h *TranscriptHost) Resize(width int, height int) bool {
@@ -91,7 +95,12 @@ func (h *TranscriptHost) WorkerLabel() string {
 }
 
 func (h *TranscriptHost) Lines(height int, width int) []string {
-	if height < 1 {
+	lines := h.HistoryLines(width)
+	return fitBottom(lines, height)
+}
+
+func (h *TranscriptHost) HistoryLines(width int) []string {
+	if width < 1 {
 		return nil
 	}
 	lines := make([]string, 0, len(h.snapshot.RecentConversation)*2+6)
@@ -115,7 +124,7 @@ func (h *TranscriptHost) Lines(height int, width int) []string {
 	}
 	if len(h.snapshot.RecentConversation) == 0 {
 		lines = append(lines, wrapText("No transcript evidence is available yet.", width)...)
-		return fitBottom(lines, height)
+		return lines
 	}
 	for _, msg := range h.snapshot.RecentConversation {
 		role := strings.TrimSpace(msg.Role)
@@ -130,7 +139,7 @@ func (h *TranscriptHost) Lines(height int, width int) []string {
 		lines = append(lines, wrapPrefixedOutput(prefix, body, width)...)
 		lines = append(lines, "")
 	}
-	return fitBottom(lines, height)
+	return lines
 }
 
 func (h *TranscriptHost) ActivityLines(limit int) []string {
@@ -161,6 +170,8 @@ func (h *TranscriptHost) markFallback(note string) {
 	h.status.InputLive = false
 	h.status.Note = strings.TrimSpace(note)
 	h.status.StateChangedAt = time.Now().UTC()
+	h.status.LastActivityAt = h.status.StateChangedAt
+	h.status.RenderVersion++
 	if h.status.Note != "" {
 		h.recordActivity("worker host degraded: " + h.status.Note)
 		h.enqueueTranscriptNote(h.status.Note)
@@ -176,6 +187,8 @@ func (h *TranscriptHost) markTranscriptOnly(note string) {
 	h.status.InputLive = false
 	h.status.Note = strings.TrimSpace(note)
 	h.status.StateChangedAt = time.Now().UTC()
+	h.status.LastActivityAt = h.status.StateChangedAt
+	h.status.RenderVersion++
 	if h.status.Note != "" {
 		h.enqueueTranscriptNote(h.status.Note)
 	} else {
@@ -184,6 +197,8 @@ func (h *TranscriptHost) markTranscriptOnly(note string) {
 }
 
 func (h *TranscriptHost) recordActivity(message string) {
+	h.status.LastActivityAt = time.Now().UTC()
+	h.status.RenderVersion++
 	stamped := fmt.Sprintf("%s  %s", time.Now().UTC().Format("15:04:05"), message)
 	h.activity = append(h.activity, stamped)
 	if len(h.activity) > hostMaxActivity {
@@ -201,6 +216,8 @@ func (h *TranscriptHost) enqueueTranscriptNote(note string) {
 		Content:   note,
 		CreatedAt: time.Now().UTC(),
 	})
+	h.status.LastActivityAt = time.Now().UTC()
+	h.status.RenderVersion++
 	if len(h.transcriptPending) > hostMaxLines {
 		h.transcriptPending = h.transcriptPending[len(h.transcriptPending)-hostMaxLines:]
 	}

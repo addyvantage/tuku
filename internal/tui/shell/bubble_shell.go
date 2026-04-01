@@ -23,10 +23,8 @@ const (
 	shellSnapshotTickInterval   = 15 * time.Second
 	shellRegistryTickInterval   = shellSessionHeartbeatInterval
 	shellTranscriptTickInterval = shellTranscriptFlushInterval
-	shellFeedHostLineLimit      = 400
 	shellExitConfirmWindow      = 2 * time.Second
 	shellOverlayVisibleItems    = 6
-	shellWorkerIdleGrace        = 2 * time.Second
 	shellTailViewportBlocks     = 2
 )
 
@@ -352,14 +350,16 @@ func (m *shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		m.spinnerRunning = true
-		m.syncViewport(false)
+		if m.shouldRefreshTransientViewport() {
+			m.syncViewport(false)
+		}
 		return m, cmd
 	case shellWorkingTickMsg:
 		cmds := []tea.Cmd{shellWorkingTickCmd()}
 		if cmd := m.ensureSpinnerTick(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-		if m.ui.WorkerPromptPending || m.ui.PrimaryActionInFlight != nil {
+		if (m.ui.WorkerPromptPending || m.ui.PrimaryActionInFlight != nil) && m.shouldRefreshTransientViewport() {
 			m.syncViewport(false)
 		}
 		return m, tea.Batch(cmds...)
@@ -702,14 +702,19 @@ func (m *shellModel) pollHost() {
 			if !current.LastOutputAt.IsZero() && (m.ui.LastWorkerPromptAt.IsZero() || !current.LastOutputAt.Before(m.ui.LastWorkerPromptAt)) {
 				m.ui.WorkerResponseStarted = true
 			}
-			if !m.workerTurnStillActive(current) {
+			if active, note := m.workerTurnStillActive(current); !active {
 				m.clearWorkerTurnState()
+				if note != "" {
+					m.pushWarning("Worker state", []string{
+						note,
+						"Use /status or /inspect if the live worker still appears busy.",
+					})
+				}
 			}
 		}
 	}
-	digest := shellHostDigest(m.host, max(20, m.layout().contentWidth-4))
-	if digest != m.lastDigest || hostStatusChanged(m.lastHost, current) {
-		m.lastDigest = digest
+	if shellHostChanged(m.lastHost, current) || hostStatusChanged(m.lastHost, current) {
+		m.lastDigest = current.RenderVersion
 		m.syncViewport(false)
 	}
 	m.lastHost = current
@@ -867,7 +872,14 @@ func (m *shellModel) syncViewport(forceBottom bool) {
 	layout := m.layout()
 	feed := m.renderedFeed(layout.contentWidth)
 	content := strings.Join(feed.blocks, "\n\n")
-	desiredHeight := min(layout.viewportHeight, max(1, shellTailViewportLineCount(feed.blocks)))
+	totalLines := shellFeedLineCount(feed.blocks)
+	desiredHeight := layout.viewportHeight
+	if totalLines > 0 && totalLines < desiredHeight {
+		desiredHeight = totalLines
+	}
+	if desiredHeight < 1 {
+		desiredHeight = 1
+	}
 	layoutChanged := m.lastViewportWidth != layout.feedWidth || m.lastViewportHeight != desiredHeight
 	if content == m.lastContent && !forceBottom && m.didInitialFit && m.scrollToEntry == "" && !layoutChanged {
 		return
@@ -986,7 +998,7 @@ func (m shellModel) feedEntries(width int) []shellFeedEntry {
 	hostMode := m.host.Status().Mode
 
 	if hostMode == HostModeTranscript {
-		lines := curateWorkerLines(m.host.Lines(shellFeedHostLineLimit, max(10, width-4)), shellPromptBodies(entries))
+		lines := curateWorkerLines(shellHistoryLines(m.host, max(10, width-4)), shellPromptBodies(entries))
 		if !hasMeaningfulWorkerLines(lines) {
 			entries = append(entries, shellIntroEntry(m.snapshot, m.host))
 		} else {
@@ -1009,7 +1021,7 @@ func (m shellModel) feedEntries(width int) []shellFeedEntry {
 			entries = append(entries, shellIntroEntry(m.snapshot, m.host))
 		}
 		entries = append(entries, m.localEntries...)
-		lines := trimCommittedHostLines(curateWorkerLines(m.host.Lines(shellFeedHostLineLimit, max(10, width-4)), shellPromptBodies(entries)), m.archivedHostLines)
+		lines := trimCommittedHostLines(curateWorkerLines(shellHistoryLines(m.host, max(10, width-4)), shellPromptBodies(entries)), m.archivedHostLines)
 		if len(lines) > 0 && hasMeaningfulWorkerLines(lines) {
 			entries = append(entries, shellFeedEntry{
 				Key:          "host-stream",
@@ -1096,6 +1108,9 @@ func (m shellModel) renderFooter(styles shellStyles, layout shellSurfaceLayout) 
 		leftParts = append(leftParts, "refreshed "+refresh.Local().Format("15:04"))
 	}
 	right := shellFooterHint(state)
+	if !m.followLatest && m.viewport.TotalLineCount() > m.viewport.Height {
+		right = "PgDn to return to latest"
+	}
 	if m.exitConfirmActive() {
 		right = "Press Ctrl-C again to exit"
 	}
@@ -1457,16 +1472,17 @@ func (m shellModel) composerState() shellComposerState {
 		})
 	}
 	if m.ui.WorkerPromptPending {
-		hint := "Waiting for the live worker response. New prompts stay paused until this turn settles."
-		if m.hostCanInterrupt() {
-			hint = "Waiting for the live worker response. Esc sends an interrupt to the live worker."
+		assessment := assessWorkerTurn(m.host.Status(), m.ui, m.hostCanInterrupt(), m.workerTurnAuthoritative(), time.Now().UTC())
+		hint := assessment.Hint
+		if m.hostCanInterrupt() && !strings.Contains(strings.ToLower(hint), "esc") {
+			hint = strings.TrimSpace(hint + " Esc sends an interrupt to the live worker.")
 		}
 		return applyExitCue(shellComposerState{
 			Label:       "Live worker",
-			Status:      "worker running",
+			Status:      assessment.StatusLabel,
 			Hint:        hint,
 			Placeholder: "Waiting for the live worker reply…",
-			Tone:        "caution",
+			Tone:        assessment.Tone,
 			SendMode:    "blocked",
 		})
 	}
@@ -1625,12 +1641,10 @@ func (m shellModel) workingStateEntry() *shellFeedEntry {
 	if startedAt.IsZero() {
 		startedAt = time.Now().UTC()
 	}
-	elapsed := formatShellElapsed(time.Since(startedAt))
-	line := "Working (" + elapsed + ")"
-	if m.ui.WorkerInterruptRequested {
-		line = "Working (" + elapsed + " • interrupt sent)"
-	} else if m.hostCanInterrupt() && m.ui.PrimaryActionInFlight == nil {
-		line = "Working (" + elapsed + " • Esc to interrupt)"
+	line := renderWorkingLine(time.Since(startedAt), nil, m.hostCanInterrupt() && m.ui.PrimaryActionInFlight == nil, m.ui.WorkerInterruptRequested)
+	if m.ui.WorkerPromptPending {
+		assessment := assessWorkerTurn(m.host.Status(), m.ui, m.hostCanInterrupt(), m.workerTurnAuthoritative(), time.Now().UTC())
+		line = assessment.WorkingLine
 	}
 	return &shellFeedEntry{
 		Key:   "working",
@@ -1726,6 +1740,9 @@ func shellInitialViewportOffset(blocks []string, viewportHeight int) int {
 	if totalLines <= viewportHeight {
 		return 0
 	}
+	if lineCounts[len(lineCounts)-1] >= viewportHeight {
+		return max(0, totalLines-viewportHeight)
+	}
 	start := len(blocks) - 1
 	used := lineCounts[start]
 	for start > 0 {
@@ -1755,8 +1772,8 @@ func shellFooterHint(state shellComposerState) string {
 	case "scratch":
 		return "scratch"
 	case "blocked":
-		if state.Status == "worker running" && strings.Contains(strings.ToLower(state.Hint), "interrupt") {
-			return "worker active"
+		if strings.HasPrefix(state.Status, "worker ") || state.Status == "state may be stale" {
+			return state.Status
 		}
 		return "paused"
 	default:
@@ -2296,12 +2313,25 @@ func indentBlock(block string, padding int) string {
 	return strings.Join(lines, "\n")
 }
 
+func shellHostChanged(previous HostStatus, current HostStatus) bool {
+	if previous.RenderVersion != current.RenderVersion {
+		return true
+	}
+	if previous.LastActivityAt != current.LastActivityAt {
+		return true
+	}
+	if previous.LastOutputAt != current.LastOutputAt {
+		return true
+	}
+	return false
+}
+
 func shellHostDigest(host WorkerHost, width int) uint64 {
 	if host == nil {
 		return 0
 	}
 	layoutWidth := max(12, width)
-	lines := host.Lines(shellFeedHostLineLimit, layoutWidth)
+	lines := shellHistoryLines(host, layoutWidth)
 	if len(lines) > 80 {
 		lines = lines[len(lines)-80:]
 	}
@@ -2536,20 +2566,15 @@ func (m *shellModel) requestWorkerInterrupt() bool {
 	return true
 }
 
-func (m *shellModel) workerTurnStillActive(status HostStatus) bool {
+func (m *shellModel) workerTurnStillActive(status HostStatus) (bool, string) {
 	if !m.ui.WorkerPromptPending {
-		return false
+		return false, ""
 	}
 	if host, ok := m.host.(authoritativeWorkerTurnHost); ok {
-		return host.WorkerTurnActive()
+		return host.WorkerTurnActive(), ""
 	}
-	if !m.ui.WorkerResponseStarted {
-		return true
-	}
-	if status.LastOutputAt.IsZero() || (!m.ui.LastWorkerPromptAt.IsZero() && status.LastOutputAt.Before(m.ui.LastWorkerPromptAt)) {
-		return false
-	}
-	return time.Since(status.LastOutputAt) <= shellWorkerIdleGrace
+	assessment := assessWorkerTurn(status, m.ui, m.hostCanInterrupt(), false, time.Now().UTC())
+	return assessment.Active, assessment.ClearNote
 }
 
 func (m *shellModel) clearWorkerTurnState() {
@@ -2568,6 +2593,18 @@ func (m *shellModel) syncFollowLatest() {
 
 func (m *shellModel) spinnerActive() bool {
 	return m.ui.WorkerPromptPending || m.ui.PrimaryActionInFlight != nil
+}
+
+func (m *shellModel) shouldRefreshTransientViewport() bool {
+	if m.followLatest || m.viewport.AtBottom() {
+		return true
+	}
+	return m.viewport.TotalLineCount() <= m.viewport.Height
+}
+
+func (m *shellModel) workerTurnAuthoritative() bool {
+	host, ok := m.host.(authoritativeWorkerTurnHost)
+	return ok && host.WorkerTurnActive()
 }
 
 func (m *shellModel) ensureSpinnerTick() tea.Cmd {
@@ -2623,7 +2660,7 @@ func (m *shellModel) commitCurrentWorkerStream() {
 	if m.host == nil || m.host.Status().Mode == HostModeTranscript {
 		return
 	}
-	lines := curateWorkerLines(m.host.Lines(shellFeedHostLineLimit, max(10, m.layout().contentWidth-4)), shellPromptBodies(m.basePromptEntries()))
+	lines := curateWorkerLines(shellHistoryLines(m.host, max(10, m.layout().contentWidth-4)), shellPromptBodies(m.basePromptEntries()))
 	if len(lines) == 0 {
 		m.archivedHostLines = nil
 		return

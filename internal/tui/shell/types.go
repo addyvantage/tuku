@@ -656,7 +656,9 @@ type HostStatus struct {
 	Width                 int
 	Height                int
 	LastOutputAt          time.Time
+	LastActivityAt        time.Time
 	StateChangedAt        time.Time
+	RenderVersion         uint64
 }
 
 type SessionEventType string

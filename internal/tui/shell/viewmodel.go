@@ -2372,8 +2372,8 @@ func joinNonEmpty(sep string, values ...string) string {
 func workerPanePrimaryCue(snapshot Snapshot, ui UIState, status HostStatus, now time.Time) string {
 	switch status.State {
 	case HostStateLive:
-		if pending := pendingWorkerPromptLine(ui, 72); pending != "" {
-			return pending
+		if ui.WorkerPromptPending {
+			return livePendingCue(ui, status, now)
 		}
 		if status.LastOutputAt.IsZero() {
 			return "awaiting visible output"
@@ -2420,8 +2420,8 @@ func inactivePaneCue(status HostStatus) string {
 func footerHostCue(snapshot Snapshot, ui UIState, status HostStatus) string {
 	now := observedAt(ui)
 	if status.State == HostStateLive {
-		if pending := pendingWorkerPromptLine(ui, 42); pending != "" {
-			return pending
+		if ui.WorkerPromptPending {
+			return compactLivePendingCue(ui, status, now)
 		}
 	}
 	switch status.State {
@@ -2467,6 +2467,9 @@ func hostTemporalStatus(snapshot Snapshot, ui UIState, status HostStatus) string
 	now := observedAt(ui)
 	switch status.State {
 	case HostStateLive:
+		if ui.WorkerPromptPending {
+			return livePendingTemporalStatus(ui, status, now)
+		}
 		if status.LastOutputAt.IsZero() {
 			return describeAwaitingVisibleOutput(status, now)
 		}
@@ -2575,9 +2578,22 @@ func describeAwaitingVisibleOutput(status HostStatus, now time.Time) string {
 }
 
 func describeLiveOutputAssessment(status HostStatus, now time.Time) string {
-	since := elapsedSince(now, status.LastOutputAt)
+	signalAt := status.LastOutputAt
+	if signalAt.IsZero() || (!status.LastActivityAt.IsZero() && status.LastActivityAt.After(signalAt)) {
+		signalAt = status.LastActivityAt
+	}
+	since := elapsedSince(now, signalAt)
 	if since <= 0 {
+		if status.LastOutputAt.IsZero() {
+			return "quiet with recent worker activity"
+		}
 		return "quiet with recent visible output"
+	}
+	if status.LastOutputAt.IsZero() && !status.LastActivityAt.IsZero() {
+		if since >= 60*time.Second {
+			return "no visible output yet; last worker activity " + formatElapsed(since) + " ago"
+		}
+		return "no visible output yet; recent worker activity"
 	}
 	if since >= 60*time.Second {
 		return "quiet for " + formatElapsed(since) + "; possibly waiting for input or stalled"
@@ -2620,6 +2636,39 @@ func describeInactiveBody(status HostStatus) string {
 		return "The session ended before any visible output arrived."
 	}
 	return "No newer worker output arrived after the session ended."
+}
+
+func livePendingCue(ui UIState, status HostStatus, now time.Time) string {
+	prompt := pendingWorkerPromptLine(ui, 64)
+	if prompt == "" {
+		prompt = "working on latest prompt"
+	}
+	detail := livePendingTemporalStatus(ui, status, now)
+	if detail == "" {
+		return prompt
+	}
+	return prompt + " | " + detail
+}
+
+func compactLivePendingCue(ui UIState, status HostStatus, now time.Time) string {
+	assessment := assessWorkerTurn(status, ui, false, false, now)
+	switch assessment.StatusLabel {
+	case "state may be stale":
+		return "state may be stale"
+	case "worker silent":
+		return "worker silent"
+	default:
+		return "worker running"
+	}
+}
+
+func livePendingTemporalStatus(ui UIState, status HostStatus, now time.Time) string {
+	assessment := assessWorkerTurn(status, ui, false, false, now)
+	hint := strings.TrimSpace(assessment.Hint)
+	if hint == "" {
+		return "worker running"
+	}
+	return strings.TrimSuffix(hint, ".")
 }
 
 func elapsedSince(now time.Time, then time.Time) time.Duration {
