@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -485,5 +486,43 @@ printf '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens
 	}
 	if strings.Contains(joined, "Codex returned no visible assistant message.") {
 		t.Fatalf("expected old blunt fallback wording to be removed, got %q", joined)
+	}
+}
+
+func TestForEachExecStreamLineHandlesVeryLongLinesWithoutScannerTokenLimits(t *testing.T) {
+	longLine := strings.Repeat("x", codexExecMaxLineBytes+2048)
+	payload := longLine + "\n" + `{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}` + "\n"
+
+	var lines []string
+	if err := forEachExecStreamLine(strings.NewReader(payload), codexExecMaxLineBytes, func(line string) {
+		lines = append(lines, line)
+	}); err != nil {
+		t.Fatalf("read long exec stream lines: %v", err)
+	}
+
+	if len(lines) != 2 {
+		t.Fatalf("expected two emitted lines, got %d (%q)", len(lines), strings.Join(lines, "\n"))
+	}
+	if len(lines[0]) > 4096 {
+		t.Fatalf("expected oversized line to be truncated, got %d chars", len(lines[0]))
+	}
+	if !strings.Contains(lines[1], `"type":"item.completed"`) {
+		t.Fatalf("expected trailing json line to remain readable, got %q", lines[1])
+	}
+}
+
+func TestForEachExecStreamLineEmitsFinalLineAtEOF(t *testing.T) {
+	var lines []string
+	err := forEachExecStreamLine(strings.NewReader("first\nsecond-without-newline"), codexExecMaxLineBytes, func(line string) {
+		lines = append(lines, line)
+	})
+	if err != nil && err != io.EOF {
+		t.Fatalf("read exec lines at EOF: %v", err)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("expected two lines at EOF, got %d (%q)", len(lines), strings.Join(lines, "\n"))
+	}
+	if lines[1] != "second-without-newline" {
+		t.Fatalf("expected trailing partial line emission at EOF, got %q", lines[1])
 	}
 }

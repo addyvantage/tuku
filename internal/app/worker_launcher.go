@@ -474,14 +474,26 @@ func primaryWorkerSurfaceLayoutForWidth(width int) primaryWorkerSurfaceLayout {
 	if width <= 0 {
 		width = 80
 	}
-	contentWidth := min(96, width-4)
-	if width >= 72 {
-		contentWidth = min(96, width-6)
+	leftPad := 1
+	switch {
+	case width >= 150:
+		leftPad = 3
+	case width >= 108:
+		leftPad = 2
 	}
+
+	// Keep the launcher left-anchored and width-aware instead of centering
+	// a narrow card in the middle of the terminal.
+	rightPad := 2
+	if width < 56 {
+		rightPad = 1
+	}
+	contentWidth := width - leftPad - rightPad
+	contentWidth = min(contentWidth, 118)
 	if contentWidth < 36 {
 		contentWidth = max(24, width-2)
+		leftPad = 0
 	}
-	leftPad := max(1, (width-contentWidth)/2)
 	return primaryWorkerSurfaceLayout{
 		leftPad:      leftPad,
 		contentWidth: contentWidth,

@@ -155,8 +155,10 @@ func (a *App) Run(ctx context.Context) error {
 		tea.WithContext(ctx),
 		tea.WithInput(a.Input),
 		tea.WithOutput(a.Output),
+		tea.WithANSICompressor(),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
+		tea.WithReportFocus(),
 	)
 
 	finalModel, runErr := program.Run()

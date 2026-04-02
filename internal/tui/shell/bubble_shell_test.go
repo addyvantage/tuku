@@ -278,6 +278,50 @@ func TestShellModelRepeatedResizeDoesNotAppendDuplicateShellContent(t *testing.T
 	}
 }
 
+func TestShellModelFocusRecoveryRequestsRepaintAndTerminalModeRefresh(t *testing.T) {
+	host := &stubHost{
+		worker: "codex",
+		status: HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true},
+		lines:  []string{"worker> ready"},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_focus_recover"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 100
+	model.height = 24
+	model.resize()
+
+	updated, _ := model.Update(tea.BlurMsg{})
+	model = updated.(*shellModel)
+	if model.windowFocused {
+		t.Fatal("expected shell model to track blurred terminal state")
+	}
+
+	updated, cmd := model.Update(tea.FocusMsg{})
+	model = updated.(*shellModel)
+	if !model.windowFocused {
+		t.Fatal("expected shell model to track focused terminal state")
+	}
+	if cmd == nil {
+		t.Fatal("expected focus recovery command batch")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected focus recovery batch, got %T", msg)
+	}
+	if !batchContainsMsgType(batch, "tea.clearScreenMsg") {
+		t.Fatalf("expected focus recovery to request full repaint, got %#v", batch)
+	}
+	if !batchContainsMsgType(batch, "tea.windowSizeMsg") {
+		t.Fatalf("expected focus recovery to request window size sync, got %#v", batch)
+	}
+	if !batchContainsMsgType(batch, "tea.enableMouseCellMotionMsg") {
+		t.Fatalf("expected focus recovery to re-enable mouse tracking, got %#v", batch)
+	}
+	if !batchContainsMsgType(batch, "tea.enableReportFocusMsg") {
+		t.Fatalf("expected focus recovery to re-enable focus reporting, got %#v", batch)
+	}
+}
+
 func TestShellModelViewFitsActualWindowAfterResize(t *testing.T) {
 	host := &stubHost{
 		worker: "codex",
@@ -1910,6 +1954,70 @@ func TestRenderFeedEntryShapesWorkerActionLines(t *testing.T) {
 	}
 }
 
+func TestRenderFeedEntryAddsSectionDividersAcrossActionClusters(t *testing.T) {
+	rendered := renderFeedEntry(shellFeedEntry{
+		Kind:  shellFeedWorker,
+		Title: "Worker",
+		Body: []string{
+			"Explored internal/tui/shell/bubble_shell.go",
+			"Read internal/tui/shell/app.go",
+			"Ran go test ./internal/tui/shell",
+			"Edited internal/tui/shell/bubble_shell.go",
+		},
+		Preformatted: true,
+	}, 100)
+
+	if strings.Count(rendered, "─") < 8 {
+		t.Fatalf("expected visible section dividers between action clusters, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "• Explored internal/tui/shell/bubble_shell.go") {
+		t.Fatalf("expected first action cluster body, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "• Ran go test ./internal/tui/shell") {
+		t.Fatalf("expected run action cluster body, got %q", rendered)
+	}
+}
+
+func TestRenderFeedEntryTreatsLowercaseActionVerbsAsStructuredActions(t *testing.T) {
+	rendered := renderFeedEntry(shellFeedEntry{
+		Kind:         shellFeedWorker,
+		Title:        "Worker",
+		Body:         []string{"explored README.md", "validated smoke flow"},
+		Preformatted: true,
+	}, 90)
+	if !strings.Contains(rendered, "• explored README.md") || !strings.Contains(rendered, "• validated smoke flow") {
+		t.Fatalf("expected lowercase action lines to remain structured and scannable, got %q", rendered)
+	}
+}
+
+func TestShellModelLiveStreamRenderLimitAddsResponsiveNoticeAndCapsLines(t *testing.T) {
+	history := make([]string, 0, shellLiveRenderLineLimit+300)
+	for i := 0; i < shellLiveRenderLineLimit+300; i++ {
+		history = append(history, fmt.Sprintf("worker overflow line %04d", i))
+	}
+	host := &stubHost{
+		worker:       "codex",
+		canInput:     true,
+		historyLines: history,
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true, RenderVersion: 1},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_live_limit"}, UIState{Session: newSessionState(time.Now().UTC())}, host)
+	model.width = 100
+	model.height = 20
+	model.resize()
+
+	rendered := model.renderFeedContent(100)
+	if !strings.Contains(rendered, "Showing latest 1200 of") {
+		t.Fatalf("expected responsive live-stream cap notice, got %q", rendered)
+	}
+	if strings.Contains(rendered, "worker overflow line 0000") {
+		t.Fatalf("expected oldest overflow lines to be trimmed from active render window, got %q", rendered)
+	}
+	if !strings.Contains(rendered, fmt.Sprintf("worker overflow line %04d", shellLiveRenderLineLimit+299)) {
+		t.Fatalf("expected newest worker output to remain visible, got %q", rendered)
+	}
+}
+
 func TestRenderFeedEntryWrapsLongStructuredWorkerContentWithinWidth(t *testing.T) {
 	rendered := renderFeedEntry(shellFeedEntry{
 		Kind:  shellFeedWorker,
@@ -2399,4 +2507,17 @@ func findLastLineContaining(lines []string, needle string) int {
 		}
 	}
 	return -1
+}
+
+func batchContainsMsgType(batch tea.BatchMsg, want string) bool {
+	for _, cmd := range batch {
+		if cmd == nil {
+			continue
+		}
+		msg := cmd()
+		if fmt.Sprintf("%T", msg) == want {
+			return true
+		}
+	}
+	return false
 }

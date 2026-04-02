@@ -20,6 +20,7 @@ const (
 	hostMaxLines                   = 4000
 	hostMaxActivity                = 40
 	codexSafeReasoningEffortConfig = `model_reasoning_effort="high"`
+	codexExecMaxLineBytes          = 256 * 1024
 )
 
 type CodexPTYHost struct {
@@ -697,37 +698,21 @@ func (h *CodexPTYHost) runExecPrompt(prompt string) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		scanner := bufio.NewScanner(stdout)
-		buf := make([]byte, 0, 64*1024)
-		scanner.Buffer(buf, 1024*1024)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
+		if err := forEachExecStreamLine(stdout, codexExecMaxLineBytes, func(line string) {
 			if h.handleExecJSONLine(line) {
 				markOutput()
-				continue
+				return
 			}
 			h.recordActivity("codex stdout: " + truncateWithEllipsis(line, 140))
-		}
-		if err := scanner.Err(); err != nil {
+		}); err != nil {
 			h.recordActivity("codex stdout read error")
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
-		buf := make([]byte, 0, 64*1024)
-		scanner.Buffer(buf, 1024*1024)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
+		if err := forEachExecStreamLine(stderr, codexExecMaxLineBytes, func(line string) {
 			h.recordActivity("codex stderr: " + truncateWithEllipsis(line, 140))
-		}
-		if err := scanner.Err(); err != nil {
+		}); err != nil {
 			h.recordActivity("codex stderr read error")
 		}
 	}()
@@ -821,6 +806,62 @@ func (h *CodexPTYHost) handleExecJSONLine(line string) bool {
 		return false
 	default:
 		return false
+	}
+}
+
+func forEachExecStreamLine(reader io.Reader, maxLineBytes int, handle func(line string)) error {
+	if reader == nil {
+		return nil
+	}
+	if maxLineBytes <= 0 {
+		maxLineBytes = codexExecMaxLineBytes
+	}
+	rd := bufio.NewReader(reader)
+	var (
+		buf      strings.Builder
+		overflow bool
+	)
+	emit := func(forceTruncated bool) {
+		if buf.Len() == 0 {
+			overflow = false
+			return
+		}
+		line := strings.TrimSpace(buf.String())
+		buf.Reset()
+		if line == "" {
+			overflow = false
+			return
+		}
+		if forceTruncated || overflow {
+			line = truncateWithEllipsis(line, min(maxLineBytes, 4096))
+		}
+		overflow = false
+		handle(line)
+	}
+
+	for {
+		fragment, isPrefix, err := rd.ReadLine()
+		if len(fragment) > 0 {
+			if buf.Len()+len(fragment) > maxLineBytes {
+				remaining := max(0, maxLineBytes-buf.Len())
+				if remaining > 0 {
+					buf.Write(fragment[:remaining])
+				}
+				overflow = true
+			} else if !overflow {
+				buf.Write(fragment)
+			}
+		}
+		if !isPrefix {
+			emit(false)
+		}
+		if err != nil {
+			if err == io.EOF {
+				emit(true)
+				return nil
+			}
+			return err
+		}
 	}
 }
 

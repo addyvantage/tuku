@@ -26,6 +26,8 @@ const (
 	shellExitConfirmWindow      = 2 * time.Second
 	shellOverlayVisibleItems    = 6
 	shellTailViewportBlocks     = 2
+	shellLiveRenderLineLimit    = 1200
+	shellInspectRenderLineLimit = 2200
 )
 
 type shellOverlayKind int
@@ -267,6 +269,7 @@ type shellModel struct {
 	startupConversationBaseline int
 	lastViewportWidth           int
 	lastViewportHeight          int
+	windowFocused               bool
 }
 
 func newShellModel(ctx context.Context, app *App, snapshot Snapshot, ui UIState, host WorkerHost) *shellModel {
@@ -312,6 +315,7 @@ func newShellModel(ctx context.Context, app *App, snapshot Snapshot, ui UIState,
 		lastHost:                    host.Status(),
 		followLatest:                true,
 		startupConversationBaseline: len(visibleConversationItems(snapshot)),
+		windowFocused:               true,
 	}
 }
 
@@ -323,6 +327,8 @@ func (m *shellModel) Init() tea.Cmd {
 		shellSnapshotTickCmd(m.app.refreshEvery()),
 		shellRegistryTickCmd(),
 		shellTranscriptTickCmd(),
+		func() tea.Msg { return tea.EnableReportFocus() },
+		func() tea.Msg { return tea.EnableMouseCellMotion() },
 	}
 	if cmd := m.ensureSpinnerTick(); cmd != nil {
 		cmds = append(cmds, cmd)
@@ -336,6 +342,13 @@ func (m *shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.resize()
+		return m, nil
+	case tea.FocusMsg:
+		m.windowFocused = true
+		m.reflowLayout(false)
+		return m, shellFocusRecoveryCmd()
+	case tea.BlurMsg:
+		m.windowFocused = false
 		return m, nil
 	case tea.MouseMsg:
 		return m.updateMouse(msg)
@@ -1048,6 +1061,7 @@ func (m shellModel) feedEntries(width int) []shellFeedEntry {
 		}
 		entries = append(entries, m.localEntries...)
 		lines := trimCommittedHostLines(curateWorkerLines(shellRenderableHistoryLines(m.host, max(10, width-4)), shellPromptBodies(entries)), m.archivedHostLines)
+		lines = clampLiveWorkerRenderLines(lines, m.followLatest)
 		if len(lines) > 0 && hasMeaningfulWorkerLines(lines) {
 			entries = append(entries, shellFeedEntry{
 				Key:          "host-stream",
@@ -2015,19 +2029,41 @@ func renderWorkerEntryLines(styles shellStyles, lines []string, width int) []str
 	shaped := shapeWorkerTranscriptLines(lines)
 	out := make([]string, 0, len(shaped)+4)
 	previousKind := workerRenderedBlank
+	previousActionGroup := ""
 	for _, line := range shaped {
 		if line.Kind == workerRenderedBlank {
 			if len(out) > 0 && out[len(out)-1] != "" {
 				out = append(out, "")
 			}
 			previousKind = workerRenderedBlank
+			previousActionGroup = ""
 			continue
 		}
-		if workerNeedsBreathingRoom(previousKind, line.Kind, len(out)) && out[len(out)-1] != "" {
+		currentActionGroup := ""
+		if line.Kind == workerRenderedAction {
+			verb, _ := splitWorkerAction(line.Text)
+			currentActionGroup = canonicalWorkerActionGroup(verb)
+		} else if line.Kind == workerRenderedDetail || line.Kind == workerRenderedBullet {
+			currentActionGroup = previousActionGroup
+		}
+		if workerNeedsSectionDivider(previousKind, line.Kind, previousActionGroup, currentActionGroup, len(out)) {
+			if len(out) > 0 && out[len(out)-1] != "" {
+				out = append(out, "")
+			}
+			out = append(out, workerSectionDivider(styles, width), "")
+		} else if workerNeedsBreathingRoom(previousKind, line.Kind, len(out)) && out[len(out)-1] != "" {
 			out = append(out, "")
 		}
 		out = append(out, renderWorkerLine(styles, line, width)...)
 		previousKind = line.Kind
+		switch line.Kind {
+		case workerRenderedAction:
+			previousActionGroup = currentActionGroup
+		case workerRenderedDetail, workerRenderedBullet:
+			// Keep the parent action grouping while rendering nested lines.
+		default:
+			previousActionGroup = ""
+		}
 	}
 	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
 		out = out[:len(out)-1]
@@ -2134,31 +2170,79 @@ func workerNeedsBreathingRoom(previous workerRenderedLineKind, current workerRen
 	return false
 }
 
+func workerNeedsSectionDivider(previous workerRenderedLineKind, current workerRenderedLineKind, previousActionGroup string, currentActionGroup string, renderedCount int) bool {
+	if renderedCount == 0 {
+		return false
+	}
+	if previous == workerRenderedBlank || current == workerRenderedBlank {
+		return false
+	}
+	if current == workerRenderedHeader || previous == workerRenderedHeader {
+		return true
+	}
+	if previousActionGroup != "" && currentActionGroup != "" && previousActionGroup != currentActionGroup {
+		return true
+	}
+	if previousActionGroup != "" && (current == workerRenderedParagraph || current == workerRenderedHeader) {
+		return true
+	}
+	if previous == workerRenderedParagraph && currentActionGroup != "" {
+		return true
+	}
+	return false
+}
+
+func workerSectionDivider(styles shellStyles, width int) string {
+	ruleWidth := min(max(18, width), 72)
+	return styles.feedWorkerMeta.Render(strings.Repeat("─", ruleWidth))
+}
+
+func canonicalWorkerActionGroup(verb string) string {
+	normalized := strings.ToLower(strings.TrimSpace(strings.TrimRight(verb, ":")))
+	switch normalized {
+	case "explored", "read", "opened", "searched", "inspected", "checked":
+		return "explore"
+	case "ran", "executed", "waited", "validated", "verified":
+		return "run"
+	case "edited", "updated", "wrote", "created", "patched":
+		return "edit"
+	default:
+		return normalized
+	}
+}
+
 func splitWorkerAction(line string) (string, string) {
 	parts := strings.Fields(line)
 	if len(parts) == 0 {
 		return "", ""
 	}
-	verb := parts[0]
+	verb := strings.TrimRight(parts[0], ":")
 	if len(parts) == 1 {
 		return verb, ""
 	}
-	return verb, strings.TrimSpace(strings.TrimPrefix(line, verb))
+	rest := strings.TrimSpace(strings.TrimPrefix(line, parts[0]))
+	return verb, rest
 }
 
 func isActionTranscriptLine(line string) bool {
+	line = strings.ToLower(strings.TrimSpace(line))
 	for _, prefix := range []string{
-		"Explored ",
-		"Read ",
-		"Opened ",
-		"Ran ",
-		"Waited ",
-		"Edited ",
-		"Updated ",
-		"Wrote ",
-		"Searched ",
-		"Checked ",
-		"Inspected ",
+		"explored ",
+		"read ",
+		"opened ",
+		"ran ",
+		"waited ",
+		"edited ",
+		"updated ",
+		"wrote ",
+		"searched ",
+		"checked ",
+		"inspected ",
+		"validated ",
+		"verified ",
+		"executed ",
+		"created ",
+		"patched ",
 	} {
 		if strings.HasPrefix(line, prefix) {
 			return true
@@ -2536,6 +2620,15 @@ func shellWorkingTickCmd() tea.Cmd {
 	return tea.Tick(shellWorkingTickInterval, func(time.Time) tea.Msg { return shellWorkingTickMsg{} })
 }
 
+func shellFocusRecoveryCmd() tea.Cmd {
+	return tea.Batch(
+		tea.ClearScreen,
+		tea.WindowSize(),
+		func() tea.Msg { return tea.EnableMouseCellMotion() },
+		func() tea.Msg { return tea.EnableReportFocus() },
+	)
+}
+
 func shellTranscriptTickCmd() tea.Cmd {
 	return tea.Tick(shellTranscriptTickInterval, func(time.Time) tea.Msg { return shellTranscriptTickMsg{} })
 }
@@ -2730,6 +2823,25 @@ func trimCommittedHostLines(lines []string, committed []string) []string {
 		return append([]string{}, lines...)
 	}
 	return append([]string{}, lines[prefix:]...)
+}
+
+func clampLiveWorkerRenderLines(lines []string, followLatest bool) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	limit := shellLiveRenderLineLimit
+	if !followLatest {
+		limit = shellInspectRenderLineLimit
+	}
+	if len(lines) <= limit {
+		return append([]string{}, lines...)
+	}
+	tail := append([]string{}, lines[len(lines)-limit:]...)
+	notice := fmt.Sprintf("Showing latest %d of %d live worker lines to keep the shell responsive. Use PgUp/Home plus /sessions or transcript history for older context.", limit, len(lines))
+	out := make([]string, 0, len(tail)+2)
+	out = append(out, notice, "")
+	out = append(out, tail...)
+	return out
 }
 
 func (m *shellModel) commitCurrentWorkerStream() {

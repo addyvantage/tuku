@@ -88,6 +88,44 @@ func TestPrimaryWorkerLauncherViewUsesWideTerminalWidthBeforeWrapping(t *testing
 	}
 }
 
+func TestPrimaryWorkerLauncherWideLayoutIsLeftAnchoredNotCentered(t *testing.T) {
+	model := newPrimaryWorkerLauncherModel(primaryWorkerSelectionContext{
+		Remembered: tukushell.WorkerPreferenceAuto,
+		Recommendation: provider.Recommendation{
+			Worker: provider.WorkerCodex,
+		},
+		Prerequisites: map[tukushell.WorkerPreference]tukushell.WorkerPrerequisite{
+			tukushell.WorkerPreferenceCodex: {State: tukushell.WorkerPrerequisiteReady, Ready: true},
+		},
+	})
+	model.width = 132
+
+	lines := strings.Split(stripANSIEscapeCodes(model.View()), "\n")
+	titleLine := ""
+	for _, line := range lines {
+		if strings.Contains(line, "Choose a worker for this session") {
+			titleLine = line
+			break
+		}
+	}
+	if titleLine == "" {
+		t.Fatalf("expected launcher title line in rendered picker, got %q", strings.Join(lines, "\n"))
+	}
+	if got := leadingSpaces(titleLine); got > 3 {
+		t.Fatalf("expected wide launcher to remain left-anchored, got %d leading spaces on %q", got, titleLine)
+	}
+}
+
+func TestPrimaryWorkerSurfaceLayoutForWidthUsesWideContentWithoutCentering(t *testing.T) {
+	layout := primaryWorkerSurfaceLayoutForWidth(132)
+	if layout.leftPad > 3 {
+		t.Fatalf("expected left-anchored padding for wide picker, got %+v", layout)
+	}
+	if layout.contentWidth < 100 {
+		t.Fatalf("expected wide picker content width to use terminal space, got %+v", layout)
+	}
+}
+
 func TestPrimaryWorkerLauncherViewWrapsDetailLinesWithStableIndent(t *testing.T) {
 	model := newPrimaryWorkerLauncherModel(primaryWorkerSelectionContext{
 		Remembered: tukushell.WorkerPreferenceAuto,
@@ -205,6 +243,17 @@ func longestRenderedLine(value string) int {
 
 func renderedWidth(value string) int {
 	return len([]rune(value))
+}
+
+func leadingSpaces(value string) int {
+	count := 0
+	for _, r := range value {
+		if r != ' ' {
+			break
+		}
+		count++
+	}
+	return count
 }
 
 func TestRunPrimaryWorkerSetupActionUsesInstallCommand(t *testing.T) {
