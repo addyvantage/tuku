@@ -114,6 +114,7 @@ type shellSurfaceLayout struct {
 	headerHeight   int
 	footerHeight   int
 	composerHeight int
+	workingHeight  int
 	overlayHeight  int
 	viewportHeight int
 	contentWidth   int
@@ -352,17 +353,11 @@ func (m *shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		m.spinnerRunning = true
-		if m.shouldRefreshTransientViewport() {
-			m.syncViewport(false)
-		}
 		return m, cmd
 	case shellWorkingTickMsg:
 		cmds := []tea.Cmd{shellWorkingTickCmd()}
 		if cmd := m.ensureSpinnerTick(); cmd != nil {
 			cmds = append(cmds, cmd)
-		}
-		if (m.ui.WorkerPromptPending || m.ui.PrimaryActionInFlight != nil) && m.shouldRefreshTransientViewport() {
-			m.syncViewport(false)
 		}
 		return m, tea.Batch(cmds...)
 	case shellSnapshotTickMsg:
@@ -795,10 +790,14 @@ func (m *shellModel) View() string {
 
 	header := m.renderHeader(styles, layout)
 	feed := m.renderViewport(layout)
+	working := m.renderWorkingBar(styles, layout)
 	composer := m.renderComposer(styles, layout)
 	footer := m.renderFooter(styles, layout)
 
 	sections := []string{header, feed, composer}
+	if working != "" {
+		sections = []string{header, feed, working, composer}
+	}
 	if m.overlayKind != shellOverlayNone {
 		sections = append(sections, m.renderOverlay(styles, layout))
 	}
@@ -872,13 +871,14 @@ func (m *shellModel) layout() shellSurfaceLayout {
 			contentWidth-6),
 	}
 	layout.composerHeight = max(composerHeight, m.composerBlockHeight(layout))
+	layout.workingHeight = m.workingBlockHeight(layout)
 	layout.footerHeight = m.footerBlockHeight(layout)
 	if m.overlayKind != shellOverlayNone {
 		styles := newShellStyles()
 		layout.overlayHeight = len(splitLines(m.renderOverlay(styles, layout)))
 	}
 
-	viewportHeight := height - layout.headerHeight - layout.footerHeight - layout.composerHeight - layout.overlayHeight
+	viewportHeight := height - layout.headerHeight - layout.footerHeight - layout.composerHeight - layout.workingHeight - layout.overlayHeight
 	if viewportHeight < 1 {
 		viewportHeight = 1
 	}
@@ -936,6 +936,14 @@ func (m *shellModel) syncViewport(forceBottom bool) {
 
 func (m shellModel) renderViewport(layout shellSurfaceLayout) string {
 	return indentBlock(m.viewport.View(), layout.padding)
+}
+
+func (m shellModel) renderWorkingBar(styles shellStyles, layout shellSurfaceLayout) string {
+	entry := m.workingStateEntry()
+	if entry == nil {
+		return ""
+	}
+	return indentBlock(renderWorkingEntry(styles, *entry, layout.contentWidth, m.spinner.View()), layout.padding)
 }
 
 func (m shellModel) renderFeedContent(width int) string {
@@ -1016,7 +1024,7 @@ func (m shellModel) feedEntries(width int) []shellFeedEntry {
 	hostMode := m.host.Status().Mode
 
 	if hostMode == HostModeTranscript {
-		lines := curateWorkerLines(shellHistoryLines(m.host, max(10, width-4)), shellPromptBodies(entries))
+		lines := curateWorkerLines(shellRenderableHistoryLines(m.host, max(10, width-4)), shellPromptBodies(entries))
 		if !hasMeaningfulWorkerLines(lines) {
 			entries = append(entries, shellIntroEntry(m.snapshot, m.host))
 		} else {
@@ -1039,7 +1047,7 @@ func (m shellModel) feedEntries(width int) []shellFeedEntry {
 			entries = append(entries, shellIntroEntry(m.snapshot, m.host))
 		}
 		entries = append(entries, m.localEntries...)
-		lines := trimCommittedHostLines(curateWorkerLines(shellHistoryLines(m.host, max(10, width-4)), shellPromptBodies(entries)), m.archivedHostLines)
+		lines := trimCommittedHostLines(curateWorkerLines(shellRenderableHistoryLines(m.host, max(10, width-4)), shellPromptBodies(entries)), m.archivedHostLines)
 		if len(lines) > 0 && hasMeaningfulWorkerLines(lines) {
 			entries = append(entries, shellFeedEntry{
 				Key:          "host-stream",
@@ -1048,9 +1056,6 @@ func (m shellModel) feedEntries(width int) []shellFeedEntry {
 				Body:         lines,
 				Preformatted: true,
 			})
-		}
-		if working := m.workingStateEntry(); working != nil {
-			entries = append(entries, *working)
 		}
 	}
 
@@ -1149,6 +1154,15 @@ func (m shellModel) composerBlockHeight(layout shellSurfaceLayout) int {
 	baseLines := 2 + len(m.composerHintLines(layout))
 	frameHeight := newShellStyles().composerBox.GetVerticalFrameSize()
 	return baseLines + frameHeight
+}
+
+func (m shellModel) workingBlockHeight(layout shellSurfaceLayout) int {
+	entry := m.workingStateEntry()
+	if entry == nil {
+		return 0
+	}
+	block := renderWorkingEntry(newShellStyles(), *entry, layout.contentWidth, "•")
+	return max(1, len(splitLines(block)))
 }
 
 func (m shellModel) footerBlockHeight(layout shellSurfaceLayout) int {
@@ -2664,13 +2678,6 @@ func (m *shellModel) spinnerActive() bool {
 	return m.ui.WorkerPromptPending || m.ui.PrimaryActionInFlight != nil
 }
 
-func (m *shellModel) shouldRefreshTransientViewport() bool {
-	if m.followLatest || m.viewport.AtBottom() {
-		return true
-	}
-	return m.viewport.TotalLineCount() <= m.viewport.Height
-}
-
 func (m *shellModel) workerTurnAuthoritative() bool {
 	host, ok := m.host.(authoritativeWorkerTurnHost)
 	return ok && host.WorkerTurnActive()
@@ -2729,7 +2736,7 @@ func (m *shellModel) commitCurrentWorkerStream() {
 	if m.host == nil || m.host.Status().Mode == HostModeTranscript {
 		return
 	}
-	lines := curateWorkerLines(shellHistoryLines(m.host, max(10, m.layout().contentWidth-4)), shellPromptBodies(m.basePromptEntries()))
+	lines := curateWorkerLines(shellRenderableHistoryLines(m.host, max(10, m.layout().contentWidth-4)), shellPromptBodies(m.basePromptEntries()))
 	if len(lines) == 0 {
 		m.archivedHostLines = nil
 		return

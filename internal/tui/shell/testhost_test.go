@@ -15,6 +15,7 @@ type stubHost struct {
 	status       HostStatus
 	writes       [][]byte
 	resizes      [][2]int
+	historyCalls int
 	snapshotSeen Snapshot
 }
 
@@ -95,6 +96,7 @@ func (h *stubHost) Lines(_ int, _ int) []string {
 }
 
 func (h *stubHost) HistoryLines(_ int) []string {
+	h.historyCalls++
 	if len(h.historyLines) > 0 {
 		return append([]string{}, h.historyLines...)
 	}

@@ -287,10 +287,15 @@ func (h *ClaudePTYHost) Lines(height int, width int) []string {
 	return fitBottom(lines, height)
 }
 
+func (h *ClaudePTYHost) RawHistoryLines() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.rawHistoryLinesLocked()
+}
+
 func (h *ClaudePTYHost) HistoryLines(width int) []string {
 	h.mu.Lock()
-	lines := append([]string{}, h.lines...)
-	partial := h.partial
+	lines := h.rawHistoryLinesLocked()
 	state := h.status.State
 	note := h.status.Note
 	lastOutputAt := h.status.LastOutputAt
@@ -308,11 +313,6 @@ func (h *ClaudePTYHost) HistoryLines(width int) []string {
 		StateChangedAt: stateChangedAt,
 	}
 
-	_ = partial
-	partialLine := sanitizeRenderedLine(partial)
-	if len(lines) > 0 && partialLine != "" && !isLikelyCursorNoiseLine(partialLine) && !isLikelyFrameNoiseLine(partialLine) {
-		lines = append(lines, partialLine)
-	}
 	if len(lines) == 0 {
 		switch state {
 		case HostStateStarting:
@@ -332,6 +332,15 @@ func (h *ClaudePTYHost) HistoryLines(width int) []string {
 		wrapped = append(wrapped, wrapOutputLine(line, width)...)
 	}
 	return wrapped
+}
+
+func (h *ClaudePTYHost) rawHistoryLinesLocked() []string {
+	lines := append([]string{}, h.lines...)
+	partialLine := sanitizeRenderedLine(h.partial)
+	if len(lines) > 0 && partialLine != "" && !isLikelyCursorNoiseLine(partialLine) && !isLikelyFrameNoiseLine(partialLine) {
+		lines = append(lines, partialLine)
+	}
+	return lines
 }
 
 func (h *ClaudePTYHost) ActivityLines(limit int) []string {

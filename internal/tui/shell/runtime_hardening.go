@@ -18,6 +18,10 @@ type shellHistoryProvider interface {
 	HistoryLines(width int) []string
 }
 
+type shellRawHistoryProvider interface {
+	RawHistoryLines() []string
+}
+
 type workerTurnAssessment struct {
 	StatusLabel string
 	Hint        string
@@ -37,6 +41,18 @@ func shellHistoryLines(host WorkerHost, width int) []string {
 		return history.HistoryLines(width)
 	}
 	return host.Lines(shellFeedFallbackLineLimit, width)
+}
+
+func shellRenderableHistoryLines(host WorkerHost, width int) []string {
+	if host == nil {
+		return nil
+	}
+	if raw, ok := host.(shellRawHistoryProvider); ok {
+		if lines := raw.RawHistoryLines(); len(lines) > 0 {
+			return lines
+		}
+	}
+	return shellHistoryLines(host, width)
 }
 
 func assessWorkerTurn(status HostStatus, ui UIState, canInterrupt bool, authoritative bool, now time.Time) workerTurnAssessment {

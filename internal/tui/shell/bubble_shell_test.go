@@ -80,6 +80,10 @@ func (e *testPrimaryActionExecutor) Execute(_ string, snapshot Snapshot) (Primar
 	return outcome, nil
 }
 
+func renderWorkingView(model *shellModel) string {
+	return model.renderWorkingBar(newShellStyles(), model.layout())
+}
+
 func TestRenderPreviewShowsHeaderFeedComposerAndFooter(t *testing.T) {
 	host := &stubHost{
 		canInput: true,
@@ -1197,7 +1201,7 @@ func TestShellModelWorkingStateLineShowsElapsedSecondsAndInterruptHint(t *testin
 	model.height = 24
 	model.resize()
 
-	rendered := model.renderFeedContent(100)
+	rendered := renderWorkingView(model)
 	if !strings.Contains(rendered, "Working (5s") {
 		t.Fatalf("expected elapsed working indicator, got %q", rendered)
 	}
@@ -1326,12 +1330,12 @@ func TestShellModelWorkingTickRefreshesTimerWithoutHostOutput(t *testing.T) {
 	model.width = 100
 	model.height = 24
 	model.resize()
-	before := model.renderFeedContent(100)
+	before := renderWorkingView(model)
 
 	model.ui.LastWorkerPromptAt = time.Now().UTC().Add(-6 * time.Second)
 	updated, _ := model.Update(shellWorkingTickMsg{})
 	model = updated.(*shellModel)
-	after := model.renderFeedContent(100)
+	after := renderWorkingView(model)
 
 	if before == after {
 		t.Fatalf("expected working tick to update the rendered timer, before=%q after=%q", before, after)
@@ -1354,20 +1358,69 @@ func TestShellModelWorkingSpinnerTicksIndependentlyOfTranscriptArrival(t *testin
 	model.width = 100
 	model.height = 24
 	model.resize()
-
-	before := model.renderFeedContent(100)
+	host.historyCalls = 0
+	beforeFeed := model.renderFeedContent(100)
+	baselineCalls := host.historyCalls
+	beforeWorking := renderWorkingView(model)
 	updated, cmd := model.Update(model.spinner.Tick())
 	model = updated.(*shellModel)
-	after := model.renderFeedContent(100)
+	afterUpdateCalls := host.historyCalls
+	afterFeed := model.renderFeedContent(100)
+	afterWorking := renderWorkingView(model)
 
 	if cmd == nil {
 		t.Fatal("expected spinner update to schedule the next animation tick")
 	}
-	if before == after {
-		t.Fatalf("expected spinner frame to advance without transcript changes, before=%q after=%q", before, after)
+	if beforeFeed != afterFeed {
+		t.Fatalf("expected spinner animation not to rebuild transcript content, before=%q after=%q", beforeFeed, afterFeed)
 	}
-	if !strings.Contains(after, "Working (5s") {
-		t.Fatalf("expected spinner tick to preserve the working row content, got %q", after)
+	if beforeWorking == afterWorking {
+		t.Fatalf("expected spinner frame to advance in the dedicated working row, before=%q after=%q", beforeWorking, afterWorking)
+	}
+	if afterUpdateCalls != baselineCalls {
+		t.Fatalf("expected spinner tick to avoid transcript history rebuilds, baseline=%d after=%d", baselineCalls, afterUpdateCalls)
+	}
+	if !strings.Contains(afterWorking, "Working (5s") {
+		t.Fatalf("expected spinner tick to preserve the working row content, got %q", afterWorking)
+	}
+}
+
+func TestShellModelWorkingTickUpdatesStatusWithoutRebuildingTranscriptHistory(t *testing.T) {
+	history := make([]string, 0, 2000)
+	for i := 0; i < 2000; i++ {
+		history = append(history, fmt.Sprintf("stress line %04d", i))
+	}
+	host := &stubHost{
+		worker:       "codex",
+		historyLines: history,
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true, RenderVersion: 1},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_working_tick_cached"}, UIState{
+		Session:             newSessionState(time.Now().UTC()),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  time.Now().UTC().Add(-8 * time.Second),
+	}, host)
+	model.width = 100
+	model.height = 22
+	model.resize()
+
+	host.historyCalls = 0
+	beforeFeed := model.renderFeedContent(100)
+	baselineCalls := host.historyCalls
+	model.ui.LastWorkerPromptAt = time.Now().UTC().Add(-9 * time.Second)
+	updated, _ := model.Update(shellWorkingTickMsg{})
+	model = updated.(*shellModel)
+	afterUpdateCalls := host.historyCalls
+	afterFeed := model.renderFeedContent(100)
+
+	if afterUpdateCalls != baselineCalls {
+		t.Fatalf("expected working tick to avoid transcript history rebuilds, baseline=%d after=%d", baselineCalls, afterUpdateCalls)
+	}
+	if beforeFeed != afterFeed {
+		t.Fatalf("expected working tick to leave transcript content unchanged, before=%q after=%q", beforeFeed, afterFeed)
+	}
+	if !strings.Contains(renderWorkingView(model), "Working (9s") {
+		t.Fatalf("expected working tick to update the dedicated working bar, got %q", renderWorkingView(model))
 	}
 }
 
@@ -1397,8 +1450,36 @@ func TestShellModelWorkingSpinnerStopsWhenWorkSettles(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected spinner loop to stop once the worker turn settles")
 	}
-	if strings.Contains(model.renderFeedContent(100), "Working (") {
-		t.Fatalf("expected no active working row after the worker settles, got %q", model.renderFeedContent(100))
+	if strings.Contains(renderWorkingView(model), "Working (") {
+		t.Fatalf("expected no active working row after the worker settles, got %q", renderWorkingView(model))
+	}
+}
+
+func TestShellModelHostRefreshStillRebuildsTranscriptWhenWorkerOutputChanges(t *testing.T) {
+	host := &stubHost{
+		worker:       "codex",
+		historyLines: []string{"initial output"},
+		status:       HostStatus{Mode: HostModeCodexPTY, State: HostStateLive, Label: "codex live", InputLive: true, RenderVersion: 1},
+	}
+	model := newShellModel(context.Background(), &App{}, Snapshot{TaskID: "tsk_host_refresh"}, UIState{
+		Session:             newSessionState(time.Now().UTC()),
+		WorkerPromptPending: true,
+		LastWorkerPromptAt:  time.Now().UTC().Add(-4 * time.Second),
+	}, host)
+	model.width = 100
+	model.height = 22
+	model.resize()
+
+	host.historyCalls = 0
+	host.historyLines = append(host.historyLines, "next output arrived")
+	host.status.RenderVersion++
+	model.pollHost()
+
+	if host.historyCalls == 0 {
+		t.Fatal("expected host poll to rebuild transcript history when worker output changes")
+	}
+	if !strings.Contains(model.renderFeedContent(100), "next output arrived") {
+		t.Fatalf("expected fresh worker output in transcript after host refresh, got %q", model.renderFeedContent(100))
 	}
 }
 
@@ -1417,8 +1498,8 @@ func TestShellModelWorkingStateTracksLiveOutputAndClearsWhenSettled(t *testing.T
 	model.height = 24
 	model.resize()
 
-	if !strings.Contains(model.renderFeedContent(100), "Working (3s") {
-		t.Fatalf("expected pending worker indicator before output, got %q", model.renderFeedContent(100))
+	if !strings.Contains(renderWorkingView(model), "Working (3s") {
+		t.Fatalf("expected pending worker indicator before output, got %q", renderWorkingView(model))
 	}
 
 	host.lines = []string{"Explored README.md", "  Read README.md", "Answer ready."}
@@ -1429,8 +1510,8 @@ func TestShellModelWorkingStateTracksLiveOutputAndClearsWhenSettled(t *testing.T
 	if !strings.Contains(rendered, "• Explored README.md") || !strings.Contains(rendered, "└ Read README.md") {
 		t.Fatalf("expected committed worker output to be grouped cleanly, got %q", rendered)
 	}
-	if !strings.Contains(rendered, "Working (") {
-		t.Fatalf("expected working indicator to remain while live output is still active, got %q", rendered)
+	if !strings.Contains(renderWorkingView(model), "Working (") {
+		t.Fatalf("expected working indicator to remain while live output is still active, got %q", renderWorkingView(model))
 	}
 
 	model.ui.LastWorkerPromptAt = time.Now().UTC().Add(-shellWorkerSettleGrace - time.Second)
@@ -1438,8 +1519,8 @@ func TestShellModelWorkingStateTracksLiveOutputAndClearsWhenSettled(t *testing.T
 	model.pollHost()
 
 	rendered = model.renderFeedContent(100)
-	if strings.Contains(rendered, "Working (") {
-		t.Fatalf("expected working indicator to clear after the worker stream settles, got %q", rendered)
+	if strings.Contains(renderWorkingView(model), "Working (") {
+		t.Fatalf("expected working indicator to clear after the worker stream settles, got feed=%q working=%q", rendered, renderWorkingView(model))
 	}
 }
 
@@ -1463,7 +1544,7 @@ func TestShellModelWorkingRowStaysBelowNewestVisibleWorkerContent(t *testing.T) 
 	model.height = 28
 	model.resize()
 
-	rendered := model.renderFeedContent(110)
+	rendered := model.View()
 	actionIdx := strings.Index(rendered, "• Explored internal/tui/shell/bubble_shell.go")
 	workingIdx := strings.Index(rendered, "Working (")
 	if actionIdx == -1 || workingIdx == -1 {
@@ -1498,9 +1579,9 @@ func TestShellModelEscInterruptsRunningWorkerWhenSupported(t *testing.T) {
 	if !model.ui.WorkerInterruptRequested {
 		t.Fatal("expected shell state to record that interrupt was requested")
 	}
-	rendered := model.renderFeedContent(100)
+	rendered := renderWorkingView(model)
 	if !strings.Contains(rendered, "interrupt sent") {
-		t.Fatalf("expected conservative interrupt note in transcript, got %q", rendered)
+		t.Fatalf("expected conservative interrupt state in working row, got %q", rendered)
 	}
 }
 
